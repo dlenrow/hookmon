@@ -21,6 +21,7 @@ import (
 )
 
 // bpfSyscallEvent mirrors the C struct hook_event in bpf_syscall.c.
+// The C struct uses __attribute__((packed)) to match Go's binary.Read layout.
 type bpfSyscallEvent struct {
 	EventType  uint32
 	PID        uint32
@@ -130,8 +131,10 @@ func (s *BPFSyscallSensor) readLoop() {
 
 		// Compute BPF bytecode hash if we have the instructions pointer
 		progHash := ""
-		if raw.InsnsPtr != 0 && raw.InsnCount > 0 && raw.BPFCmd == 5 { // BPF_PROG_LOAD
-			progHash = computeProgHash(raw.PID, raw.InsnsPtr, raw.InsnCount)
+		if raw.BPFCmd == 5 { // BPF_PROG_LOAD
+			if raw.InsnsPtr != 0 && raw.InsnCount > 0 {
+				progHash = computeProgHash(raw.PID, raw.InsnsPtr, raw.InsnCount)
+			}
 		}
 
 		hookEvt := &event.HookEvent{
@@ -179,22 +182,32 @@ func computeProgHash(pid uint32, insnsPtr uint64, insnCount uint32) string {
 	const bpfInsnSize = 8
 	size := int64(insnCount) * bpfInsnSize
 	if size <= 0 || size > 1<<20 { // sanity: cap at 1MB
+		fmt.Fprintf(os.Stderr, "computeProgHash: bad size %d (insn_count=%d)\n", size, insnCount)
 		return ""
 	}
 
 	memPath := fmt.Sprintf("/proc/%d/mem", pid)
 	f, err := os.Open(memPath)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "computeProgHash: open %s: %v\n", memPath, err)
 		return ""
 	}
 	defer f.Close()
 
-	h := sha256.New()
-	_, err = io.CopyN(h, io.NewSectionReader(f, int64(insnsPtr), size), size)
+	buf := make([]byte, size)
+	n, err := f.ReadAt(buf, int64(insnsPtr))
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "computeProgHash: readat offset=0x%x size=%d: %v (read %d bytes)\n",
+			insnsPtr, size, err, n)
 		return ""
 	}
-	return fmt.Sprintf("sha256:%x", h.Sum(nil))
+
+	h := sha256.New()
+	h.Write(buf[:n])
+	hash := fmt.Sprintf("sha256:%x", h.Sum(nil))
+	fmt.Fprintf(os.Stderr, "computeProgHash: pid=%d insns=0x%x count=%d hash=%s\n",
+		pid, insnsPtr, insnCount, hash)
+	return hash
 }
 
 // bpfSyscallBPF is provided via go:embed in embed.go

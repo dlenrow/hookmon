@@ -33,7 +33,7 @@ struct hook_event {
     u32 attach_type;
     u32 insn_count;
     u64 insns_ptr;   // userspace pointer to BPF instructions (for hash computation)
-};
+} __attribute__((packed));
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
