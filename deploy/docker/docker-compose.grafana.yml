@@ -3,8 +3,7 @@ version: "3.8"
 services:
   loki:
     image: grafana/loki:3.0.0
-    ports:
-      - "3100:3100"
+    network_mode: host
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - loki-data:/loki
@@ -12,19 +11,15 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.53.0
-    ports:
-      - "9091:9090"
+    network_mode: host
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:11.1.0
-    ports:
-      - "3000:3000"
+    network_mode: host
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=hookmon
