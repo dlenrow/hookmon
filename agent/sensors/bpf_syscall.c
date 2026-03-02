@@ -91,4 +91,4 @@ int trace_bpf_enter(struct trace_event_raw_sys_enter *ctx)
     return 0;
 }
 
-char LICENSE[] SEC("license") = "Apache-2.0";
+char LICENSE[] SEC("license") = "Dual BSD/GPL";

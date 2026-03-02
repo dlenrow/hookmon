@@ -67,4 +67,4 @@ int trace_shm_open(struct pt_regs *ctx)
     return 0;
 }
 
-char LICENSE[] SEC("license") = "Apache-2.0";
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
