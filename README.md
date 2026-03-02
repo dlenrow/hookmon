@@ -62,59 +62,73 @@ Every detected event is enriched with full process context (pid, uid, cmdline, b
 
 ```
   Monitored Hosts                          HookMon Appliance
- ┌──────────────┐                        ┌──────────────────────┐
- │ hookmon-agent │──── mTLS gRPC ────▶  │ Ingestion Service    │
- │  4 eBPF       │                       │         │            │
- │  sensors      │                       │    Policy Engine     │
- └──────────────┘                        │    (allowlist eval)  │
- ┌──────────────┐                        │         │            │
- │ hookmon-agent │──── mTLS gRPC ────▶  │    PostgreSQL        │
- └──────────────┘                        │         │            │
- ┌──────────────┐                        │  ┌──────┴─────────┐  │
- │ hookmon-agent │──── mTLS gRPC ────▶  │  │  Dashboard     │  │
- └──────────────┘                        │  │  SIEM outputs  │  │
-       ...                               │  │  Alert queue   │  │
-                                         │  └────────────────┘  │
+ ┌──────────────────┐                    ┌──────────────────────┐
+ │ hookmon-agent     │── mTLS gRPC ──▶  │ Ingestion Service    │
+ │  4 eBPF sensors   │                   │         │            │
+ │  Prometheus :2112 │◀── scrape ──────│── Prometheus         │
+ │  Loki push ──────│── POST ────────▶│── Loki               │
+ └──────────────────┘                    │         │            │
+ ┌──────────────────┐                    │    Policy Engine     │
+ │ hookmon-agent     │── mTLS gRPC ──▶  │    (allowlist eval)  │
+ └──────────────────┘                    │         │            │
+       ...                               │    PostgreSQL        │
+                                         │    Grafana :3000     │
+                                         │    SIEM connectors   │
                                          └──────────────────────┘
 ```
 
-## Deployment
+The agent exposes Prometheus metrics and pushes structured logs to Loki. The appliance runs Grafana with a pre-built dashboard for real-time event visualization. See [docs/architecture.md](docs/architecture.md) for details.
 
-### Central Server (Virtual Appliance)
+## Quick Start
 
-Download the ISO/OVA/QCOW2 image, boot it, and run the first-boot wizard:
+### 1. Deploy the Grafana Stack (Appliance)
+
+On your appliance host (any Linux box with Docker):
 
 ```bash
-# First boot walks you through:
-# 1. Network configuration
-# 2. Admin credentials
-# 3. TLS certificate
-# 4. SIEM connector setup (optional)
-# 5. Agent enrollment token generation
+git clone https://github.com/dlenrow/hookmon.git
+cd hookmon
+docker compose -f deploy/docker/docker-compose.grafana.yml up -d
 ```
 
-### Agent Enrollment
+This starts Grafana (:3000), Loki (:3100), and Prometheus (:9090) with the HookMon dashboard pre-provisioned. Default login: `admin` / `hookmon`.
 
-On each monitored host:
+### 2. Build and Run the Agent
+
+On each monitored Linux host:
+
+```bash
+# Install build deps
+sudo apt install -y clang llvm libbpf-dev  # + Go 1.22+
+
+# Clone and build
+git clone https://github.com/dlenrow/hookmon.git
+cd hookmon/agent/sensors
+sudo bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+for f in *.c; do clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I. -c $f -o ${f%.c}.o; done
+cd ../..
+go build -o bin/hookmon-agent ./cmd/hookmon-agent/
+
+# Run with observability
+sudo bin/hookmon-agent --console \
+  --loki-url http://<appliance>:3100 \
+  --prometheus-port 2112
+```
+
+### 3. View the Dashboard
+
+Open `http://<appliance>:3000/d/hookmon-main/hookmon` in your browser.
+
+### Future: Virtual Appliance
+
+The appliance will ship as an ISO/OVA/QCOW2 with a first-boot wizard for network, TLS, SIEM connectors, and agent enrollment. Agents will enroll via:
 
 ```bash
 curl -sSL https://hookmon.internal:9443/enroll | \
   sudo bash -s -- --token <enrollment-token>
 ```
 
-This installs the agent package, establishes mTLS, and begins streaming events.
-
-### Agent Deployment at Scale
-
-For fleet deployment, use the provided Ansible role, or install the DEB/RPM package directly:
-
-```bash
-# Debian/Ubuntu
-sudo apt install ./hookmon-agent_1.0.0_amd64.deb
-
-# RHEL/CentOS
-sudo rpm -i hookmon-agent-1.0.0.x86_64.rpm
-```
+For fleet deployment, use the provided Ansible role or DEB/RPM packages.
 
 ## Allowlist Workflow
 
@@ -142,16 +156,25 @@ HookMon **complements** runtime security tools — it doesn't replace them.
 
 HookMon monitors the monitors. It provides the authorization and inventory layer that sits underneath the runtime security layer.
 
+## Documentation
+
+- [Architecture](docs/architecture.md) — system design, data flow, component overview
+- [Deployment Guide](docs/deployment-guide.md) — appliance setup, agent build, Grafana stack
+- [Theory of Operations](docs/theory-of-operations.md) — threat model, detection approach, allowlist strategy
+
 ## Building from Source
 
 ```bash
-# Prerequisites: Go 1.22+, clang/llvm, buf, Node.js 20+
-make generate      # eBPF codegen + protobuf codegen
-make build-all     # Agent, server, CLI, dashboard
-make test          # Run tests
+# Prerequisites: Go 1.22+, clang/llvm, libbpf-dev, Node.js 20+
+# On the monitored host (Linux with BTF-enabled kernel):
+cd agent/sensors
+sudo bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+for f in *.c; do clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I. -c $f -o ${f%.c}.o; done
+cd ../..
+go build -o bin/hookmon-agent ./cmd/hookmon-agent/
+go build -o bin/hookmon-server ./cmd/hookmon-server/
+go build -o bin/hookmon-cli ./cmd/hookmon-cli/
 ```
-
-See [CLAUDE.md](CLAUDE.md) for full project specification, architecture details, and development workflow.
 
 ## License
 
