@@ -1,0 +1,12 @@
+Package: hookmon-agent
+Version: VERSION_PLACEHOLDER
+Section: admin
+Priority: optional
+Architecture: amd64
+Maintainer: Dave Lenrow <drl@clevercraft.energy>
+Description: HookMon Agent - eBPF and LD_PRELOAD security monitor
+ HookMon agent monitors eBPF program loading, LD_PRELOAD injection,
+ shared memory creation, and dlopen() calls on Linux hosts.
+ Events are streamed to a central HookMon server for policy
+ evaluation and alerting.
+Depends: libc6

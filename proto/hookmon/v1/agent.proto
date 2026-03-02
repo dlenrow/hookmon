@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package hookmon.v1;
+
+option go_package = "github.com/dlenrow/hookmon/gen/hookmon/v1;hookmonv1";
+
+import "hookmon/v1/events.proto";
+import "google/protobuf/timestamp.proto";
+
+service AgentService {
+  // StreamEvents is a bidirectional stream for event delivery.
+  // Agent sends events; server sends acknowledgements.
+  rpc StreamEvents(stream AgentMessage) returns (stream ServerMessage);
+
+  // Enroll registers a new agent with the server.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+message AgentMessage {
+  oneof payload {
+    HookEvent event = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
+
+message ServerMessage {
+  oneof payload {
+    EventAck ack = 1;
+    PolicyUpdate policy_update = 2;
+  }
+}
+
+message Heartbeat {
+  string host_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string agent_version = 3;
+  uint64 events_sent = 4;
+  uint64 uptime_seconds = 5;
+}
+
+message EventAck {
+  string event_id = 1;
+  bool accepted = 2;
+}
+
+message PolicyUpdate {
+  repeated PolicyRule rules = 1;
+}
+
+message PolicyRule {
+  string id = 1;
+  string action = 2;
+  string exe_path = 3;
+  string exe_hash = 4;
+  string library_path = 5;
+  string prog_name = 6;
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;
+  string hostname = 2;
+  bytes csr = 3;
+  string os_info = 4;
+  string agent_version = 5;
+}
+
+message EnrollResponse {
+  string host_id = 1;
+  bytes signed_cert = 2;
+  bytes ca_cert = 3;
+}

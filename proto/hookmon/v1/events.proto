@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package hookmon.v1;
+
+option go_package = "github.com/dlenrow/hookmon/gen/hookmon/v1;hookmonv1";
+
+import "google/protobuf/timestamp.proto";
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_BPF_LOAD = 1;
+  EVENT_TYPE_BPF_ATTACH = 2;
+  EVENT_TYPE_LD_PRELOAD = 3;
+  EVENT_TYPE_SHM_CREATE = 4;
+  EVENT_TYPE_DLOPEN = 5;
+  EVENT_TYPE_AGENT_OFFLINE = 6;
+  EVENT_TYPE_AGENT_RECOVERED = 7;
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_INFO = 1;
+  SEVERITY_WARN = 2;
+  SEVERITY_ALERT = 3;
+  SEVERITY_CRITICAL = 4;
+}
+
+message HookEvent {
+  string id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string host_id = 3;
+  string hostname = 4;
+  EventType event_type = 5;
+  Severity severity = 6;
+
+  // Process context
+  uint32 pid = 10;
+  uint32 ppid = 11;
+  uint32 uid = 12;
+  uint32 gid = 13;
+  string comm = 14;
+  string cmdline = 15;
+  string exe_path = 16;
+  string exe_hash = 17;
+  string cgroup_path = 18;
+  string container_id = 19;
+  string namespace = 20;
+
+  // Type-specific payloads
+  BPFDetail bpf_detail = 30;
+  PreloadDetail preload_detail = 31;
+  SHMDetail shm_detail = 32;
+  DlopenDetail dlopen_detail = 33;
+}
+
+message BPFDetail {
+  uint32 bpf_cmd = 1;
+  uint32 prog_type = 2;
+  string prog_name = 3;
+  uint32 attach_type = 4;
+  int32 target_fd = 5;
+  uint32 insn_count = 6;
+  string prog_hash = 7;
+}
+
+message PreloadDetail {
+  string library_path = 1;
+  string library_hash = 2;
+  string target_binary = 3;
+  string set_by = 4;
+}
+
+message SHMDetail {
+  string shm_name = 1;
+  uint64 size = 2;
+  string pattern = 3;
+}
+
+message DlopenDetail {
+  string library_path = 1;
+  string library_hash = 2;
+  int32 flags = 3;
+}

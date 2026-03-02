@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package hookmon.v1;
+
+option go_package = "github.com/dlenrow/hookmon/gen/hookmon/v1;hookmonv1";
+
+import "google/protobuf/timestamp.proto";
+import "hookmon/v1/events.proto";
+
+message AllowlistEntry {
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  string created_by = 3;
+  string description = 4;
+
+  repeated EventType event_types = 10;
+  string exe_hash = 11;
+  string exe_path = 12;
+  string library_hash = 13;
+  string library_path = 14;
+  string prog_name = 15;
+  optional uint32 prog_type = 16;
+  string host_pattern = 17;
+  UIDRange uid_range = 18;
+  string container_image = 19;
+
+  string action = 20;
+  optional google.protobuf.Timestamp expires = 21;
+  bool enabled = 22;
+}
+
+message UIDRange {
+  uint32 min = 1;
+  uint32 max = 2;
+}
+
+message PolicyResult {
+  string action = 1;
+  string matched_entry_id = 2;
+  string reason = 3;
+}

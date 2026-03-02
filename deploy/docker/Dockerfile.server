@@ -1,0 +1,29 @@
+FROM golang:1.22-bookworm AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /hookmon-server ./cmd/hookmon-server
+
+FROM node:20-bookworm-slim AS dashboard
+WORKDIR /dashboard
+COPY dashboard/package.json dashboard/package-lock.json* ./
+RUN npm ci
+COPY dashboard/ .
+RUN npm run build
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /hookmon-server /usr/bin/hookmon-server
+COPY --from=dashboard /dashboard/dist /var/www/hookmon/dashboard
+
+EXPOSE 9443 8443
+
+ENTRYPOINT ["/usr/bin/hookmon-server"]
+CMD ["--grpc-addr", ":9443", "--http-addr", ":8443"]

@@ -1,0 +1,54 @@
+# Binaries
+bin/
+hookmon-agent
+hookmon-server
+hookmon-cli
+*.exe
+
+# Go
+vendor/
+*.test
+*.out
+coverage.txt
+
+# eBPF generated
+*_bpfel.go
+*_bpfeb.go
+*_bpfel.o
+*_bpfeb.o
+
+# Protobuf generated (kept in gen/ but ignore editor artifacts)
+*.pb.go.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dashboard
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.env.local
+
+# Appliance build
+appliance/output-*/
+*.ova
+*.qcow2
+*.vhd
+*.iso
+
+# Secrets
+*.pem
+*.key
+!test/fixtures/*.pem
+*.env
+.env.*
+
+# Logs
+*.log

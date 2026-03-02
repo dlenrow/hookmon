@@ -1,0 +1,77 @@
+---
+- name: Deploy HookMon Server
+  hosts: hookmon_server
+  become: true
+  vars:
+    hookmon_db_password: "hookmon_changeme"
+    hookmon_version: "latest"
+
+  tasks:
+    - name: Install system dependencies
+      apt:
+        name:
+          - postgresql-16
+          - nginx
+          - ca-certificates
+        state: present
+        update_cache: true
+
+    - name: Create hookmon system user
+      user:
+        name: hookmon
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Create directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: hookmon
+        group: hookmon
+        mode: "0750"
+      loop:
+        - /etc/hookmon
+        - /etc/hookmon/tls
+        - /var/log/hookmon
+        - /var/www/hookmon/dashboard
+
+    - name: Configure PostgreSQL
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: hookmon
+        owner: hookmon
+        state: present
+
+    - name: Copy hookmon-server binary
+      copy:
+        src: "{{ hookmon_server_binary }}"
+        dest: /usr/bin/hookmon-server
+        owner: root
+        group: root
+        mode: "0755"
+      notify: restart hookmon-server
+
+    - name: Deploy systemd unit
+      template:
+        src: hookmon-server.service.j2
+        dest: /etc/systemd/system/hookmon-server.service
+      notify:
+        - daemon-reload
+        - restart hookmon-server
+
+    - name: Enable hookmon-server
+      systemd:
+        name: hookmon-server
+        enabled: true
+        state: started
+
+  handlers:
+    - name: daemon-reload
+      systemd:
+        daemon_reload: true
+
+    - name: restart hookmon-server
+      systemd:
+        name: hookmon-server
+        state: restarted
