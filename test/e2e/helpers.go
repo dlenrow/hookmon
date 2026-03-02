@@ -22,9 +22,25 @@ type AgentProcess struct {
 	done   chan struct{}
 }
 
+func lokiURL() string {
+	return os.Getenv("HOOKMON_LOKI_URL")
+}
+
+func prometheusPort() string {
+	return os.Getenv("HOOKMON_PROMETHEUS_PORT")
+}
+
 // StartAgent launches hookmon-agent --console and captures its JSON output.
+// Set HOOKMON_LOKI_URL and HOOKMON_PROMETHEUS_PORT env vars to enable observability.
 func StartAgent(agentBin string) (*AgentProcess, error) {
-	cmd := exec.Command(agentBin, "--console")
+	args := []string{"--console"}
+	if u := lokiURL(); u != "" {
+		args = append(args, "--loki-url", u)
+	}
+	if p := prometheusPort(); p != "" {
+		args = append(args, "--prometheus-port", p)
+	}
+	cmd := exec.Command(agentBin, args...)
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
