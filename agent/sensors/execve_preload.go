@@ -63,11 +63,7 @@ func (s *ExecvePreloadSensor) Start() error {
 		return errors.New("BPF program 'trace_execve_enter' not found")
 	}
 
-	s.tp, err = link.AttachTracepoint(link.TracepointOptions{
-		Group:   "syscalls",
-		Name:    "sys_enter_execve",
-		Program: prog,
-	})
+	s.tp, err = link.Tracepoint("syscalls", "sys_enter_execve", prog, nil)
 	if err != nil {
 		return fmt.Errorf("attach tracepoint: %w", err)
 	}

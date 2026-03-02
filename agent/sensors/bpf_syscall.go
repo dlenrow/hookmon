@@ -71,11 +71,7 @@ func (s *BPFSyscallSensor) Start() error {
 		return errors.New("BPF program 'trace_bpf_enter' not found in collection")
 	}
 
-	s.tp, err = link.AttachTracepoint(link.TracepointOptions{
-		Group:   "syscalls",
-		Name:    "sys_enter_bpf",
-		Program: prog,
-	})
+	s.tp, err = link.Tracepoint("syscalls", "sys_enter_bpf", prog, nil)
 	if err != nil {
 		return fmt.Errorf("attach tracepoint: %w", err)
 	}

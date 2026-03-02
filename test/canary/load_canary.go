@@ -54,11 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	tp, err := link.AttachTracepoint(link.TracepointOptions{
-		Group:   tpGroup,
-		Name:    tpName,
-		Program: prog,
-	})
+	tp, err := link.Tracepoint(tpGroup, tpName, prog, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "attach tracepoint %s/%s: %v\n", tpGroup, tpName, err)
 		os.Exit(1)
