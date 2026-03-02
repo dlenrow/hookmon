@@ -30,6 +30,9 @@ type AgentConfig struct {
 
 	// LogLevel controls agent logging verbosity.
 	LogLevel string `yaml:"log_level"`
+
+	// ConsoleMode prints events to stdout as JSON instead of sending to server.
+	ConsoleMode bool `yaml:"-"`
 }
 
 // TLSConfig holds mTLS certificate paths.

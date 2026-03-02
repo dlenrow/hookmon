@@ -167,7 +167,7 @@ func (t *GRPCTransport) IsConnected() bool {
 }
 
 func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
-	return &hookmonv1.HookEvent{
+	pe := &hookmonv1.HookEvent{
 		ID:          evt.ID,
 		Timestamp:   evt.Timestamp,
 		HostID:      evt.HostID,
@@ -186,6 +186,45 @@ func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
 		ContainerID: evt.ContainerID,
 		Namespace:   evt.Namespace,
 	}
+
+	if evt.BPFDetail != nil {
+		pe.BPFDetail = &hookmonv1.BPFDetail{
+			BPFCommand: evt.BPFDetail.BPFCommand,
+			ProgType:   evt.BPFDetail.ProgType,
+			ProgName:   evt.BPFDetail.ProgName,
+			AttachType: evt.BPFDetail.AttachType,
+			TargetFD:   evt.BPFDetail.TargetFD,
+			InsnCount:  evt.BPFDetail.InsnCount,
+			ProgHash:   evt.BPFDetail.ProgHash,
+		}
+	}
+
+	if evt.PreloadDetail != nil {
+		pe.PreloadDetail = &hookmonv1.PreloadDetail{
+			LibraryPath:  evt.PreloadDetail.LibraryPath,
+			LibraryHash:  evt.PreloadDetail.LibraryHash,
+			TargetBinary: evt.PreloadDetail.TargetBinary,
+			SetBy:        evt.PreloadDetail.SetBy,
+		}
+	}
+
+	if evt.SHMDetail != nil {
+		pe.SHMDetail = &hookmonv1.SHMDetail{
+			SHMName: evt.SHMDetail.SHMName,
+			Size:    evt.SHMDetail.Size,
+			Pattern: evt.SHMDetail.Pattern,
+		}
+	}
+
+	if evt.DlopenDetail != nil {
+		pe.DlopenDetail = &hookmonv1.DlopenDetail{
+			LibraryPath: evt.DlopenDetail.LibraryPath,
+			LibraryHash: evt.DlopenDetail.LibraryHash,
+			Flags:       int32(evt.DlopenDetail.Flags),
+		}
+	}
+
+	return pe
 }
 
 func eventTypeToProto(et event.EventType) hookmonv1.EventType {

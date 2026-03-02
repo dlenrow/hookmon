@@ -18,7 +18,7 @@ import (
 type Agent struct {
 	cfg       *config.AgentConfig
 	logger    *zap.Logger
-	transport *transport.GRPCTransport
+	transport transport.Transport
 	sensors   []sensors.Sensor
 	hostname  string
 	cancel    context.CancelFunc
@@ -28,10 +28,18 @@ type Agent struct {
 // New creates a new Agent with the given configuration.
 func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 	hostname, _ := os.Hostname()
+
+	var t transport.Transport
+	if cfg.ConsoleMode {
+		t = transport.NewConsoleTransport()
+	} else {
+		t = transport.NewGRPCTransport(cfg, logger)
+	}
+
 	return &Agent{
 		cfg:       cfg,
 		logger:    logger,
-		transport: transport.NewGRPCTransport(cfg, logger),
+		transport: t,
 		hostname:  hostname,
 	}
 }
@@ -41,14 +49,18 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 func (a *Agent) Run(ctx context.Context) error {
 	ctx, a.cancel = context.WithCancel(ctx)
 
-	// Connect to server with retry
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
-		transport.RetryLoop(ctx, transport.DefaultRetryConfig(), a.logger, func(ctx context.Context) error {
-			return a.transport.Connect(ctx)
-		})
-	}()
+	if a.cfg.ConsoleMode {
+		a.logger.Info("running in console mode — events will print to stdout")
+	} else {
+		// Connect to server with retry
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			transport.RetryLoop(ctx, transport.DefaultRetryConfig(), a.logger, func(ctx context.Context) error {
+				return a.transport.Connect(ctx)
+			})
+		}()
+	}
 
 	// Start sensors
 	a.initSensors()
@@ -64,9 +76,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		go a.forwardEvents(ctx, s)
 	}
 
-	// Heartbeat loop
-	a.wg.Add(1)
-	go a.heartbeatLoop(ctx)
+	// Heartbeat loop (skip in console mode)
+	if !a.cfg.ConsoleMode {
+		a.wg.Add(1)
+		go a.heartbeatLoop(ctx)
+	}
 
 	<-ctx.Done()
 	a.logger.Info("agent shutting down")

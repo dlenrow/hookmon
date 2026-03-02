@@ -75,6 +75,16 @@ func Matches(entry *event.AllowlistEntry, evt *event.HookEvent) bool {
 		}
 	}
 
+	// ProgHash: exact match on BPF bytecode hash.
+	if entry.ProgHash != "" {
+		if evt.BPFDetail == nil {
+			return false
+		}
+		if evt.BPFDetail.ProgHash != entry.ProgHash {
+			return false
+		}
+	}
+
 	// HostPattern: glob match on hostname.
 	if entry.HostPattern != "" {
 		matched, err := filepath.Match(entry.HostPattern, evt.Hostname)

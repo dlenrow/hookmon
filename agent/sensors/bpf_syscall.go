@@ -4,9 +4,12 @@ package sensors
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -30,6 +33,7 @@ type bpfSyscallEvent struct {
 	ProgName   [16]byte
 	AttachType uint32
 	InsnCount  uint32
+	InsnsPtr   uint64
 }
 
 // BPFSyscallSensor monitors the bpf() syscall for program loading and attachment.
@@ -128,6 +132,12 @@ func (s *BPFSyscallSensor) readLoop() {
 			evtType = event.EventBPFAttach
 		}
 
+		// Compute BPF bytecode hash if we have the instructions pointer
+		progHash := ""
+		if raw.InsnsPtr != 0 && raw.InsnCount > 0 && raw.BPFCmd == 5 { // BPF_PROG_LOAD
+			progHash = computeProgHash(raw.PID, raw.InsnsPtr, raw.InsnCount)
+		}
+
 		hookEvt := &event.HookEvent{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now(),
@@ -144,6 +154,7 @@ func (s *BPFSyscallSensor) readLoop() {
 				ProgName:   nullTermStr(raw.ProgName[:]),
 				AttachType: raw.AttachType,
 				InsnCount:  raw.InsnCount,
+				ProgHash:   progHash,
 			},
 		}
 
@@ -162,6 +173,32 @@ func nullTermStr(b []byte) string {
 		n = len(b)
 	}
 	return string(b[:n])
+}
+
+// computeProgHash reads BPF bytecode from /proc/<pid>/mem and computes its SHA256.
+// Each BPF instruction is 8 bytes, so total size = insn_count * 8.
+// This works because the tracepoint fires during the bpf() syscall while the
+// process is still alive and the instructions buffer is still in its address space.
+func computeProgHash(pid uint32, insnsPtr uint64, insnCount uint32) string {
+	const bpfInsnSize = 8
+	size := int64(insnCount) * bpfInsnSize
+	if size <= 0 || size > 1<<20 { // sanity: cap at 1MB
+		return ""
+	}
+
+	memPath := fmt.Sprintf("/proc/%d/mem", pid)
+	f, err := os.Open(memPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	_, err = io.CopyN(h, io.NewSectionReader(f, int64(insnsPtr), size), size)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
 
 // bpfSyscallBPF is a placeholder for the compiled eBPF bytecode.

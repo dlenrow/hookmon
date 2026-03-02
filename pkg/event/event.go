@@ -128,6 +128,7 @@ type AllowlistEntry struct {
 	LibraryPath    string      `json:"library_path"`
 	ProgName       string      `json:"prog_name"`
 	ProgType       *uint32     `json:"prog_type"`
+	ProgHash       string      `json:"prog_hash"`
 	HostPattern    string      `json:"host_pattern"`
 	UIDRange       *UIDRange   `json:"uid_range"`
 	ContainerImage string      `json:"container_image"`

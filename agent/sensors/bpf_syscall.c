@@ -32,6 +32,7 @@ struct hook_event {
     char prog_name[BPF_PROG_NAME_LEN];
     u32 attach_type;
     u32 insn_count;
+    u64 insns_ptr;   // userspace pointer to BPF instructions (for hash computation)
 };
 
 struct {
@@ -74,6 +75,11 @@ int trace_bpf_enter(struct trace_event_raw_sys_enter *ctx)
         bpf_probe_read_user(&e->prog_type, sizeof(e->prog_type), &attr->prog_type);
         bpf_probe_read_user_str(e->prog_name, sizeof(e->prog_name), (void *)attr->prog_name);
         bpf_probe_read_user(&e->insn_count, sizeof(e->insn_count), &attr->insn_cnt);
+
+        // Capture the userspace pointer to BPF instructions for hash computation
+        u64 insns;
+        bpf_probe_read_user(&insns, sizeof(insns), &attr->insns);
+        e->insns_ptr = insns;
     }
 
     if (cmd == BPF_PROG_ATTACH) {
