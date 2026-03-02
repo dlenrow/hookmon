@@ -33,6 +33,14 @@ type AgentConfig struct {
 
 	// ConsoleMode prints events to stdout as JSON instead of sending to server.
 	ConsoleMode bool `yaml:"-"`
+
+	// LokiURL is the base URL for the Loki server (e.g. http://localhost:3100).
+	// Empty means disabled.
+	LokiURL string `yaml:"loki_url"`
+
+	// PrometheusPort is the port to expose Prometheus metrics on (e.g. 2112).
+	// Zero means disabled.
+	PrometheusPort int `yaml:"prometheus_port"`
 }
 
 // TLSConfig holds mTLS certificate paths.

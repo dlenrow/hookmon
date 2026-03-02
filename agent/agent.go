@@ -10,6 +10,7 @@ import (
 
 	"github.com/dlenrow/hookmon/agent/config"
 	"github.com/dlenrow/hookmon/agent/enrichment"
+	"github.com/dlenrow/hookmon/agent/observability"
 	"github.com/dlenrow/hookmon/agent/sensors"
 	"github.com/dlenrow/hookmon/agent/transport"
 )
@@ -23,6 +24,9 @@ type Agent struct {
 	hostname  string
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+
+	loki    *observability.LokiPusher
+	metrics *observability.Metrics
 }
 
 // New creates a new Agent with the given configuration.
@@ -36,12 +40,28 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 		t = transport.NewGRPCTransport(cfg, logger)
 	}
 
-	return &Agent{
+	a := &Agent{
 		cfg:       cfg,
 		logger:    logger,
 		transport: t,
 		hostname:  hostname,
 	}
+
+	if cfg.LokiURL != "" {
+		a.loki = observability.NewLokiPusher(cfg.LokiURL, logger)
+		logger.Info("loki pusher enabled", zap.String("url", cfg.LokiURL))
+	}
+
+	if cfg.PrometheusPort > 0 {
+		m, err := observability.NewMetrics(cfg.PrometheusPort, logger)
+		if err != nil {
+			logger.Error("failed to start prometheus metrics", zap.Error(err))
+		} else {
+			a.metrics = m
+		}
+	}
+
+	return a
 }
 
 // Run starts the agent: connects to the server, starts sensors, and begins
@@ -64,16 +84,24 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	// Start sensors
 	a.initSensors()
+	activeSensors := 0
 	for _, s := range a.sensors {
 		if err := s.Start(); err != nil {
 			a.logger.Warn("sensor failed to start", zap.String("sensor", s.Name()), zap.Error(err))
+			if a.metrics != nil {
+				a.metrics.RecordSensorError(s.Name())
+			}
 			continue
 		}
+		activeSensors++
 		a.logger.Info("sensor started", zap.String("sensor", s.Name()))
 
 		// Fan events from each sensor into the transport
 		a.wg.Add(1)
 		go a.forwardEvents(ctx, s)
+	}
+	if a.metrics != nil {
+		a.metrics.SetSensorsActive(activeSensors)
 	}
 
 	// Heartbeat loop (skip in console mode)
@@ -132,6 +160,13 @@ func (a *Agent) forwardEvents(ctx context.Context, s sensors.Sensor) {
 			if err := a.transport.SendEvent(evt); err != nil {
 				a.logger.Error("send event failed", zap.Error(err))
 			}
+
+			if a.loki != nil {
+				a.loki.Push(evt)
+			}
+			if a.metrics != nil {
+				a.metrics.RecordEvent(evt)
+			}
 		}
 	}
 }
@@ -160,5 +195,13 @@ func (a *Agent) shutdown() error {
 		}
 	}
 	a.wg.Wait()
+
+	if a.loki != nil {
+		a.loki.Close()
+	}
+	if a.metrics != nil {
+		a.metrics.Close()
+	}
+
 	return a.transport.Close()
 }

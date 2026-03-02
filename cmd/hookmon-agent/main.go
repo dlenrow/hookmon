@@ -19,6 +19,8 @@ func main() {
 	configPath := flag.String("config", "/etc/hookmon/agent.yaml", "path to agent config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	consoleMode := flag.Bool("console", false, "print events to stdout as JSON (no server connection)")
+	lokiURL := flag.String("loki-url", "", "Loki push URL (e.g. http://localhost:3100); empty disables")
+	prometheusPort := flag.Int("prometheus-port", 0, "port to expose Prometheus metrics on; 0 disables")
 	flag.Parse()
 
 	if *showVersion {
@@ -41,6 +43,12 @@ func main() {
 		cfg = config.DefaultConfig()
 	}
 	cfg.ConsoleMode = *consoleMode
+	if *lokiURL != "" {
+		cfg.LokiURL = *lokiURL
+	}
+	if *prometheusPort > 0 {
+		cfg.PrometheusPort = *prometheusPort
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
