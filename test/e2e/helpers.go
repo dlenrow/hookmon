@@ -148,6 +148,22 @@ func LoadCanaryAsync(loaderBin, bpfObj, tpGroup, tpName, progName string) (*exec
 	return cmd, nil
 }
 
+// bpftimeSimBin returns the path to the bpftime_sim binary.
+func bpftimeSimBin() string {
+	if v := os.Getenv("HOOKMON_BPFTIME_SIM"); v != "" {
+		return v
+	}
+	return "/tmp/bpftime_sim"
+}
+
+// RunBpftimeSim executes the bpftime attack simulator with the given library and target.
+func RunBpftimeSim(simBin, libPath, targetBin string) error {
+	cmd := exec.Command("sudo", simBin, libPath, targetBin)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // EvaluateAgainstAllowlist evaluates an event against a set of allowlist entries
 // using the same logic as the server policy engine.
 func EvaluateAgainstAllowlist(evt *event.HookEvent, entries []*event.AllowlistEntry) *event.PolicyResult {
@@ -196,6 +212,25 @@ func matchesEntry(entry *event.AllowlistEntry, evt *event.HookEvent) bool {
 	}
 	if entry.ProgName != "" {
 		if evt.BPFDetail == nil || evt.BPFDetail.ProgName != entry.ProgName {
+			return false
+		}
+	}
+	if entry.LibraryPath != "" {
+		switch evt.EventType {
+		case event.EventLDPreload:
+			if evt.PreloadDetail == nil || !strings.Contains(evt.PreloadDetail.LibraryPath, entry.LibraryPath) {
+				return false
+			}
+		case event.EventSHMCreate:
+			if evt.SHMDetail == nil || !strings.Contains(evt.SHMDetail.SHMName, entry.LibraryPath) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	if entry.LibraryHash != "" {
+		if evt.PreloadDetail == nil || evt.PreloadDetail.LibraryHash != entry.LibraryHash {
 			return false
 		}
 	}

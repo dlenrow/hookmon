@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,13 @@ func canaryDir() string {
 		return v
 	}
 	return "/tmp"
+}
+
+func fakeHookLib() string {
+	if v := os.Getenv("HOOKMON_FAKE_HOOK_LIB"); v != "" {
+		return v
+	}
+	return "/tmp/libfake_hook.so"
 }
 
 // TestDetectUnknownBPFLoad verifies that loading a BPF program with no
@@ -331,4 +339,134 @@ func TestWhitelistByExeHash(t *testing.T) {
 		t.Errorf("expected ALLOW for matching exe_hash, got %s", result.Action)
 	}
 	t.Logf("Whitelisted by exe_hash: %s", evt.ExeHash)
+}
+
+// TestDetectBpftimeExploit simulates the full bpftime-go attack chain and
+// verifies that both SHM_CREATE (CRITICAL) and LD_PRELOAD (ALERT) events fire.
+func TestDetectBpftimeExploit(t *testing.T) {
+	agent, err := StartAgent(agentBin())
+	if err != nil {
+		t.Fatalf("start agent: %v", err)
+	}
+	defer agent.Stop()
+
+	// Run the bpftime attack simulator in the background
+	go func() {
+		time.Sleep(1 * time.Second)
+		if err := RunBpftimeSim(bpftimeSimBin(), fakeHookLib(), "/bin/true"); err != nil {
+			t.Logf("bpftime_sim error (may be expected): %v", err)
+		}
+	}()
+
+	// Phase 1: Detect shared memory creation with bpftime naming pattern
+	shmEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventSHMCreate &&
+			e.SHMDetail != nil &&
+			e.SHMDetail.Pattern == "bpftime"
+	}, 30*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect SHM_CREATE with bpftime pattern: %v", err)
+	}
+
+	t.Logf("Detected SHM_CREATE event:")
+	t.Logf("  PID: %d, Comm: %s", shmEvt.PID, shmEvt.Comm)
+	t.Logf("  SHMName: %s", shmEvt.SHMDetail.SHMName)
+	t.Logf("  Pattern: %s", shmEvt.SHMDetail.Pattern)
+	t.Logf("  Severity: %s", shmEvt.Severity)
+
+	if shmEvt.Severity != event.SeverityCritical {
+		t.Errorf("expected severity CRITICAL for bpftime SHM, got %s", shmEvt.Severity)
+	}
+
+	// Phase 2: Detect LD_PRELOAD injection of fake_hook library
+	preloadEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventLDPreload &&
+			e.PreloadDetail != nil &&
+			strings.Contains(e.PreloadDetail.LibraryPath, "fake_hook")
+	}, 30*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect LD_PRELOAD with fake_hook: %v", err)
+	}
+
+	t.Logf("Detected LD_PRELOAD event:")
+	t.Logf("  PID: %d, Comm: %s", preloadEvt.PID, preloadEvt.Comm)
+	t.Logf("  LibraryPath: %s", preloadEvt.PreloadDetail.LibraryPath)
+	t.Logf("  TargetBinary: %s", preloadEvt.PreloadDetail.TargetBinary)
+	t.Logf("  LibraryHash: %s", preloadEvt.PreloadDetail.LibraryHash)
+	t.Logf("  SetBy: %s", preloadEvt.PreloadDetail.SetBy)
+	t.Logf("  Severity: %s", preloadEvt.Severity)
+
+	if preloadEvt.Severity != event.SeverityAlert {
+		t.Errorf("expected severity ALERT for LD_PRELOAD, got %s", preloadEvt.Severity)
+	}
+
+	t.Logf("=== bpftime attack chain fully detected ===")
+	t.Logf("  SHM_CREATE (CRITICAL) + LD_PRELOAD (ALERT) = userspace eBPF attack pattern")
+}
+
+// TestDenyBpftimeByPolicy verifies that a DENY policy entry can match
+// bpftime-pattern SHM events and block the attack.
+func TestDenyBpftimeByPolicy(t *testing.T) {
+	agent, err := StartAgent(agentBin())
+	if err != nil {
+		t.Fatalf("start agent: %v", err)
+	}
+	defer agent.Stop()
+
+	// Trigger bpftime simulation
+	go func() {
+		time.Sleep(1 * time.Second)
+		if err := RunBpftimeSim(bpftimeSimBin(), fakeHookLib(), "/bin/true"); err != nil {
+			t.Logf("bpftime_sim error (may be expected): %v", err)
+		}
+	}()
+
+	// Capture the SHM_CREATE event
+	shmEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventSHMCreate &&
+			e.SHMDetail != nil &&
+			e.SHMDetail.Pattern == "bpftime"
+	}, 30*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect SHM_CREATE: %v", err)
+	}
+
+	t.Logf("Captured SHM_CREATE event (SHMName=%s, Pattern=%s)", shmEvt.SHMDetail.SHMName, shmEvt.SHMDetail.Pattern)
+
+	// Build a DENY policy entry that matches bpftime SHM patterns.
+	// Uses LibraryPath field to match against the SHM name.
+	denyList := []*event.AllowlistEntry{
+		{
+			ID:          "deny-bpftime-shm",
+			Description: "Block bpftime-pattern shared memory creation",
+			EventTypes:  []event.EventType{event.EventSHMCreate},
+			LibraryPath: "bpftime",
+			Action:      event.ActionDeny,
+			Enabled:     true,
+		},
+	}
+
+	// Evaluate: should get DENY
+	result := EvaluateAgainstAllowlist(shmEvt, denyList)
+	if result.Action != event.ActionDeny {
+		t.Errorf("expected DENY for bpftime SHM event, got %s: %s", result.Action, result.Reason)
+	}
+	t.Logf("Policy result for bpftime SHM: %s (entry: %s)", result.Action, result.MatchedEntryID)
+
+	// Verify the same DENY entry does NOT match a non-bpftime SHM event
+	nonBpftimeEvt := &event.HookEvent{
+		EventType: event.EventSHMCreate,
+		SHMDetail: &event.SHMDetail{
+			SHMName: "/dev/shm/postgres_shared_12345",
+			Pattern: "unknown",
+		},
+	}
+	result2 := EvaluateAgainstAllowlist(nonBpftimeEvt, denyList)
+	if result2.Action == event.ActionDeny {
+		t.Errorf("DENY entry should NOT match non-bpftime SHM event, but got DENY")
+	}
+	t.Logf("Policy result for non-bpftime SHM: %s (correctly not matched)", result2.Action)
 }

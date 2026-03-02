@@ -98,3 +98,84 @@ This enrichment happens in userspace immediately after the event is received, wh
 ## Self-Detection
 
 HookMon's own agent loads eBPF programs at startup. The agent detects its own BPF loads and reports them. This is expected and should be the first entry in any allowlist. It also serves as a continuous self-test: if the agent stops detecting its own programs, something is wrong.
+
+## Test Scenarios
+
+The e2e test suite (`test/e2e/`) exercises the full detection pipeline: sensors fire, events are enriched, and policy evaluation produces the correct action. All tests require root (for eBPF), a built agent binary, and run on Linux.
+
+### BPF Load Detection Tests
+
+These tests use canary eBPF programs (`test/canary/`) to trigger the `bpf_syscall` sensor:
+
+- **TestDetectUnknownBPFLoad** — Loads `hello_bpf.o` and verifies a `BPF_LOAD` event fires with the correct `ProgName`, a non-empty `ProgHash`, and severity `WARN` (no allowlist match).
+- **TestDetectSecondApp** — Loads both `hello_bpf.o` and `net_monitor.o`, confirming different programs produce different `ProgHash` values.
+- **TestVersionChangeNewHash** — Loads `hello_bpf.o` v1 and v2, confirming revised bytecode (same function, different code) produces a different hash. This validates that allowlist entries pinned to a specific `ProgHash` will correctly reject modified versions.
+- **TestWhitelistByProgHash** — Captures `hello_bpf`'s hash, builds an ALLOW entry, verifies it matches. Then loads `hello_bpf_v2` against the same allowlist and confirms it gets ALERT (hash mismatch).
+- **TestBlacklistByProgHash** — Creates a DENY entry for `net_monitor`'s hash and verifies the policy engine returns DENY.
+- **TestWhitelistByExeHash** — Allowlists the loader binary itself (by `ExeHash`), trusting *all* programs loaded by that binary regardless of which BPF program it loads.
+
+### bpftime-go Attack Simulation
+
+These tests simulate the full attack chain of a userspace eBPF attack using `bpftime_sim` (`test/canary/bpftime_sim.c`):
+
+**Attack chain reproduced:**
+1. `bpftime_sim` calls `shm_open("/bpftime_agent_shm")` — this is how bpftime establishes a shared memory communication channel between its agent and the hooked target process.
+2. `bpftime_sim` forks and execs `/bin/true` with `LD_PRELOAD=libfake_hook.so` — this is how bpftime injects its runtime into target processes.
+
+**Expected detections:**
+- `SHM_CREATE` event with `Pattern="bpftime"` at severity `CRITICAL` — the shm_monitor uprobe on `shm_open()` fires and classifies the segment name.
+- `LD_PRELOAD` event with `LibraryPath` containing `fake_hook` at severity `ALERT` — the execve_preload tracepoint captures the environment variable.
+
+**Why SHM_CREATE is CRITICAL:** Shared memory with bpftime naming is the strongest signal of a userspace eBPF attack. Unlike LD_PRELOAD (which has legitimate uses), bpftime-pattern shared memory has no legitimate purpose outside of the bpftime runtime itself.
+
+**Tests:**
+- **TestDetectBpftimeExploit** — Runs the full simulation, waits for both events, asserts correct severity for each. Logs the complete event details including hashes and process context.
+- **TestDenyBpftimeByPolicy** — Captures a bpftime SHM event, builds a DENY entry matching `EventTypes=[SHM_CREATE]` with `LibraryPath="bpftime"` (matched against the SHM name), verifies the policy engine returns DENY. Also confirms the same entry does *not* match a non-bpftime SHM event (e.g., PostgreSQL shared memory).
+
+### Running the Tests
+
+**Build canaries (on Linux test host):**
+```bash
+cd ~/hookmon/test/canary
+make all
+cp load_canary hello_bpf.o net_monitor.o hello_bpf_v2.o /tmp/
+cp bpftime_sim libfake_hook.so /tmp/
+```
+
+**Build the agent:**
+```bash
+cd ~/hookmon
+go build -o /tmp/hookmon-agent ./cmd/hookmon-agent/
+```
+
+**Run all e2e tests:**
+```bash
+sudo -E go test -v -timeout 120s ./test/e2e/
+```
+
+**Run with Grafana observability (Loki + Prometheus):**
+```bash
+sudo -E env PATH=$PATH \
+  HOOKMON_LOKI_URL=http://raspberrypi:3100 \
+  HOOKMON_PROMETHEUS_PORT=2112 \
+  go test -v -timeout 120s ./test/e2e/
+```
+
+**Run only bpftime tests:**
+```bash
+sudo -E env PATH=$PATH \
+  HOOKMON_BPFTIME_SIM=/tmp/bpftime_sim \
+  HOOKMON_FAKE_HOOK_LIB=/tmp/libfake_hook.so \
+  go test -v -run TestDetectBpftime -timeout 120s ./test/e2e/
+```
+
+**Environment variables:**
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `HOOKMON_AGENT_BIN` | `/tmp/hookmon-agent` | Path to agent binary |
+| `HOOKMON_LOADER_BIN` | `/tmp/load-canary` | Path to BPF canary loader |
+| `HOOKMON_CANARY_DIR` | `/tmp` | Directory containing `.o` canary files |
+| `HOOKMON_BPFTIME_SIM` | `/tmp/bpftime_sim` | Path to bpftime simulator |
+| `HOOKMON_FAKE_HOOK_LIB` | `/tmp/libfake_hook.so` | Path to fake LD_PRELOAD library |
+| `HOOKMON_LOKI_URL` | (disabled) | Loki push URL for test event logging |
+| `HOOKMON_PROMETHEUS_PORT` | (disabled) | Prometheus metrics port |

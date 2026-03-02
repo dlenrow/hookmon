@@ -29,9 +29,16 @@ hello_bpf_v2.o: hello_bpf_v2.c vmlinux.h
 load_canary: load_canary.go
 	CGO_ENABLED=0 go build -o $@ $<
 
+# bpftime attack simulation canaries
+bpftime_sim: bpftime_sim.c
+	$(CC) -o $@ $< -lrt
+
+libfake_hook.so: fake_hook.c
+	$(CC) -shared -fPIC -o $@ $<
+
 # Build everything
 .PHONY: all
-all: hello_bpf.o net_monitor.o hello_bpf_v2.o load_canary
+all: hello_bpf.o net_monitor.o hello_bpf_v2.o load_canary bpftime_sim libfake_hook.so
 
 # Hash all compiled programs (for reference in whitelist entries)
 .PHONY: hashes
@@ -54,6 +61,11 @@ run-netmon: net_monitor.o load_canary
 run-hello-v2: hello_bpf_v2.o load_canary
 	sudo ./load_canary hello_bpf_v2.o syscalls sys_enter_getpid hello_count_v2
 
+# Run bpftime simulation (must run as root)
+.PHONY: run-bpftime
+run-bpftime: bpftime_sim libfake_hook.so
+	sudo ./bpftime_sim $(CURDIR)/libfake_hook.so /bin/true
+
 .PHONY: clean
 clean:
-	rm -f *.o load_canary vmlinux.h
+	rm -f *.o load_canary bpftime_sim libfake_hook.so vmlinux.h
