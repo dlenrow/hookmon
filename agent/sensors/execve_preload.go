@@ -139,4 +139,4 @@ func (s *ExecvePreloadSensor) readLoop() {
 	}
 }
 
-var execvePreloadBPF []byte
+// execvePreloadBPF is provided via go:embed in embed.go

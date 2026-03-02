@@ -197,7 +197,4 @@ func computeProgHash(pid uint32, insnsPtr uint64, insnCount uint32) string {
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
 
-// bpfSyscallBPF is a placeholder for the compiled eBPF bytecode.
-// In production, this is populated by bpf2go via go:generate.
-// go:generate bpf2go -cc clang -target amd64 bpfSyscall bpf_syscall.c
-var bpfSyscallBPF []byte
+// bpfSyscallBPF is provided via go:embed in embed.go

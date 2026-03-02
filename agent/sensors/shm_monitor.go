@@ -165,4 +165,4 @@ func classifySHMPattern(name string) string {
 	}
 }
 
-var shmMonitorBPF []byte
+// shmMonitorBPF is provided via go:embed in embed.go

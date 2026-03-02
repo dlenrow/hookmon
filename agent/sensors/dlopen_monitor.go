@@ -155,4 +155,4 @@ func (s *DlopenMonitorSensor) readLoop() {
 	}
 }
 
-var dlopenMonitorBPF []byte
+// dlopenMonitorBPF is provided via go:embed in embed.go
