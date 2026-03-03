@@ -31,10 +31,10 @@ type shmEvent struct {
 	Mode      uint32
 }
 
-// SHMMonitorSensor monitors shm_open() calls for bpftime-style patterns.
+// SHMMonitorSensor monitors /dev/shm openat() calls for bpftime-style patterns.
 type SHMMonitorSensor struct {
 	eventCh chan *event.HookEvent
-	uprobe  link.Link
+	tp      link.Link
 	reader  *ringbuf.Reader
 	coll    *ebpf.Collection
 	done    chan struct{}
@@ -65,17 +65,9 @@ func (s *SHMMonitorSensor) Start() error {
 		return errors.New("BPF program 'trace_shm_open' not found")
 	}
 
-	ex, err := link.OpenExecutable("/lib/x86_64-linux-gnu/libc.so.6")
+	s.tp, err = link.Tracepoint("syscalls", "sys_enter_openat", prog, nil)
 	if err != nil {
-		ex, err = link.OpenExecutable("/lib64/libc.so.6")
-		if err != nil {
-			return fmt.Errorf("open libc for uprobe: %w", err)
-		}
-	}
-
-	s.uprobe, err = ex.Uprobe("shm_open", prog, nil)
-	if err != nil {
-		return fmt.Errorf("attach uprobe: %w", err)
+		return fmt.Errorf("attach tracepoint: %w", err)
 	}
 
 	eventsMap := s.coll.Maps["events"]
@@ -97,8 +89,8 @@ func (s *SHMMonitorSensor) Stop() error {
 	if s.reader != nil {
 		s.reader.Close()
 	}
-	if s.uprobe != nil {
-		s.uprobe.Close()
+	if s.tp != nil {
+		s.tp.Close()
 	}
 	if s.coll != nil {
 		s.coll.Close()
