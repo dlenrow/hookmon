@@ -28,9 +28,12 @@ CREATE TABLE IF NOT EXISTS events (
 
     -- Event-type-specific detail payloads stored as JSONB
     bpf_detail     JSONB,
-    preload_detail JSONB,
+    exec_injection_detail JSONB,
     shm_detail     JSONB,
     dlopen_detail  JSONB,
+    linker_config_detail JSONB,
+    ptrace_detail  JSONB,
+    lib_integrity_detail JSONB,
 
     -- Policy evaluation result (filled after allowlist evaluation)
     policy_result  JSONB

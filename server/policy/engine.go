@@ -110,8 +110,8 @@ func classifySeverity(result *event.PolicyResult, evt *event.HookEvent) event.Se
 	// No allowlist match (ALERT or DENY). Classify based on event context.
 
 	// /etc/ld.so.preload modification is always CRITICAL.
-	if evt.EventType == event.EventLDPreload && evt.PreloadDetail != nil {
-		if evt.PreloadDetail.SetBy == "/etc/ld.so.preload" {
+	if evt.EventType == event.EventExecInjection && evt.ExecInjectionDetail != nil {
+		if evt.ExecInjectionDetail.SetBy == "/etc/ld.so.preload" {
 			return event.SeverityCritical
 		}
 	}
@@ -128,8 +128,23 @@ func classifySeverity(result *event.PolicyResult, evt *event.HookEvent) event.Se
 		return event.SeverityCritical
 	}
 
-	// LD_PRELOAD from non-root, non-whitelisted library is ALERT.
-	if evt.EventType == event.EventLDPreload {
+	// Exec injection from non-root, non-whitelisted library is ALERT.
+	if evt.EventType == event.EventExecInjection {
+		return event.SeverityAlert
+	}
+
+	// Linker config modification is always CRITICAL.
+	if evt.EventType == event.EventLinkerConfig {
+		return event.SeverityCritical
+	}
+
+	// Ptrace injection from root is CRITICAL, from non-root is ALERT.
+	if evt.EventType == event.EventPtraceInject {
+		return event.SeverityAlert
+	}
+
+	// Library integrity violation is ALERT.
+	if evt.EventType == event.EventLibIntegrity {
 		return event.SeverityAlert
 	}
 

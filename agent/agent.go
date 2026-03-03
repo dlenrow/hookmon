@@ -126,14 +126,23 @@ func (a *Agent) initSensors() {
 	if a.cfg.Sensors.BPFSyscall {
 		a.sensors = append(a.sensors, sensors.NewBPFSyscallSensor())
 	}
-	if a.cfg.Sensors.ExecvePreload {
-		a.sensors = append(a.sensors, sensors.NewExecvePreloadSensor())
+	if a.cfg.Sensors.ExecInjection {
+		a.sensors = append(a.sensors, sensors.NewExecInjectionSensor())
 	}
 	if a.cfg.Sensors.SHMMonitor {
 		a.sensors = append(a.sensors, sensors.NewSHMMonitorSensor())
 	}
 	if a.cfg.Sensors.DlopenMonitor {
 		a.sensors = append(a.sensors, sensors.NewDlopenMonitorSensor())
+	}
+	if a.cfg.Sensors.LinkerConfig {
+		a.sensors = append(a.sensors, sensors.NewLinkerConfigSensor())
+	}
+	if a.cfg.Sensors.PtraceMonitor {
+		a.sensors = append(a.sensors, sensors.NewPtraceMonitorSensor())
+	}
+	if a.cfg.Sensors.LibIntegrity {
+		a.sensors = append(a.sensors, sensors.NewLibIntegritySensor())
 	}
 }
 

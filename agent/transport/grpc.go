@@ -199,12 +199,13 @@ func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
 		}
 	}
 
-	if evt.PreloadDetail != nil {
-		pe.PreloadDetail = &hookmonv1.PreloadDetail{
-			LibraryPath:  evt.PreloadDetail.LibraryPath,
-			LibraryHash:  evt.PreloadDetail.LibraryHash,
-			TargetBinary: evt.PreloadDetail.TargetBinary,
-			SetBy:        evt.PreloadDetail.SetBy,
+	if evt.ExecInjectionDetail != nil {
+		pe.ExecInjectionDetail = &hookmonv1.ExecInjectionDetail{
+			LibraryPath:  evt.ExecInjectionDetail.LibraryPath,
+			LibraryHash:  evt.ExecInjectionDetail.LibraryHash,
+			TargetBinary: evt.ExecInjectionDetail.TargetBinary,
+			SetBy:        evt.ExecInjectionDetail.SetBy,
+			EnvVar:       evt.ExecInjectionDetail.EnvVar,
 		}
 	}
 
@@ -224,6 +225,35 @@ func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
 		}
 	}
 
+	if evt.LinkerConfigDetail != nil {
+		pe.LinkerConfigDetail = &hookmonv1.LinkerConfigDetail{
+			FilePath:  evt.LinkerConfigDetail.FilePath,
+			Operation: evt.LinkerConfigDetail.Operation,
+			OldHash:   evt.LinkerConfigDetail.OldHash,
+			NewHash:   evt.LinkerConfigDetail.NewHash,
+		}
+	}
+
+	if evt.PtraceDetail != nil {
+		pe.PtraceDetail = &hookmonv1.PtraceDetail{
+			Request:     evt.PtraceDetail.Request,
+			RequestName: evt.PtraceDetail.RequestName,
+			TargetPID:   evt.PtraceDetail.TargetPID,
+			TargetComm:  evt.PtraceDetail.TargetComm,
+			Addr:        evt.PtraceDetail.Addr,
+		}
+	}
+
+	if evt.LibIntegrityDetail != nil {
+		pe.LibIntegrityDetail = &hookmonv1.LibIntegrityDetail{
+			LibraryPath: evt.LibIntegrityDetail.LibraryPath,
+			Operation:   evt.LibIntegrityDetail.Operation,
+			OldHash:     evt.LibIntegrityDetail.OldHash,
+			NewHash:     evt.LibIntegrityDetail.NewHash,
+			InLdCache:   evt.LibIntegrityDetail.InLdCache,
+		}
+	}
+
 	return pe
 }
 
@@ -233,12 +263,18 @@ func eventTypeToProto(et event.EventType) hookmonv1.EventType {
 		return hookmonv1.EventType_EVENT_TYPE_BPF_LOAD
 	case event.EventBPFAttach:
 		return hookmonv1.EventType_EVENT_TYPE_BPF_ATTACH
-	case event.EventLDPreload:
-		return hookmonv1.EventType_EVENT_TYPE_LD_PRELOAD
+	case event.EventExecInjection:
+		return hookmonv1.EventType_EVENT_TYPE_EXEC_INJECTION
 	case event.EventSHMCreate:
 		return hookmonv1.EventType_EVENT_TYPE_SHM_CREATE
 	case event.EventDlopen:
 		return hookmonv1.EventType_EVENT_TYPE_DLOPEN
+	case event.EventLinkerConfig:
+		return hookmonv1.EventType_EVENT_TYPE_LINKER_CONFIG
+	case event.EventPtraceInject:
+		return hookmonv1.EventType_EVENT_TYPE_PTRACE_INJECT
+	case event.EventLibIntegrity:
+		return hookmonv1.EventType_EVENT_TYPE_LIB_INTEGRITY
 	case event.EventAgentOffline:
 		return hookmonv1.EventType_EVENT_TYPE_AGENT_OFFLINE
 	case event.EventAgentRecovered:

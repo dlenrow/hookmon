@@ -398,9 +398,12 @@ func (s *IngestionServer) TrackedHostCount() int {
 var protoEventTypeToEventType = map[hookmonv1.EventType]event.EventType{
 	hookmonv1.EventType_EVENT_TYPE_BPF_LOAD:        event.EventBPFLoad,
 	hookmonv1.EventType_EVENT_TYPE_BPF_ATTACH:      event.EventBPFAttach,
-	hookmonv1.EventType_EVENT_TYPE_LD_PRELOAD:      event.EventLDPreload,
+	hookmonv1.EventType_EVENT_TYPE_EXEC_INJECTION:   event.EventExecInjection,
 	hookmonv1.EventType_EVENT_TYPE_SHM_CREATE:      event.EventSHMCreate,
 	hookmonv1.EventType_EVENT_TYPE_DLOPEN:          event.EventDlopen,
+	hookmonv1.EventType_EVENT_TYPE_LINKER_CONFIG:    event.EventLinkerConfig,
+	hookmonv1.EventType_EVENT_TYPE_PTRACE_INJECT:   event.EventPtraceInject,
+	hookmonv1.EventType_EVENT_TYPE_LIB_INTEGRITY:   event.EventLibIntegrity,
 	hookmonv1.EventType_EVENT_TYPE_AGENT_OFFLINE:   event.EventAgentOffline,
 	hookmonv1.EventType_EVENT_TYPE_AGENT_RECOVERED: event.EventAgentRecovered,
 }
@@ -463,12 +466,13 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 			ProgHash:   pe.BPFDetail.ProgHash,
 		}
 	}
-	if pe.PreloadDetail != nil {
-		evt.PreloadDetail = &event.PreloadDetail{
-			LibraryPath:  pe.PreloadDetail.LibraryPath,
-			LibraryHash:  pe.PreloadDetail.LibraryHash,
-			TargetBinary: pe.PreloadDetail.TargetBinary,
-			SetBy:        pe.PreloadDetail.SetBy,
+	if pe.ExecInjectionDetail != nil {
+		evt.ExecInjectionDetail = &event.ExecInjectionDetail{
+			LibraryPath:  pe.ExecInjectionDetail.LibraryPath,
+			LibraryHash:  pe.ExecInjectionDetail.LibraryHash,
+			TargetBinary: pe.ExecInjectionDetail.TargetBinary,
+			SetBy:        pe.ExecInjectionDetail.SetBy,
+			EnvVar:       pe.ExecInjectionDetail.EnvVar,
 		}
 	}
 	if pe.SHMDetail != nil {
@@ -483,6 +487,32 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 			LibraryPath: pe.DlopenDetail.LibraryPath,
 			LibraryHash: pe.DlopenDetail.LibraryHash,
 			Flags:       int(pe.DlopenDetail.Flags),
+		}
+	}
+	if pe.LinkerConfigDetail != nil {
+		evt.LinkerConfigDetail = &event.LinkerConfigDetail{
+			FilePath:  pe.LinkerConfigDetail.FilePath,
+			Operation: pe.LinkerConfigDetail.Operation,
+			OldHash:   pe.LinkerConfigDetail.OldHash,
+			NewHash:   pe.LinkerConfigDetail.NewHash,
+		}
+	}
+	if pe.PtraceDetail != nil {
+		evt.PtraceDetail = &event.PtraceDetail{
+			Request:     pe.PtraceDetail.Request,
+			RequestName: pe.PtraceDetail.RequestName,
+			TargetPID:   pe.PtraceDetail.TargetPID,
+			TargetComm:  pe.PtraceDetail.TargetComm,
+			Addr:        pe.PtraceDetail.Addr,
+		}
+	}
+	if pe.LibIntegrityDetail != nil {
+		evt.LibIntegrityDetail = &event.LibIntegrityDetail{
+			LibraryPath: pe.LibIntegrityDetail.LibraryPath,
+			Operation:   pe.LibIntegrityDetail.Operation,
+			OldHash:     pe.LibIntegrityDetail.OldHash,
+			NewHash:     pe.LibIntegrityDetail.NewHash,
+			InLdCache:   pe.LibIntegrityDetail.InLdCache,
 		}
 	}
 

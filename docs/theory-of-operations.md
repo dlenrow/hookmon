@@ -24,7 +24,7 @@ HookMon defends against two classes of instrumentation abuse that are invisible 
 - The instrumentation lives entirely in userspace memory
 
 **HookMon approach:** Three sensors work together:
-1. `execve_preload` catches the `LD_PRELOAD` being set in the environment of new processes
+1. `exec_injection` catches `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, and `LD_DEBUG` being set in the environment of new processes
 2. `shm_monitor` detects shared memory segments matching bpftime patterns in `/dev/shm`
 3. `dlopen_monitor` catches runtime library loading via `dlopen()`
 
@@ -32,7 +32,31 @@ HookMon defends against two classes of instrumentation abuse that are invisible 
 
 **Attack scenario:** Even without eBPF, `LD_PRELOAD` alone enables function interposition — replacing `malloc`, `SSL_read`, `open`, or any dynamically-linked function with attacker-controlled code. Used legitimately for debugging and instrumentation, but also a potent attack vector.
 
-**HookMon approach:** The `execve_preload` sensor captures every process exec that has `LD_PRELOAD`, `LD_AUDIT`, or `LD_LIBRARY_PATH` set, along with the library path, its SHA256 hash, and the target binary being executed.
+**HookMon approach:** The `exec_injection` sensor captures every process exec that has `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, or `LD_DEBUG` set, along with the library path, its SHA256 hash, and the target binary being executed.
+
+### Class 4: Linker Configuration Tampering
+
+**Attack scenario:** An attacker modifies `/etc/ld.so.preload`, `/etc/ld.so.conf`, or files in `/etc/ld.so.conf.d/` to persistently inject libraries into every process started on the host. Unlike environment-based `LD_PRELOAD` (which affects only child processes), modifying `/etc/ld.so.preload` affects *all* dynamically-linked programs system-wide and survives reboots.
+
+**Detection gap:** Standard file integrity monitoring (AIDE, OSSEC) can detect changes but doesn't understand the *significance* of these specific files in the context of code injection. Alert fatigue from noisy FIM rules means these changes may be overlooked.
+
+**HookMon approach:** The `linker_config` sensor uses fanotify to watch `/etc/ld.so.preload`, `/etc/ld.so.conf`, and `/etc/ld.so.conf.d/` for any write, create, delete, or rename operations. Every modification produces an event with the file path, operation type, and before/after content hashes. These events are always classified as CRITICAL.
+
+### Class 5: Ptrace Code Injection
+
+**Attack scenario:** An attacker uses `ptrace()` to attach to a running process and inject code via `PTRACE_POKETEXT` or `PTRACE_POKEDATA`. This allows modifying executable code in a target process's memory without any library or file on disk. It's a classic technique for process hollowing, debugger-based injection, and anti-forensics.
+
+**Detection gap:** While some EDR tools monitor ptrace, they often only flag `PTRACE_ATTACH` and miss the more dangerous `PTRACE_POKETEXT`/`PTRACE_POKEDATA` that actually inject code. Standard audit logging may capture the syscall but lacks context about what was injected.
+
+**HookMon approach:** The `ptrace_monitor` sensor hooks `tracepoint/syscalls/sys_enter_ptrace` and filters for dangerous requests: `PTRACE_ATTACH`, `PTRACE_SEIZE`, `PTRACE_POKETEXT`, and `PTRACE_POKEDATA`. Each event includes the ptrace request type, target PID, target process name, and memory address (for POKE operations).
+
+### Class 6: Shared Library Replacement
+
+**Attack scenario:** An attacker replaces a legitimate shared library on disk (e.g., `/usr/lib/libssl.so`) with a trojanized version. Every process that loads the library subsequently executes attacker code. This is stealthy because the library path and name remain unchanged — only the contents differ.
+
+**Detection gap:** Package managers detect tampering at verification time, but not in real-time. Between package verifications, a replaced library operates undetected. Runtime LD_PRELOAD monitoring doesn't help because no environment variable is involved.
+
+**HookMon approach:** The `lib_integrity` sensor uses fanotify to monitor standard library directories (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`) for write, rename, or delete operations on `.so` files. Events include the library path, operation type, before/after hashes, and whether the library is in the `ld.so.cache`.
 
 ## The Allowlist Model
 
@@ -57,9 +81,11 @@ Events are classified based on allowlist evaluation:
 | Matches allowlist entry with ALLOW action | INFO | Known good, log for audit |
 | No allowlist match, known BPF program type | WARN | Unusual but possibly legitimate |
 | No allowlist match, unknown binary hash | ALERT | Unknown program, investigate |
-| LD_PRELOAD from non-root, non-whitelisted library | ALERT | Possible injection attack |
+| Exec injection from non-root, non-whitelisted library | ALERT | Possible injection attack |
+| Ptrace injection detected | ALERT | Process memory manipulation |
+| Shared library modified on disk | ALERT | Possible library replacement attack |
 | bpftime-pattern shared memory from unknown process | CRITICAL | Likely active userspace eBPF attack |
-| `/etc/ld.so.preload` modified | CRITICAL | Host may be compromised |
+| Linker configuration modified | CRITICAL | System-wide injection vector changed |
 | Any unmatched event from root | CRITICAL | Privileged unauthorized activity |
 
 ### Operational Workflow
@@ -124,7 +150,7 @@ These tests simulate the full attack chain of a userspace eBPF attack using `bpf
 
 **Expected detections:**
 - `SHM_CREATE` event with `Pattern="bpftime"` at severity `CRITICAL` — the shm_monitor uprobe on `shm_open()` fires and classifies the segment name.
-- `LD_PRELOAD` event with `LibraryPath` containing `fake_hook` at severity `ALERT` — the execve_preload tracepoint captures the environment variable.
+- `EXEC_INJECTION` event with `LibraryPath` containing `fake_hook` at severity `ALERT` — the exec_injection tracepoint captures the environment variable.
 
 **Why SHM_CREATE is CRITICAL:** Shared memory with bpftime naming is the strongest signal of a userspace eBPF attack. Unlike LD_PRELOAD (which has legitimate uses), bpftime-pattern shared memory has no legitimate purpose outside of the bpftime runtime itself.
 

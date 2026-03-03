@@ -8,9 +8,12 @@ type EventType string
 const (
 	EventBPFLoad       EventType = "BPF_LOAD"
 	EventBPFAttach     EventType = "BPF_ATTACH"
-	EventLDPreload     EventType = "LD_PRELOAD"
+	EventExecInjection EventType = "EXEC_INJECTION"
 	EventSHMCreate     EventType = "SHM_CREATE"
 	EventDlopen        EventType = "DLOPEN"
+	EventLinkerConfig  EventType = "LINKER_CONFIG"
+	EventPtraceInject  EventType = "PTRACE_INJECT"
+	EventLibIntegrity  EventType = "LIB_INTEGRITY"
 	EventAgentOffline  EventType = "AGENT_OFFLINE"
 	EventAgentRecovered EventType = "AGENT_RECOVERED"
 )
@@ -50,9 +53,12 @@ type HookEvent struct {
 
 	// Event-type-specific payloads
 	BPFDetail     *BPFDetail     `json:"bpf_detail,omitempty"`
-	PreloadDetail *PreloadDetail `json:"preload_detail,omitempty"`
+	ExecInjectionDetail *ExecInjectionDetail `json:"exec_injection_detail,omitempty"`
 	SHMDetail     *SHMDetail     `json:"shm_detail,omitempty"`
-	DlopenDetail  *DlopenDetail  `json:"dlopen_detail,omitempty"`
+	DlopenDetail        *DlopenDetail        `json:"dlopen_detail,omitempty"`
+	LinkerConfigDetail  *LinkerConfigDetail  `json:"linker_config_detail,omitempty"`
+	PtraceDetail        *PtraceDetail        `json:"ptrace_detail,omitempty"`
+	LibIntegrityDetail  *LibIntegrityDetail  `json:"lib_integrity_detail,omitempty"`
 
 	// Filled by server after policy evaluation
 	PolicyResult *PolicyResult `json:"policy_result,omitempty"`
@@ -69,12 +75,14 @@ type BPFDetail struct {
 	ProgHash   string `json:"prog_hash"`
 }
 
-// PreloadDetail contains details specific to LD_PRELOAD events.
-type PreloadDetail struct {
+// ExecInjectionDetail contains details specific to exec injection events
+// (LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH, LD_DEBUG).
+type ExecInjectionDetail struct {
 	LibraryPath  string `json:"library_path"`
 	LibraryHash  string `json:"library_hash"`
 	TargetBinary string `json:"target_binary"`
 	SetBy        string `json:"set_by"`
+	EnvVar       string `json:"env_var,omitempty"` // which env var triggered: LD_PRELOAD, LD_AUDIT, etc.
 }
 
 // SHMDetail contains details specific to shared memory events.
@@ -89,6 +97,32 @@ type DlopenDetail struct {
 	LibraryPath string `json:"library_path"`
 	LibraryHash string `json:"library_hash"`
 	Flags       int    `json:"flags"`
+}
+
+// LinkerConfigDetail contains details specific to linker config file modification events.
+type LinkerConfigDetail struct {
+	FilePath  string `json:"file_path"`
+	Operation string `json:"operation"` // "write", "create", "delete", "rename"
+	OldHash   string `json:"old_hash,omitempty"`
+	NewHash   string `json:"new_hash,omitempty"`
+}
+
+// PtraceDetail contains details specific to ptrace injection events.
+type PtraceDetail struct {
+	Request     uint32 `json:"request"`
+	RequestName string `json:"request_name"`
+	TargetPID   uint32 `json:"target_pid"`
+	TargetComm  string `json:"target_comm"`
+	Addr        uint64 `json:"addr,omitempty"`
+}
+
+// LibIntegrityDetail contains details specific to shared library modification events.
+type LibIntegrityDetail struct {
+	LibraryPath string `json:"library_path"`
+	Operation   string `json:"operation"` // "write", "rename", "delete"
+	OldHash     string `json:"old_hash,omitempty"`
+	NewHash     string `json:"new_hash,omitempty"`
+	InLdCache   bool   `json:"in_ld_cache"`
 }
 
 // PolicyAction defines what the server does when an event matches a policy.

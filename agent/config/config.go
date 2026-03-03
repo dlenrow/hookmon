@@ -55,9 +55,12 @@ type TLSConfig struct {
 // SensorConfig controls which sensors are enabled.
 type SensorConfig struct {
 	BPFSyscall     bool `yaml:"bpf_syscall"`
-	ExecvePreload  bool `yaml:"execve_preload"`
+	ExecInjection  bool `yaml:"exec_injection"`
 	SHMMonitor     bool `yaml:"shm_monitor"`
 	DlopenMonitor  bool `yaml:"dlopen_monitor"`
+	LinkerConfig   bool `yaml:"linker_config"`
+	PtraceMonitor  bool `yaml:"ptrace_monitor"`
+	LibIntegrity   bool `yaml:"lib_integrity"`
 }
 
 // DefaultConfig returns an AgentConfig with sensible defaults.
@@ -69,9 +72,12 @@ func DefaultConfig() *AgentConfig {
 		LogLevel:          "info",
 		Sensors: SensorConfig{
 			BPFSyscall:    true,
-			ExecvePreload: true,
+			ExecInjection: true,
 			SHMMonitor:    true,
 			DlopenMonitor: true,
+			LinkerConfig:  true,
+			PtraceMonitor: true,
+			LibIntegrity:  true,
 		},
 	}
 }

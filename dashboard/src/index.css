@@ -491,7 +491,7 @@ body {
   color: #f472b6;
 }
 
-.badge-preload {
+.badge-exec-injection {
   background-color: rgba(249, 115, 22, 0.12);
   color: #fb923c;
 }
@@ -504,6 +504,21 @@ body {
 .badge-dlopen {
   background-color: rgba(20, 184, 166, 0.12);
   color: #2dd4bf;
+}
+
+.badge-linker-config {
+  background-color: rgba(234, 179, 8, 0.12);
+  color: #facc15;
+}
+
+.badge-ptrace {
+  background-color: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+}
+
+.badge-lib-integrity {
+  background-color: rgba(99, 102, 241, 0.12);
+  color: #818cf8;
 }
 
 /* Action badges */

@@ -9,11 +9,14 @@ HookMon has three tiers: **agents** on monitored hosts, an **appliance** running
  ┌────────────────────────────┐           ┌──────────────────────────┐
  │  hookmon-agent (root)      │           │  Grafana :3000           │
  │  ┌────────────────────┐    │           │    └─ HookMon dashboard  │
- │  │ Sensors (eBPF)     │    │           │                          │
+ │  │ Sensors             │    │           │                          │
  │  │  bpf_syscall        │    │           │  Loki :3100              │
- │  │  execve_preload     │    │           │    └─ event log store    │
+ │  │  exec_injection     │    │           │    └─ event log store    │
  │  │  shm_monitor        │    │           │                          │
  │  │  dlopen_monitor     │    │           │  Prometheus :9090        │
+ │  │  linker_config      │    │           │    └─ metrics store      │
+ │  │  ptrace_monitor     │    │           │                          │
+ │  │  lib_integrity      │    │           │                          │
  │  └───────┬────────────┘    │           │    └─ metrics store      │
  │          │ events          │           │                          │
  │  ┌───────▼────────────┐    │           │  (Future: hookmon-server │
@@ -39,20 +42,30 @@ HookMon has three tiers: **agents** on monitored hosts, an **appliance** running
 
 ### Sensors
 
-Each sensor is an eBPF program compiled from C, loaded at agent startup, and attached to a kernel hook point. Events flow through a ring buffer to userspace.
+Each sensor monitors a specific code injection vector. eBPF-based sensors use tracepoints or uprobes; filesystem-based sensors use fanotify. Events flow to the agent pipeline for enrichment and forwarding.
 
-| Sensor | Hook Point | eBPF Type | What It Captures |
-|--------|-----------|-----------|-----------------|
-| `bpf_syscall` | `tracepoint/syscalls/sys_enter_bpf` | Tracepoint | BPF_PROG_LOAD, BPF_PROG_ATTACH, BPF_MAP_CREATE commands with program name, type, instruction count, bytecode hash |
-| `execve_preload` | `tracepoint/syscalls/sys_enter_execve` | Tracepoint | LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH in process environment |
-| `shm_monitor` | `shm_open()` in libc | Uprobe | Shared memory creation matching bpftime patterns |
-| `dlopen_monitor` | `dlopen()` in libc | Uprobe | Runtime library loading with path and flags |
+| Sensor | Hook Point | Type | What It Captures |
+|--------|-----------|------|-----------------|
+| `bpf_syscall` | `tracepoint/syscalls/sys_enter_bpf` | eBPF tracepoint | BPF_PROG_LOAD, BPF_PROG_ATTACH, BPF_MAP_CREATE commands with program name, type, instruction count, bytecode hash |
+| `exec_injection` | `tracepoint/syscalls/sys_enter_execve` | eBPF tracepoint | LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH, LD_DEBUG in process environment |
+| `shm_monitor` | `tracepoint/syscalls/sys_enter_openat` | eBPF tracepoint | Shared memory creation matching bpftime patterns in /dev/shm |
+| `dlopen_monitor` | `dlopen()` in libc | eBPF uprobe | Runtime library loading with path and flags |
+| `linker_config` | `/etc/ld.so.preload`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d/` | fanotify | Write/create/delete/rename of linker configuration files |
+| `ptrace_monitor` | `tracepoint/syscalls/sys_enter_ptrace` | eBPF tracepoint | PTRACE_ATTACH, PTRACE_SEIZE, PTRACE_POKETEXT, PTRACE_POKEDATA with target PID and address |
+| `lib_integrity` | `/usr/lib`, `/usr/lib64`, `/lib`, `/lib64` | fanotify | Write/rename/delete of shared library (.so) files with before/after hashes |
 
 All sensors implement the `Sensor` interface:
 
 ```go
+type SensorType string
+const (
+    SensorTypeBPF      SensorType = "bpf"
+    SensorTypeFanotify SensorType = "fanotify"
+)
+
 type Sensor interface {
     Name() string
+    Type() SensorType
     Start() error
     Stop() error
     Events() <-chan *event.HookEvent
@@ -93,9 +106,9 @@ The agent supports multiple output modes, selectable at startup:
 Every detection produces a `HookEvent` with:
 
 - **Identity:** UUID, nanosecond timestamp, host ID, hostname
-- **Classification:** event type (BPF_LOAD, LD_PRELOAD, SHM_CREATE, DLOPEN), severity
+- **Classification:** event type (BPF_LOAD, BPF_ATTACH, EXEC_INJECTION, SHM_CREATE, DLOPEN, LINKER_CONFIG, PTRACE_INJECT, LIB_INTEGRITY), severity
 - **Process context:** PID, PPID, UID, GID, comm, cmdline, exe path, exe hash, cgroup, container ID
-- **Type-specific detail:** one of `BPFDetail`, `PreloadDetail`, `SHMDetail`, `DlopenDetail`
+- **Type-specific detail:** one of `BPFDetail`, `ExecInjectionDetail`, `SHMDetail`, `DlopenDetail`, `LinkerConfigDetail`, `PtraceDetail`, `LibIntegrityDetail`
 
 See `pkg/event/event.go` for the full struct definition.
 
@@ -120,7 +133,7 @@ The pre-built dashboard (`deploy/docker/grafana/dashboards/hookmon.json`) includ
 - **Events by Severity** — donut chart (color-coded INFO/WARN/ALERT/CRITICAL)
 - **Event Timeline** — Loki log panel with full event JSON
 - **Recent BPF Loads** — table with prog_name, prog_hash, comm
-- **LD_PRELOAD Detections** — table with library_path, target_binary
+- **Exec Injection Detections** — table with library_path, target_binary, env_var
 - **BPF Instruction Count** — histogram of program complexity
 
 ## Directory Structure

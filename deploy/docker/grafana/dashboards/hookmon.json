@@ -260,7 +260,7 @@
       ]
     },
     {
-      "title": "LD_PRELOAD Detections",
+      "title": "Exec Injection Detections",
       "type": "table",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "datasource": { "type": "loki", "uid": "loki" },
@@ -283,9 +283,9 @@
             "includeByName": {
               "Time": true,
               "comm": true,
-              "preload_detail_library_path": true,
-              "preload_detail_target_binary": true,
-              "preload_detail_set_by": true,
+              "exec_injection_detail_library_path": true,
+              "exec_injection_detail_target_binary": true,
+              "exec_injection_detail_set_by": true,
               "severity": true
             }
           }
@@ -293,7 +293,7 @@
       ],
       "targets": [
         {
-          "expr": "{service=\"hookmon\", event_type=\"LD_PRELOAD\"} | json",
+          "expr": "{service=\"hookmon\", event_type=\"EXEC_INJECTION\"} | json",
           "legendFormat": "",
           "refId": "A"
         }

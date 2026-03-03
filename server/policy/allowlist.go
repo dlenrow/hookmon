@@ -40,14 +40,14 @@ func Matches(entry *event.AllowlistEntry, evt *event.HookEvent) bool {
 		}
 	}
 
-	// LibraryHash: exact match on the library hash from PreloadDetail or DlopenDetail.
+	// LibraryHash: exact match on the library hash from ExecInjectionDetail or DlopenDetail.
 	if entry.LibraryHash != "" {
 		if !matchLibraryHash(entry.LibraryHash, evt) {
 			return false
 		}
 	}
 
-	// LibraryPath: glob match on the library path from PreloadDetail or DlopenDetail.
+	// LibraryPath: glob match on the library path from ExecInjectionDetail or DlopenDetail.
 	if entry.LibraryPath != "" {
 		if !matchLibraryPath(entry.LibraryPath, evt) {
 			return false
@@ -120,9 +120,9 @@ func eventTypeIn(et event.EventType, types []event.EventType) bool {
 	return false
 }
 
-// matchLibraryHash checks the library hash against PreloadDetail or DlopenDetail.
+// matchLibraryHash checks the library hash against ExecInjectionDetail or DlopenDetail.
 func matchLibraryHash(hash string, evt *event.HookEvent) bool {
-	if evt.PreloadDetail != nil && evt.PreloadDetail.LibraryHash == hash {
+	if evt.ExecInjectionDetail != nil && evt.ExecInjectionDetail.LibraryHash == hash {
 		return true
 	}
 	if evt.DlopenDetail != nil && evt.DlopenDetail.LibraryHash == hash {
@@ -131,10 +131,10 @@ func matchLibraryHash(hash string, evt *event.HookEvent) bool {
 	return false
 }
 
-// matchLibraryPath checks the library path glob against PreloadDetail or DlopenDetail.
+// matchLibraryPath checks the library path glob against ExecInjectionDetail or DlopenDetail.
 func matchLibraryPath(pattern string, evt *event.HookEvent) bool {
-	if evt.PreloadDetail != nil {
-		matched, err := filepath.Match(pattern, evt.PreloadDetail.LibraryPath)
+	if evt.ExecInjectionDetail != nil {
+		matched, err := filepath.Match(pattern, evt.ExecInjectionDetail.LibraryPath)
 		if err == nil && matched {
 			return true
 		}

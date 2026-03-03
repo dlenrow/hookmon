@@ -117,9 +117,9 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal bpf_detail: %w", err)
 	}
-	preloadJSON, err := nullableJSON(ev.PreloadDetail)
+	execInjJSON, err := nullableJSON(ev.ExecInjectionDetail)
 	if err != nil {
-		return fmt.Errorf("marshal preload_detail: %w", err)
+		return fmt.Errorf("marshal exec_injection_detail: %w", err)
 	}
 	shmJSON, err := nullableJSON(ev.SHMDetail)
 	if err != nil {
@@ -128,6 +128,18 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 	dlopenJSON, err := nullableJSON(ev.DlopenDetail)
 	if err != nil {
 		return fmt.Errorf("marshal dlopen_detail: %w", err)
+	}
+	linkerJSON, err := nullableJSON(ev.LinkerConfigDetail)
+	if err != nil {
+		return fmt.Errorf("marshal linker_config_detail: %w", err)
+	}
+	ptraceJSON, err := nullableJSON(ev.PtraceDetail)
+	if err != nil {
+		return fmt.Errorf("marshal ptrace_detail: %w", err)
+	}
+	libIntJSON, err := nullableJSON(ev.LibIntegrityDetail)
+	if err != nil {
+		return fmt.Errorf("marshal lib_integrity_detail: %w", err)
 	}
 	policyJSON, err := nullableJSON(ev.PolicyResult)
 	if err != nil {
@@ -141,7 +153,8 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 			pid, ppid, uid, gid,
 			comm, cmdline, exe_path, exe_hash,
 			cgroup_path, container_id, namespace,
-			bpf_detail, preload_detail, shm_detail, dlopen_detail,
+			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
+			linker_config_detail, ptrace_detail, lib_integrity_detail,
 			policy_result
 		) VALUES (
 			$1, $2, $3, $4,
@@ -150,7 +163,8 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 			$11, $12, $13, $14,
 			$15, $16, $17,
 			$18, $19, $20, $21,
-			$22
+			$22, $23, $24,
+			$25
 		)`
 
 	_, err = s.pool.Exec(ctx, query,
@@ -159,7 +173,8 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 		ev.PID, ev.PPID, ev.UID, ev.GID,
 		ev.Comm, ev.Cmdline, ev.ExePath, ev.ExeHash,
 		ev.CgroupPath, ev.ContainerID, ev.Namespace,
-		bpfJSON, preloadJSON, shmJSON, dlopenJSON,
+		bpfJSON, execInjJSON, shmJSON, dlopenJSON,
+		linkerJSON, ptraceJSON, libIntJSON,
 		policyJSON,
 	)
 	if err != nil {
@@ -222,7 +237,8 @@ func (s *Store) QueryEvents(ctx context.Context, filter EventFilter) ([]*event.H
 			pid, ppid, uid, gid,
 			comm, cmdline, exe_path, exe_hash,
 			cgroup_path, container_id, namespace,
-			bpf_detail, preload_detail, shm_detail, dlopen_detail,
+			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
+			linker_config_detail, ptrace_detail, lib_integrity_detail,
 			policy_result
 		FROM events
 		%s
@@ -257,7 +273,8 @@ func (s *Store) QueryEvents(ctx context.Context, filter EventFilter) ([]*event.H
 func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 	var ev event.HookEvent
 	var eventType, severity string
-	var bpfJSON, preloadJSON, shmJSON, dlopenJSON, policyJSON []byte
+	var bpfJSON, execInjJSON, shmJSON, dlopenJSON []byte
+	var linkerJSON, ptraceJSON, libIntJSON, policyJSON []byte
 
 	err := rows.Scan(
 		&ev.ID, &ev.Timestamp, &ev.HostID, &ev.Hostname,
@@ -265,7 +282,8 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 		&ev.PID, &ev.PPID, &ev.UID, &ev.GID,
 		&ev.Comm, &ev.Cmdline, &ev.ExePath, &ev.ExeHash,
 		&ev.CgroupPath, &ev.ContainerID, &ev.Namespace,
-		&bpfJSON, &preloadJSON, &shmJSON, &dlopenJSON,
+		&bpfJSON, &execInjJSON, &shmJSON, &dlopenJSON,
+		&linkerJSON, &ptraceJSON, &libIntJSON,
 		&policyJSON,
 	)
 	if err != nil {
@@ -281,10 +299,10 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 			return nil, fmt.Errorf("unmarshal bpf_detail: %w", err)
 		}
 	}
-	if len(preloadJSON) > 0 {
-		ev.PreloadDetail = &event.PreloadDetail{}
-		if err := json.Unmarshal(preloadJSON, ev.PreloadDetail); err != nil {
-			return nil, fmt.Errorf("unmarshal preload_detail: %w", err)
+	if len(execInjJSON) > 0 {
+		ev.ExecInjectionDetail = &event.ExecInjectionDetail{}
+		if err := json.Unmarshal(execInjJSON, ev.ExecInjectionDetail); err != nil {
+			return nil, fmt.Errorf("unmarshal exec_injection_detail: %w", err)
 		}
 	}
 	if len(shmJSON) > 0 {
@@ -297,6 +315,24 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 		ev.DlopenDetail = &event.DlopenDetail{}
 		if err := json.Unmarshal(dlopenJSON, ev.DlopenDetail); err != nil {
 			return nil, fmt.Errorf("unmarshal dlopen_detail: %w", err)
+		}
+	}
+	if len(linkerJSON) > 0 {
+		ev.LinkerConfigDetail = &event.LinkerConfigDetail{}
+		if err := json.Unmarshal(linkerJSON, ev.LinkerConfigDetail); err != nil {
+			return nil, fmt.Errorf("unmarshal linker_config_detail: %w", err)
+		}
+	}
+	if len(ptraceJSON) > 0 {
+		ev.PtraceDetail = &event.PtraceDetail{}
+		if err := json.Unmarshal(ptraceJSON, ev.PtraceDetail); err != nil {
+			return nil, fmt.Errorf("unmarshal ptrace_detail: %w", err)
+		}
+	}
+	if len(libIntJSON) > 0 {
+		ev.LibIntegrityDetail = &event.LibIntegrityDetail{}
+		if err := json.Unmarshal(libIntJSON, ev.LibIntegrityDetail); err != nil {
+			return nil, fmt.Errorf("unmarshal lib_integrity_detail: %w", err)
 		}
 	}
 	if len(policyJSON) > 0 {
@@ -317,7 +353,8 @@ func (s *Store) GetEvent(ctx context.Context, id string) (*event.HookEvent, erro
 			pid, ppid, uid, gid,
 			comm, cmdline, exe_path, exe_hash,
 			cgroup_path, container_id, namespace,
-			bpf_detail, preload_detail, shm_detail, dlopen_detail,
+			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
+			linker_config_detail, ptrace_detail, lib_integrity_detail,
 			policy_result
 		FROM events WHERE id = $1`
 
@@ -649,8 +686,8 @@ func nullableJSON(v any) ([]byte, error) {
 		if v.(*event.BPFDetail) == nil {
 			return nil, nil
 		}
-	case *event.PreloadDetail:
-		if v.(*event.PreloadDetail) == nil {
+	case *event.ExecInjectionDetail:
+		if v.(*event.ExecInjectionDetail) == nil {
 			return nil, nil
 		}
 	case *event.SHMDetail:
@@ -659,6 +696,18 @@ func nullableJSON(v any) ([]byte, error) {
 		}
 	case *event.DlopenDetail:
 		if v.(*event.DlopenDetail) == nil {
+			return nil, nil
+		}
+	case *event.LinkerConfigDetail:
+		if v.(*event.LinkerConfigDetail) == nil {
+			return nil, nil
+		}
+	case *event.PtraceDetail:
+		if v.(*event.PtraceDetail) == nil {
+			return nil, nil
+		}
+	case *event.LibIntegrityDetail:
+		if v.(*event.LibIntegrityDetail) == nil {
 			return nil, nil
 		}
 	case *event.PolicyResult:

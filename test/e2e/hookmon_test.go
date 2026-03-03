@@ -342,7 +342,7 @@ func TestWhitelistByExeHash(t *testing.T) {
 }
 
 // TestDetectBpftimeExploit simulates the full bpftime-go attack chain and
-// verifies that both SHM_CREATE (CRITICAL) and LD_PRELOAD (ALERT) events fire.
+// verifies that both SHM_CREATE (CRITICAL) and EXEC_INJECTION (ALERT) events fire.
 func TestDetectBpftimeExploit(t *testing.T) {
 	agent, err := StartAgent(agentBin())
 	if err != nil {
@@ -379,31 +379,32 @@ func TestDetectBpftimeExploit(t *testing.T) {
 		t.Errorf("expected severity CRITICAL for bpftime SHM, got %s", shmEvt.Severity)
 	}
 
-	// Phase 2: Detect LD_PRELOAD injection of fake_hook library
-	preloadEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
-		return e.EventType == event.EventLDPreload &&
-			e.PreloadDetail != nil &&
-			strings.Contains(e.PreloadDetail.LibraryPath, "fake_hook")
+	// Phase 2: Detect exec injection of fake_hook library
+	injEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventExecInjection &&
+			e.ExecInjectionDetail != nil &&
+			strings.Contains(e.ExecInjectionDetail.LibraryPath, "fake_hook")
 	}, 30*time.Second)
 
 	if err != nil {
-		t.Fatalf("did not detect LD_PRELOAD with fake_hook: %v", err)
+		t.Fatalf("did not detect EXEC_INJECTION with fake_hook: %v", err)
 	}
 
-	t.Logf("Detected LD_PRELOAD event:")
-	t.Logf("  PID: %d, Comm: %s", preloadEvt.PID, preloadEvt.Comm)
-	t.Logf("  LibraryPath: %s", preloadEvt.PreloadDetail.LibraryPath)
-	t.Logf("  TargetBinary: %s", preloadEvt.PreloadDetail.TargetBinary)
-	t.Logf("  LibraryHash: %s", preloadEvt.PreloadDetail.LibraryHash)
-	t.Logf("  SetBy: %s", preloadEvt.PreloadDetail.SetBy)
-	t.Logf("  Severity: %s", preloadEvt.Severity)
+	t.Logf("Detected EXEC_INJECTION event:")
+	t.Logf("  PID: %d, Comm: %s", injEvt.PID, injEvt.Comm)
+	t.Logf("  LibraryPath: %s", injEvt.ExecInjectionDetail.LibraryPath)
+	t.Logf("  TargetBinary: %s", injEvt.ExecInjectionDetail.TargetBinary)
+	t.Logf("  LibraryHash: %s", injEvt.ExecInjectionDetail.LibraryHash)
+	t.Logf("  SetBy: %s", injEvt.ExecInjectionDetail.SetBy)
+	t.Logf("  EnvVar: %s", injEvt.ExecInjectionDetail.EnvVar)
+	t.Logf("  Severity: %s", injEvt.Severity)
 
-	if preloadEvt.Severity != event.SeverityAlert {
-		t.Errorf("expected severity ALERT for LD_PRELOAD, got %s", preloadEvt.Severity)
+	if injEvt.Severity != event.SeverityAlert {
+		t.Errorf("expected severity ALERT for EXEC_INJECTION, got %s", injEvt.Severity)
 	}
 
 	t.Logf("=== bpftime attack chain fully detected ===")
-	t.Logf("  SHM_CREATE (CRITICAL) + LD_PRELOAD (ALERT) = userspace eBPF attack pattern")
+	t.Logf("  SHM_CREATE (CRITICAL) + EXEC_INJECTION (ALERT) = userspace eBPF attack pattern")
 }
 
 // TestDenyBpftimeByPolicy verifies that a DENY policy entry can match

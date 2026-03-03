@@ -169,12 +169,18 @@ func sensorFromEventType(et event.EventType) string {
 	switch et {
 	case event.EventBPFLoad, event.EventBPFAttach:
 		return "bpf_syscall"
-	case event.EventLDPreload:
-		return "execve_preload"
+	case event.EventExecInjection:
+		return "exec_injection"
 	case event.EventSHMCreate:
 		return "shm_monitor"
 	case event.EventDlopen:
 		return "dlopen_monitor"
+	case event.EventLinkerConfig:
+		return "linker_config"
+	case event.EventPtraceInject:
+		return "ptrace_monitor"
+	case event.EventLibIntegrity:
+		return "lib_integrity"
 	default:
 		return "unknown"
 	}

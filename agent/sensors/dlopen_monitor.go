@@ -45,7 +45,8 @@ func NewDlopenMonitorSensor() *DlopenMonitorSensor {
 	}
 }
 
-func (s *DlopenMonitorSensor) Name() string { return "dlopen_monitor" }
+func (s *DlopenMonitorSensor) Name() string       { return "dlopen_monitor" }
+func (s *DlopenMonitorSensor) Type() SensorType   { return SensorTypeBPF }
 
 func (s *DlopenMonitorSensor) Start() error {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(dlopenMonitorBPF))

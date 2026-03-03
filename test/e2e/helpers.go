@@ -217,8 +217,8 @@ func matchesEntry(entry *event.AllowlistEntry, evt *event.HookEvent) bool {
 	}
 	if entry.LibraryPath != "" {
 		switch evt.EventType {
-		case event.EventLDPreload:
-			if evt.PreloadDetail == nil || !strings.Contains(evt.PreloadDetail.LibraryPath, entry.LibraryPath) {
+		case event.EventExecInjection:
+			if evt.ExecInjectionDetail == nil || !strings.Contains(evt.ExecInjectionDetail.LibraryPath, entry.LibraryPath) {
 				return false
 			}
 		case event.EventSHMCreate:
@@ -230,7 +230,7 @@ func matchesEntry(entry *event.AllowlistEntry, evt *event.HookEvent) bool {
 		}
 	}
 	if entry.LibraryHash != "" {
-		if evt.PreloadDetail == nil || evt.PreloadDetail.LibraryHash != entry.LibraryHash {
+		if evt.ExecInjectionDetail == nil || evt.ExecInjectionDetail.LibraryHash != entry.LibraryHash {
 			return false
 		}
 	}

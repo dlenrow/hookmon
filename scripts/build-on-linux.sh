@@ -21,7 +21,7 @@ fi
 ARCH=$(uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 
 echo "=== Compiling eBPF C programs ==="
-for cfile in bpf_syscall.c execve_preload.c shm_monitor.c dlopen_monitor.c; do
+for cfile in bpf_syscall.c exec_injection.c shm_monitor.c dlopen_monitor.c ptrace_monitor.c; do
     ofile="${cfile%.c}.o"
     echo "  $cfile -> $ofile"
     clang -g -O2 -target bpf -D__TARGET_ARCH_${ARCH} \

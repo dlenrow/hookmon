@@ -10,11 +10,14 @@ enum EventType {
   EVENT_TYPE_UNSPECIFIED = 0;
   EVENT_TYPE_BPF_LOAD = 1;
   EVENT_TYPE_BPF_ATTACH = 2;
-  EVENT_TYPE_LD_PRELOAD = 3;
+  EVENT_TYPE_EXEC_INJECTION = 3;
   EVENT_TYPE_SHM_CREATE = 4;
   EVENT_TYPE_DLOPEN = 5;
-  EVENT_TYPE_AGENT_OFFLINE = 6;
-  EVENT_TYPE_AGENT_RECOVERED = 7;
+  EVENT_TYPE_LINKER_CONFIG = 6;
+  EVENT_TYPE_PTRACE_INJECT = 7;
+  EVENT_TYPE_LIB_INTEGRITY = 8;
+  EVENT_TYPE_AGENT_OFFLINE = 9;
+  EVENT_TYPE_AGENT_RECOVERED = 10;
 }
 
 enum Severity {
@@ -48,9 +51,12 @@ message HookEvent {
 
   // Type-specific payloads
   BPFDetail bpf_detail = 30;
-  PreloadDetail preload_detail = 31;
+  ExecInjectionDetail exec_injection_detail = 31;
   SHMDetail shm_detail = 32;
   DlopenDetail dlopen_detail = 33;
+  LinkerConfigDetail linker_config_detail = 34;
+  PtraceDetail ptrace_detail = 35;
+  LibIntegrityDetail lib_integrity_detail = 36;
 }
 
 message BPFDetail {
@@ -63,11 +69,35 @@ message BPFDetail {
   string prog_hash = 7;
 }
 
-message PreloadDetail {
+message ExecInjectionDetail {
   string library_path = 1;
   string library_hash = 2;
   string target_binary = 3;
   string set_by = 4;
+  string env_var = 5;
+}
+
+message LinkerConfigDetail {
+  string file_path = 1;
+  string operation = 2;
+  string old_hash = 3;
+  string new_hash = 4;
+}
+
+message PtraceDetail {
+  uint32 request = 1;
+  string request_name = 2;
+  uint32 target_pid = 3;
+  string target_comm = 4;
+  uint64 addr = 5;
+}
+
+message LibIntegrityDetail {
+  string library_path = 1;
+  string operation = 2;
+  string old_hash = 3;
+  string new_hash = 4;
+  bool in_ld_cache = 5;
 }
 
 message SHMDetail {

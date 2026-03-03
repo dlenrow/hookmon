@@ -13,20 +13,25 @@ var errNotLinux = fmt.Errorf("eBPF sensors require Linux (current OS: %s)", runt
 
 // Stub sensor for non-Linux platforms. All sensors share this implementation.
 type stubSensor struct {
-	name    string
-	eventCh chan *event.HookEvent
+	name       string
+	sensorType SensorType
+	eventCh    chan *event.HookEvent
 }
 
 func (s *stubSensor) Name() string                      { return s.name }
+func (s *stubSensor) Type() SensorType                  { return s.sensorType }
 func (s *stubSensor) Start() error                      { return errNotLinux }
 func (s *stubSensor) Stop() error                       { return nil }
 func (s *stubSensor) Events() <-chan *event.HookEvent   { return s.eventCh }
 
-func newStub(name string) *stubSensor {
-	return &stubSensor{name: name, eventCh: make(chan *event.HookEvent)}
+func newStub(name string, st SensorType) *stubSensor {
+	return &stubSensor{name: name, sensorType: st, eventCh: make(chan *event.HookEvent)}
 }
 
-func NewBPFSyscallSensor() Sensor       { return newStub("bpf_syscall") }
-func NewExecvePreloadSensor() Sensor    { return newStub("execve_preload") }
-func NewSHMMonitorSensor() Sensor       { return newStub("shm_monitor") }
-func NewDlopenMonitorSensor() Sensor    { return newStub("dlopen_monitor") }
+func NewBPFSyscallSensor() Sensor        { return newStub("bpf_syscall", SensorTypeBPF) }
+func NewExecInjectionSensor() Sensor     { return newStub("exec_injection", SensorTypeBPF) }
+func NewSHMMonitorSensor() Sensor        { return newStub("shm_monitor", SensorTypeBPF) }
+func NewDlopenMonitorSensor() Sensor     { return newStub("dlopen_monitor", SensorTypeBPF) }
+func NewLinkerConfigSensor() Sensor      { return newStub("linker_config", SensorTypeFanotify) }
+func NewPtraceMonitorSensor() Sensor     { return newStub("ptrace_monitor", SensorTypeBPF) }
+func NewLibIntegritySensor() Sensor      { return newStub("lib_integrity", SensorTypeFanotify) }

@@ -240,26 +240,33 @@ export function Investigation() {
               </div>
             )}
 
-            {event.preload_detail && (
+            {event.exec_injection_detail && (
               <div className="card" style={{ marginBottom: '24px' }}>
                 <div className="card-header">
-                  <h3>LD_PRELOAD Detail</h3>
+                  <h3>Exec Injection Detail</h3>
                 </div>
                 <div className="card-body">
                   <div className="detail-grid">
                     <span className="detail-label">Library Path</span>
-                    <span className="detail-value mono">{event.preload_detail.library_path}</span>
+                    <span className="detail-value mono">{event.exec_injection_detail.library_path}</span>
 
                     <span className="detail-label">Library Hash</span>
-                    <span className="detail-value mono" title={event.preload_detail.library_hash}>
-                      {event.preload_detail.library_hash ? truncateHash(event.preload_detail.library_hash) : '-'}
+                    <span className="detail-value mono" title={event.exec_injection_detail.library_hash}>
+                      {event.exec_injection_detail.library_hash ? truncateHash(event.exec_injection_detail.library_hash) : '-'}
                     </span>
 
                     <span className="detail-label">Target Binary</span>
-                    <span className="detail-value mono">{event.preload_detail.target_binary || '-'}</span>
+                    <span className="detail-value mono">{event.exec_injection_detail.target_binary || '-'}</span>
 
                     <span className="detail-label">Set By</span>
-                    <span className="detail-value">{event.preload_detail.set_by || '-'}</span>
+                    <span className="detail-value">{event.exec_injection_detail.set_by || '-'}</span>
+
+                    {event.exec_injection_detail.env_var && (
+                      <>
+                        <span className="detail-label">Env Variable</span>
+                        <span className="detail-value mono">{event.exec_injection_detail.env_var}</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -302,6 +309,108 @@ export function Investigation() {
 
                     <span className="detail-label">Flags</span>
                     <span className="detail-value mono">{event.dlopen_detail.flags}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {event.linker_config_detail && (
+              <div className="card" style={{ marginBottom: '24px' }}>
+                <div className="card-header">
+                  <h3>Linker Config Detail</h3>
+                </div>
+                <div className="card-body">
+                  <div className="detail-grid">
+                    <span className="detail-label">File Path</span>
+                    <span className="detail-value mono">{event.linker_config_detail.file_path}</span>
+
+                    <span className="detail-label">Operation</span>
+                    <span className="detail-value">{event.linker_config_detail.operation}</span>
+
+                    {event.linker_config_detail.old_hash && (
+                      <>
+                        <span className="detail-label">Old Hash</span>
+                        <span className="detail-value mono" title={event.linker_config_detail.old_hash}>
+                          {truncateHash(event.linker_config_detail.old_hash)}
+                        </span>
+                      </>
+                    )}
+
+                    {event.linker_config_detail.new_hash && (
+                      <>
+                        <span className="detail-label">New Hash</span>
+                        <span className="detail-value mono" title={event.linker_config_detail.new_hash}>
+                          {truncateHash(event.linker_config_detail.new_hash)}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {event.ptrace_detail && (
+              <div className="card" style={{ marginBottom: '24px' }}>
+                <div className="card-header">
+                  <h3>Ptrace Detail</h3>
+                </div>
+                <div className="card-body">
+                  <div className="detail-grid">
+                    <span className="detail-label">Request</span>
+                    <span className="detail-value mono">
+                      {event.ptrace_detail.request_name} ({event.ptrace_detail.request})
+                    </span>
+
+                    <span className="detail-label">Target PID</span>
+                    <span className="detail-value mono">{event.ptrace_detail.target_pid}</span>
+
+                    <span className="detail-label">Target Comm</span>
+                    <span className="detail-value mono">{event.ptrace_detail.target_comm}</span>
+
+                    {event.ptrace_detail.addr !== undefined && event.ptrace_detail.addr !== 0 && (
+                      <>
+                        <span className="detail-label">Address</span>
+                        <span className="detail-value mono">0x{event.ptrace_detail.addr.toString(16)}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {event.lib_integrity_detail && (
+              <div className="card" style={{ marginBottom: '24px' }}>
+                <div className="card-header">
+                  <h3>Library Integrity Detail</h3>
+                </div>
+                <div className="card-body">
+                  <div className="detail-grid">
+                    <span className="detail-label">Library Path</span>
+                    <span className="detail-value mono">{event.lib_integrity_detail.library_path}</span>
+
+                    <span className="detail-label">Operation</span>
+                    <span className="detail-value">{event.lib_integrity_detail.operation}</span>
+
+                    {event.lib_integrity_detail.old_hash && (
+                      <>
+                        <span className="detail-label">Old Hash</span>
+                        <span className="detail-value mono" title={event.lib_integrity_detail.old_hash}>
+                          {truncateHash(event.lib_integrity_detail.old_hash)}
+                        </span>
+                      </>
+                    )}
+
+                    {event.lib_integrity_detail.new_hash && (
+                      <>
+                        <span className="detail-label">New Hash</span>
+                        <span className="detail-value mono" title={event.lib_integrity_detail.new_hash}>
+                          {truncateHash(event.lib_integrity_detail.new_hash)}
+                        </span>
+                      </>
+                    )}
+
+                    <span className="detail-label">In ld.so.cache</span>
+                    <span className="detail-value">{event.lib_integrity_detail.in_ld_cache ? 'Yes' : 'No'}</span>
                   </div>
                 </div>
               </div>

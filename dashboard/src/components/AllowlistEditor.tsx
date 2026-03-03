@@ -10,9 +10,12 @@ interface AllowlistEditorProps {
 const EVENT_TYPES: EventType[] = [
   'BPF_LOAD',
   'BPF_ATTACH',
-  'LD_PRELOAD',
+  'EXEC_INJECTION',
   'SHM_CREATE',
   'DLOPEN',
+  'LINKER_CONFIG',
+  'PTRACE_INJECT',
+  'LIB_INTEGRITY',
 ];
 
 const ACTIONS: PolicyAction[] = ['ALLOW', 'ALERT', 'DENY'];

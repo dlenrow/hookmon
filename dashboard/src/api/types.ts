@@ -6,9 +6,12 @@
 export type EventType =
   | 'BPF_LOAD'
   | 'BPF_ATTACH'
-  | 'LD_PRELOAD'
+  | 'EXEC_INJECTION'
   | 'SHM_CREATE'
   | 'DLOPEN'
+  | 'LINKER_CONFIG'
+  | 'PTRACE_INJECT'
+  | 'LIB_INTEGRITY'
   | 'AGENT_OFFLINE'
   | 'AGENT_RECOVERED';
 
@@ -28,11 +31,12 @@ export interface BPFDetail {
   prog_hash: string;
 }
 
-export interface PreloadDetail {
+export interface ExecInjectionDetail {
   library_path: string;
   library_hash: string;
   target_binary: string;
   set_by: string;
+  env_var?: string;
 }
 
 export interface SHMDetail {
@@ -45,6 +49,29 @@ export interface DlopenDetail {
   library_path: string;
   library_hash: string;
   flags: number;
+}
+
+export interface LinkerConfigDetail {
+  file_path: string;
+  operation: string;
+  old_hash?: string;
+  new_hash?: string;
+}
+
+export interface PtraceDetail {
+  request: number;
+  request_name: string;
+  target_pid: number;
+  target_comm: string;
+  addr?: number;
+}
+
+export interface LibIntegrityDetail {
+  library_path: string;
+  operation: string;
+  old_hash?: string;
+  new_hash?: string;
+  in_ld_cache: boolean;
 }
 
 export interface PolicyResult {
@@ -72,9 +99,12 @@ export interface HookEvent {
   container_id: string;
   namespace: string;
   bpf_detail?: BPFDetail;
-  preload_detail?: PreloadDetail;
+  exec_injection_detail?: ExecInjectionDetail;
   shm_detail?: SHMDetail;
   dlopen_detail?: DlopenDetail;
+  linker_config_detail?: LinkerConfigDetail;
+  ptrace_detail?: PtraceDetail;
+  lib_integrity_detail?: LibIntegrityDetail;
   policy_result?: PolicyResult;
 }
 

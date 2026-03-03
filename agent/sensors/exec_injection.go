@@ -17,20 +17,22 @@ import (
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
-// execvePreloadEvent mirrors the C struct in execve_preload.c.
-type execvePreloadEvent struct {
-	EventType    uint32
-	PID          uint32
-	UID          uint32
-	GID          uint32
-	PPID         uint32
-	Comm         [16]byte
-	Filename     [256]byte
-	PreloadValue [256]byte
+// execInjectionEvent mirrors the C struct in exec_injection.c.
+type execInjectionEvent struct {
+	EventType  uint32
+	PID        uint32
+	UID        uint32
+	GID        uint32
+	PPID       uint32
+	Comm       [16]byte
+	Filename   [256]byte
+	EnvValue   [256]byte
+	EnvVarName [32]byte
 }
 
-// ExecvePreloadSensor monitors execve() syscalls for LD_PRELOAD usage.
-type ExecvePreloadSensor struct {
+// ExecInjectionSensor monitors execve() syscalls for dangerous linker env vars
+// (LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH, LD_DEBUG).
+type ExecInjectionSensor struct {
 	eventCh chan *event.HookEvent
 	tp      link.Link
 	reader  *ringbuf.Reader
@@ -38,17 +40,18 @@ type ExecvePreloadSensor struct {
 	done    chan struct{}
 }
 
-func NewExecvePreloadSensor() *ExecvePreloadSensor {
-	return &ExecvePreloadSensor{
+func NewExecInjectionSensor() *ExecInjectionSensor {
+	return &ExecInjectionSensor{
 		eventCh: make(chan *event.HookEvent, 256),
 		done:    make(chan struct{}),
 	}
 }
 
-func (s *ExecvePreloadSensor) Name() string { return "execve_preload" }
+func (s *ExecInjectionSensor) Name() string       { return "exec_injection" }
+func (s *ExecInjectionSensor) Type() SensorType   { return SensorTypeBPF }
 
-func (s *ExecvePreloadSensor) Start() error {
-	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(execvePreloadBPF))
+func (s *ExecInjectionSensor) Start() error {
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(execInjectionBPF))
 	if err != nil {
 		return fmt.Errorf("load BPF spec: %w", err)
 	}
@@ -82,7 +85,7 @@ func (s *ExecvePreloadSensor) Start() error {
 	return nil
 }
 
-func (s *ExecvePreloadSensor) Stop() error {
+func (s *ExecInjectionSensor) Stop() error {
 	close(s.done)
 	if s.reader != nil {
 		s.reader.Close()
@@ -96,9 +99,9 @@ func (s *ExecvePreloadSensor) Stop() error {
 	return nil
 }
 
-func (s *ExecvePreloadSensor) Events() <-chan *event.HookEvent { return s.eventCh }
+func (s *ExecInjectionSensor) Events() <-chan *event.HookEvent { return s.eventCh }
 
-func (s *ExecvePreloadSensor) readLoop() {
+func (s *ExecInjectionSensor) readLoop() {
 	for {
 		record, err := s.reader.Read()
 		if err != nil {
@@ -110,25 +113,27 @@ func (s *ExecvePreloadSensor) readLoop() {
 			}
 		}
 
-		var raw execvePreloadEvent
+		var raw execInjectionEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {
 			continue
 		}
 
+		envVar := nullTermStr(raw.EnvVarName[:])
 		hookEvt := &event.HookEvent{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now(),
-			EventType: event.EventLDPreload,
+			EventType: event.EventExecInjection,
 			Severity:  event.SeverityAlert,
 			PID:       raw.PID,
 			PPID:      raw.PPID,
 			UID:       raw.UID,
 			GID:       raw.GID,
 			Comm:      nullTermStr(raw.Comm[:]),
-			PreloadDetail: &event.PreloadDetail{
-				LibraryPath:  nullTermStr(raw.PreloadValue[:]),
+			ExecInjectionDetail: &event.ExecInjectionDetail{
+				LibraryPath:  nullTermStr(raw.EnvValue[:]),
 				TargetBinary: nullTermStr(raw.Filename[:]),
 				SetBy:        "env",
+				EnvVar:       envVar,
 			},
 		}
 
@@ -139,4 +144,4 @@ func (s *ExecvePreloadSensor) readLoop() {
 	}
 }
 
-// execvePreloadBPF is provided via go:embed in embed.go
+// execInjectionBPF is provided via go:embed in embed.go

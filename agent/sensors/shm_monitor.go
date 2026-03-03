@@ -47,7 +47,8 @@ func NewSHMMonitorSensor() *SHMMonitorSensor {
 	}
 }
 
-func (s *SHMMonitorSensor) Name() string { return "shm_monitor" }
+func (s *SHMMonitorSensor) Name() string       { return "shm_monitor" }
+func (s *SHMMonitorSensor) Type() SensorType   { return SensorTypeBPF }
 
 func (s *SHMMonitorSensor) Start() error {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(shmMonitorBPF))

@@ -15,11 +15,14 @@ const (
 	EventType_EVENT_TYPE_UNSPECIFIED     EventType = 0
 	EventType_EVENT_TYPE_BPF_LOAD       EventType = 1
 	EventType_EVENT_TYPE_BPF_ATTACH     EventType = 2
-	EventType_EVENT_TYPE_LD_PRELOAD     EventType = 3
+	EventType_EVENT_TYPE_EXEC_INJECTION EventType = 3
 	EventType_EVENT_TYPE_SHM_CREATE     EventType = 4
 	EventType_EVENT_TYPE_DLOPEN         EventType = 5
-	EventType_EVENT_TYPE_AGENT_OFFLINE  EventType = 6
-	EventType_EVENT_TYPE_AGENT_RECOVERED EventType = 7
+	EventType_EVENT_TYPE_LINKER_CONFIG   EventType = 6
+	EventType_EVENT_TYPE_PTRACE_INJECT   EventType = 7
+	EventType_EVENT_TYPE_LIB_INTEGRITY   EventType = 8
+	EventType_EVENT_TYPE_AGENT_OFFLINE   EventType = 9
+	EventType_EVENT_TYPE_AGENT_RECOVERED EventType = 10
 )
 
 // EventType_name maps enum values to their string names.
@@ -27,11 +30,14 @@ var EventType_name = map[int32]string{
 	0: "EVENT_TYPE_UNSPECIFIED",
 	1: "EVENT_TYPE_BPF_LOAD",
 	2: "EVENT_TYPE_BPF_ATTACH",
-	3: "EVENT_TYPE_LD_PRELOAD",
+	3: "EVENT_TYPE_EXEC_INJECTION",
 	4: "EVENT_TYPE_SHM_CREATE",
 	5: "EVENT_TYPE_DLOPEN",
-	6: "EVENT_TYPE_AGENT_OFFLINE",
-	7: "EVENT_TYPE_AGENT_RECOVERED",
+	6: "EVENT_TYPE_LINKER_CONFIG",
+	7: "EVENT_TYPE_PTRACE_INJECT",
+	8: "EVENT_TYPE_LIB_INTEGRITY",
+	9: "EVENT_TYPE_AGENT_OFFLINE",
+	10: "EVENT_TYPE_AGENT_RECOVERED",
 }
 
 // EventType_value maps enum string names to their int32 values.
@@ -39,11 +45,14 @@ var EventType_value = map[string]int32{
 	"EVENT_TYPE_UNSPECIFIED":     0,
 	"EVENT_TYPE_BPF_LOAD":       1,
 	"EVENT_TYPE_BPF_ATTACH":     2,
-	"EVENT_TYPE_LD_PRELOAD":     3,
+	"EVENT_TYPE_EXEC_INJECTION": 3,
 	"EVENT_TYPE_SHM_CREATE":     4,
 	"EVENT_TYPE_DLOPEN":         5,
-	"EVENT_TYPE_AGENT_OFFLINE":  6,
-	"EVENT_TYPE_AGENT_RECOVERED": 7,
+	"EVENT_TYPE_LINKER_CONFIG":   6,
+	"EVENT_TYPE_PTRACE_INJECT":   7,
+	"EVENT_TYPE_LIB_INTEGRITY":   8,
+	"EVENT_TYPE_AGENT_OFFLINE":   9,
+	"EVENT_TYPE_AGENT_RECOVERED": 10,
 }
 
 // String returns the string representation of the EventType.
@@ -120,9 +129,12 @@ type HookEvent struct {
 
 	// Type-specific payloads (at most one populated per event)
 	BPFDetail     *BPFDetail     `json:"bpf_detail,omitempty"`
-	PreloadDetail *PreloadDetail `json:"preload_detail,omitempty"`
+	ExecInjectionDetail *ExecInjectionDetail `json:"exec_injection_detail,omitempty"`
 	SHMDetail     *SHMDetail     `json:"shm_detail,omitempty"`
-	DlopenDetail  *DlopenDetail  `json:"dlopen_detail,omitempty"`
+	DlopenDetail        *DlopenDetail        `json:"dlopen_detail,omitempty"`
+	LinkerConfigDetail  *LinkerConfigDetail  `json:"linker_config_detail,omitempty"`
+	PtraceDetail        *PtraceDetail        `json:"ptrace_detail,omitempty"`
+	LibIntegrityDetail  *LibIntegrityDetail  `json:"lib_integrity_detail,omitempty"`
 }
 
 // BPFDetail contains fields specific to bpf() syscall events.
@@ -137,13 +149,14 @@ type BPFDetail struct {
 	ProgHash   string `json:"prog_hash"`
 }
 
-// PreloadDetail contains fields specific to LD_PRELOAD events.
-// Maps to hookmon.v1.PreloadDetail.
-type PreloadDetail struct {
+// ExecInjectionDetail contains fields specific to exec injection events.
+// Maps to hookmon.v1.ExecInjectionDetail.
+type ExecInjectionDetail struct {
 	LibraryPath  string `json:"library_path"`
 	LibraryHash  string `json:"library_hash"`
 	TargetBinary string `json:"target_binary"`
 	SetBy        string `json:"set_by"`
+	EnvVar       string `json:"env_var,omitempty"`
 }
 
 // SHMDetail contains fields specific to shared memory events.
@@ -160,4 +173,33 @@ type DlopenDetail struct {
 	LibraryPath string `json:"library_path"`
 	LibraryHash string `json:"library_hash"`
 	Flags       int32  `json:"flags"`
+}
+
+// LinkerConfigDetail contains fields specific to linker config modification events.
+// Maps to hookmon.v1.LinkerConfigDetail.
+type LinkerConfigDetail struct {
+	FilePath  string `json:"file_path"`
+	Operation string `json:"operation"`
+	OldHash   string `json:"old_hash,omitempty"`
+	NewHash   string `json:"new_hash,omitempty"`
+}
+
+// PtraceDetail contains fields specific to ptrace injection events.
+// Maps to hookmon.v1.PtraceDetail.
+type PtraceDetail struct {
+	Request     uint32 `json:"request"`
+	RequestName string `json:"request_name"`
+	TargetPID   uint32 `json:"target_pid"`
+	TargetComm  string `json:"target_comm"`
+	Addr        uint64 `json:"addr,omitempty"`
+}
+
+// LibIntegrityDetail contains fields specific to library integrity events.
+// Maps to hookmon.v1.LibIntegrityDetail.
+type LibIntegrityDetail struct {
+	LibraryPath string `json:"library_path"`
+	Operation   string `json:"operation"`
+	OldHash     string `json:"old_hash,omitempty"`
+	NewHash     string `json:"new_hash,omitempty"`
+	InLdCache   bool   `json:"in_ld_cache"`
 }

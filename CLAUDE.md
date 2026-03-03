@@ -11,7 +11,7 @@
 
 ## What This Is
 
-HookMon is an enterprise security appliance that detects, logs, and enforces policy on two of the most dangerous instrumentation vectors in Linux: **eBPF program loading** and **LD_PRELOAD library injection**. Both mechanisms allow an attacker with even unprivileged access to intercept function calls, exfiltrate data, and install persistent backdoors that are invisible to traditional security tooling (ps, /proc, lsof, bpftool for the userspace case).
+HookMon is an enterprise security appliance that detects, logs, and enforces policy on every mechanism by which code enters a Linux process: **eBPF program loading**, **environment-based library injection** (LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH/LD_DEBUG), **shared memory exploitation**, **runtime dlopen() injection**, **linker configuration tampering**, **ptrace code injection**, and **shared library replacement**. These mechanisms allow an attacker to intercept function calls, exfiltrate data, and install persistent backdoors that are invisible to traditional security tooling.
 
 ### The Threat Model
 
@@ -34,13 +34,14 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  hookmon-agent (per host)                                    │   │
 │  │                                                              │   │
-│  │  eBPF sensors:                                               │   │
-│  │    ├── bpf_syscall_monitor   — hooks bpf() syscall           │   │
-│  │    ├── execve_preload_monitor — hooks execve(), checks env   │   │
-│  │    ├── shm_monitor           — hooks shm_open/mmap for       │   │
-│  │    │                           bpftime-pattern detection      │   │
-│  │    └── dlopen_monitor        — hooks dlopen() for runtime    │   │
-│  │                                library injection              │   │
+│  │  Sensors (7):                                                 │   │
+│  │    ├── bpf_syscall      — hooks bpf() syscall (eBPF)         │   │
+│  │    ├── exec_injection   — hooks execve(), checks env (eBPF)  │   │
+│  │    ├── shm_monitor      — detects /dev/shm patterns (eBPF)   │   │
+│  │    ├── dlopen_monitor   — hooks dlopen() (eBPF uprobe)       │   │
+│  │    ├── linker_config    — watches ld.so config (fanotify)    │   │
+│  │    ├── ptrace_monitor   — hooks ptrace() inject (eBPF)       │   │
+│  │    └── lib_integrity    — watches .so files (fanotify)       │   │
 │  │                                                              │   │
 │  │  Userspace daemon:                                           │   │
 │  │    ├── event enrichment (pid → cmdline, cgroup, container)   │   │
@@ -105,15 +106,21 @@ hookmon/
 ├── agent/                     # Agent package
 │   ├── agent.go               # Agent lifecycle (start, stop, reconnect)
 │   ├── sensors/
+│   │   ├── sensor.go          # Common sensor interface (Sensor, SensorType)
 │   │   ├── bpf_syscall.go     # bpf() syscall hook sensor
 │   │   ├── bpf_syscall.c      # eBPF C program for bpf() hook
-│   │   ├── execve_preload.go  # execve() + LD_PRELOAD detection
-│   │   ├── execve_preload.c   # eBPF C program for execve() hook
-│   │   ├── shm_monitor.go     # /dev/shm + mmap pattern detection
-│   │   ├── shm_monitor.c      # eBPF C for shm_open/mmap hooks
+│   │   ├── exec_injection.go  # execve() + env var injection detection
+│   │   ├── exec_injection.c   # eBPF C for execve() hook
+│   │   ├── shm_monitor.go     # /dev/shm pattern detection
+│   │   ├── shm_monitor.c      # eBPF C for shm_open hooks
 │   │   ├── dlopen_monitor.go  # dlopen() interception
 │   │   ├── dlopen_monitor.c   # eBPF C for dlopen uprobe
-│   │   └── sensor.go          # Common sensor interface
+│   │   ├── linker_config.go   # ld.so config file monitoring (fanotify)
+│   │   ├── ptrace_monitor.go  # ptrace() injection detection
+│   │   ├── ptrace_monitor.c   # eBPF C for ptrace tracepoint
+│   │   ├── lib_integrity.go   # shared library file monitoring (fanotify)
+│   │   ├── embed.go           # eBPF .o file embeds
+│   │   └── sensor_stub.go     # macOS build stubs
 │   ├── enrichment/
 │   │   ├── process.go         # pid → cmdline, exe, cgroup, container ID
 │   │   ├── container.go       # Container runtime detection
@@ -258,7 +265,7 @@ type HookEvent struct {
     Hostname  string    `json:"hostname"`
 
     // What was detected
-    EventType   EventType `json:"event_type"`    // BPF_LOAD, LD_PRELOAD, SHM_CREATE, DLOPEN
+    EventType   EventType `json:"event_type"`    // BPF_LOAD, EXEC_INJECTION, SHM_CREATE, DLOPEN, LINKER_CONFIG, PTRACE_INJECT, LIB_INTEGRITY
     Severity    Severity  `json:"severity"`      // INFO, WARN, ALERT, CRITICAL
 
     // Process context
@@ -275,10 +282,13 @@ type HookEvent struct {
     Namespace   string   `json:"namespace"`     // k8s namespace if applicable
 
     // Event-type-specific payload
-    BPFDetail      *BPFDetail      `json:"bpf_detail,omitempty"`
-    PreloadDetail  *PreloadDetail  `json:"preload_detail,omitempty"`
-    SHMDetail      *SHMDetail      `json:"shm_detail,omitempty"`
-    DlopenDetail   *DlopenDetail   `json:"dlopen_detail,omitempty"`
+    BPFDetail            *BPFDetail            `json:"bpf_detail,omitempty"`
+    ExecInjectionDetail  *ExecInjectionDetail  `json:"exec_injection_detail,omitempty"`
+    SHMDetail            *SHMDetail            `json:"shm_detail,omitempty"`
+    DlopenDetail         *DlopenDetail         `json:"dlopen_detail,omitempty"`
+    LinkerConfigDetail   *LinkerConfigDetail   `json:"linker_config_detail,omitempty"`
+    PtraceDetail         *PtraceDetail         `json:"ptrace_detail,omitempty"`
+    LibIntegrityDetail   *LibIntegrityDetail   `json:"lib_integrity_detail,omitempty"`
 
     // Policy evaluation result (filled by server)
     PolicyResult   *PolicyResult   `json:"policy_result,omitempty"`
@@ -286,11 +296,14 @@ type HookEvent struct {
 
 type EventType string
 const (
-    EventBPFLoad    EventType = "BPF_LOAD"      // bpf() syscall with BPF_PROG_LOAD
-    EventBPFAttach  EventType = "BPF_ATTACH"     // bpf() with attach commands
-    EventLDPreload  EventType = "LD_PRELOAD"     // LD_PRELOAD detected in execve()
-    EventSHMCreate  EventType = "SHM_CREATE"     // suspicious shared memory pattern
-    EventDlopen     EventType = "DLOPEN"         // dlopen() of non-standard library
+    EventBPFLoad      EventType = "BPF_LOAD"        // bpf() syscall with BPF_PROG_LOAD
+    EventBPFAttach    EventType = "BPF_ATTACH"       // bpf() with attach commands
+    EventExecInjection EventType = "EXEC_INJECTION"  // LD_PRELOAD/LD_AUDIT/etc. in execve()
+    EventSHMCreate    EventType = "SHM_CREATE"       // suspicious shared memory pattern
+    EventDlopen       EventType = "DLOPEN"           // dlopen() of non-standard library
+    EventLinkerConfig EventType = "LINKER_CONFIG"    // /etc/ld.so.preload or ld.so.conf modified
+    EventPtraceInject EventType = "PTRACE_INJECT"    // ptrace attach/poketext/pokedata
+    EventLibIntegrity EventType = "LIB_INTEGRITY"    // shared library modified on disk
 )
 
 type BPFDetail struct {
@@ -303,11 +316,12 @@ type BPFDetail struct {
     ProgHash     string `json:"prog_hash"`        // SHA256 of BPF bytecode if capturable
 }
 
-type PreloadDetail struct {
-    LibraryPath  string `json:"library_path"`     // value of LD_PRELOAD
-    LibraryHash  string `json:"library_hash"`     // SHA256 of preloaded library
-    TargetBinary string `json:"target_binary"`    // binary being exec'd with preload
+type ExecInjectionDetail struct {
+    LibraryPath  string `json:"library_path"`     // value of the env var
+    LibraryHash  string `json:"library_hash"`     // SHA256 of injected library
+    TargetBinary string `json:"target_binary"`    // binary being exec'd
     SetBy        string `json:"set_by"`           // "env", "ld.so.preload", "/etc/ld.so.preload"
+    EnvVar       string `json:"env_var"`          // which env var: LD_PRELOAD, LD_AUDIT, etc.
 }
 
 type SHMDetail struct {
@@ -320,6 +334,29 @@ type DlopenDetail struct {
     LibraryPath  string `json:"library_path"`
     LibraryHash  string `json:"library_hash"`
     Flags        int    `json:"flags"`            // RTLD_NOW, RTLD_LAZY, etc.
+}
+
+type LinkerConfigDetail struct {
+    FilePath    string `json:"file_path"`     // which config file was modified
+    Operation   string `json:"operation"`     // "write", "create", "delete", "rename"
+    OldHash     string `json:"old_hash"`      // hash before modification
+    NewHash     string `json:"new_hash"`      // hash after modification
+}
+
+type PtraceDetail struct {
+    Request     uint32 `json:"request"`       // PTRACE_ATTACH, PTRACE_POKETEXT, etc.
+    RequestName string `json:"request_name"`  // human-readable
+    TargetPID   uint32 `json:"target_pid"`
+    TargetComm  string `json:"target_comm"`
+    Addr        uint64 `json:"addr"`          // for POKETEXT/POKEDATA
+}
+
+type LibIntegrityDetail struct {
+    LibraryPath string `json:"library_path"`
+    Operation   string `json:"operation"`     // "write", "rename", "delete"
+    OldHash     string `json:"old_hash"`
+    NewHash     string `json:"new_hash"`
+    InLdCache   bool   `json:"in_ld_cache"`   // whether this lib is in ld.so.cache
 }
 ```
 
@@ -397,28 +434,22 @@ int trace_bpf_enter(struct trace_event_raw_sys_enter *ctx) {
 }
 ```
 
-### Sensor 2: execve() + LD_PRELOAD Monitor
+### Sensor 2: Exec Injection Monitor
 
-Hooks `sys_enter_execve` (or the `sched_process_exec` tracepoint for post-exec context). For every exec:
+Hooks `sys_enter_execve` via tracepoint. For every exec:
 1. Read the environment block from the new process
-2. Scan for `LD_PRELOAD=` entries
-3. Also check `/etc/ld.so.preload` inode for modifications (via inotify or periodic check)
+2. Scan for `LD_PRELOAD=`, `LD_AUDIT=`, `LD_LIBRARY_PATH=`, and `LD_DEBUG=` entries
+3. Emit event with the env var name, library path, and target binary
 
 Key challenge: reading the envp array from eBPF is bounded by BPF stack/instruction limits. Strategy:
 - Read first N environment variables (N=64 should cover all realistic cases)
-- String-match on "LD_PRELOAD" prefix
-- If found, emit event with the library path
-
-Additionally monitor for:
-- `LD_LIBRARY_PATH` manipulation (less dangerous but related)
-- `LD_AUDIT` (another library injection vector)
-- `/etc/ld.so.preload` file changes
+- Byte-by-byte prefix match on each target env var
+- If found, emit event with the library path and which env var was detected
 
 ### Sensor 3: Shared Memory Monitor
 
 Detect bpftime-style userspace eBPF by monitoring shared memory creation:
-- Hook `shm_open()` via uprobe on libc
-- Hook `mmap()` with `MAP_SHARED` flag
+- Hook `sys_enter_openat` tracepoint, filter for `/dev/shm/` paths
 - Pattern match on known bpftime shared memory naming conventions
 - Alert on any `/dev/shm` segment creation from non-whitelisted processes
 
@@ -432,6 +463,32 @@ Hook `dlopen()` via uprobe on libc/libdl. Captures:
 - RTLD flags
 
 This catches runtime library injection that doesn't use `LD_PRELOAD` — the attacker manually calls `dlopen()` on a malicious shared object after process startup.
+
+### Sensor 5: Linker Config Monitor
+
+Pure Go, no eBPF. Uses fanotify (`golang.org/x/sys/unix`) to watch:
+- `/etc/ld.so.preload` — system-wide library preload
+- `/etc/ld.so.conf` — linker configuration
+- `/etc/ld.so.conf.d/` — linker configuration drop-in directory
+
+Any write, create, delete, or rename of these files produces a LINKER_CONFIG event with before/after content hashes. Linker config modification is always CRITICAL — it affects every dynamically-linked process on the system.
+
+### Sensor 6: Ptrace Monitor
+
+eBPF tracepoint on `sys_enter_ptrace`. Filters for dangerous requests:
+- `PTRACE_ATTACH` (16) — attach to a running process
+- `PTRACE_SEIZE` (16902) — modern attach variant
+- `PTRACE_POKETEXT` (4) — write to process text segment
+- `PTRACE_POKEDATA` (5) — write to process data segment
+
+Events include the ptrace request type, target PID, target process comm, and memory address (for POKE operations). Legitimate debugger use (gdb, strace) should be allowlisted.
+
+### Sensor 7: Library Integrity Monitor
+
+Pure Go, fanotify-based. Watches standard library directories:
+- `/usr/lib/`, `/usr/lib64/`, `/lib/`, `/lib64/`
+
+Filters for `.so` files. On write, rename, or delete, produces a LIB_INTEGRITY event with the library path, operation, before/after SHA256 hashes, and whether the library is in the `ld.so.cache`. This detects trojanized library replacement attacks.
 
 ## Server Design Principles
 
@@ -459,9 +516,11 @@ Events are auto-classified based on allowlist evaluation:
 | Matches allowlist entry with ALLOW | INFO | Log only |
 | No allowlist match, known program type (e.g., BPF_PROG_TYPE_CGROUP_SKB) | WARN | Alert SOC |
 | No allowlist match, unknown binary hash | ALERT | Alert SOC, priority investigation |
-| LD_PRELOAD from non-root, non-whitelisted library | ALERT | Alert SOC |
+| Exec injection from non-root, non-whitelisted library | ALERT | Alert SOC |
+| Ptrace injection detected | ALERT | Alert SOC, process memory manipulation |
+| Shared library modified on disk | ALERT | Alert SOC, possible trojanized library |
 | bpftime-pattern shared memory from non-whitelisted process | CRITICAL | Alert SOC, possible active attack |
-| /etc/ld.so.preload modified | CRITICAL | Alert SOC, host may be compromised |
+| Linker configuration modified | CRITICAL | Alert SOC, system-wide injection vector |
 | Any event from process with no matching allowlist AND running as root | CRITICAL | Alert SOC, priority |
 
 ### Allowlist Bootstrapping
@@ -601,7 +660,7 @@ Build order:
 4. `event.go` — canonical event types
 5. `cmd/hookmon-agent/main.go` — agent binary that loads sensors, prints events to stdout
 
-At this point you have a working standalone agent that detects BPF loads and LD_PRELOAD usage on a single host.
+At this point you have a working standalone agent that detects BPF loads and exec injection on a single host.
 
 ### Phase 2: Central Server (MVP)
 
@@ -634,11 +693,18 @@ At this point you have a working standalone agent that detects BPF loads and LD_
 3. Agent enrollment flow
 4. ISO builder
 
-### Phase 6: Advanced Sensors
+### Phase 6: Advanced Sensors (Complete)
 
-1. `shm_monitor` — bpftime-style detection
-2. `dlopen_monitor` — runtime library injection
-3. Enforcement mode (optional, careful)
+All 7 sensors implemented:
+1. `bpf_syscall` — kernel eBPF detection (eBPF tracepoint)
+2. `exec_injection` — LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH/LD_DEBUG detection (eBPF tracepoint)
+3. `shm_monitor` — bpftime-style shared memory detection (eBPF tracepoint)
+4. `dlopen_monitor` — runtime library injection (eBPF uprobe)
+5. `linker_config` — ld.so config file monitoring (fanotify)
+6. `ptrace_monitor` — ptrace code injection detection (eBPF tracepoint)
+7. `lib_integrity` — shared library file integrity (fanotify)
+
+Future: Enforcement mode (optional, careful)
 
 ## Security of HookMon Itself
 

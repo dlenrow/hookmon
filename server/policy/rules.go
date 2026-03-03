@@ -23,37 +23,44 @@ type Rule struct {
 // DefaultRules returns the set of built-in rules that are always evaluated.
 func DefaultRules() []Rule {
 	return []Rule{
-		ruleLDPreloadFromRoot(),
+		ruleExecInjectionFromRoot(),
 		ruleLDSoPreloadModified(),
 		ruleBPFtimeSHM(),
 		ruleUnknownBinaryRoot(),
+		ruleLinkerConfigModified(),
+		rulePtraceFromNonDebugger(),
+		ruleLibraryReplacement(),
 	}
 }
 
-// ruleLDPreloadFromRoot fires when an LD_PRELOAD event originates from UID 0.
-// Root-initiated preload injection is suspicious because legitimate tools
+// ruleExecInjectionFromRoot fires when an exec injection event originates from UID 0.
+// Root-initiated injection is suspicious because legitimate tools
 // rarely need it and an attacker with root can persist a backdoor this way.
-func ruleLDPreloadFromRoot() Rule {
+func ruleExecInjectionFromRoot() Rule {
 	return Rule{
-		Name:        "ld_preload_from_root",
-		Description: "LD_PRELOAD set by root user (UID 0)",
+		Name:        "exec_injection_from_root",
+		Description: "Exec injection (LD_PRELOAD/LD_AUDIT/etc.) by root user (UID 0)",
 		Evaluate: func(evt *event.HookEvent) *event.PolicyResult {
-			if evt.EventType != event.EventLDPreload {
+			if evt.EventType != event.EventExecInjection {
 				return nil
 			}
 			if evt.UID != 0 {
 				return nil
 			}
+			envVar := "unknown"
+			if evt.ExecInjectionDetail != nil && evt.ExecInjectionDetail.EnvVar != "" {
+				envVar = evt.ExecInjectionDetail.EnvVar
+			}
 			return &event.PolicyResult{
 				Action: event.ActionAlert,
-				Reason: fmt.Sprintf("rule:ld_preload_from_root — LD_PRELOAD from UID 0 on %s (exe=%s)",
-					evt.Hostname, evt.ExePath),
+				Reason: fmt.Sprintf("rule:exec_injection_from_root — %s from UID 0 on %s (exe=%s)",
+					envVar, evt.Hostname, evt.ExePath),
 			}
 		},
 	}
 }
 
-// ruleLDSoPreloadModified fires when LD_PRELOAD was set via /etc/ld.so.preload.
+// ruleLDSoPreloadModified fires when injection was set via /etc/ld.so.preload.
 // Modification of this file is a high-confidence indicator of compromise because
 // it affects every dynamically-linked process on the host.
 func ruleLDSoPreloadModified() Rule {
@@ -61,19 +68,19 @@ func ruleLDSoPreloadModified() Rule {
 		Name:        "ld_so_preload_modified",
 		Description: "/etc/ld.so.preload modification detected",
 		Evaluate: func(evt *event.HookEvent) *event.PolicyResult {
-			if evt.EventType != event.EventLDPreload {
+			if evt.EventType != event.EventExecInjection {
 				return nil
 			}
-			if evt.PreloadDetail == nil {
+			if evt.ExecInjectionDetail == nil {
 				return nil
 			}
-			if evt.PreloadDetail.SetBy != "/etc/ld.so.preload" {
+			if evt.ExecInjectionDetail.SetBy != "/etc/ld.so.preload" {
 				return nil
 			}
 			return &event.PolicyResult{
 				Action: event.ActionAlert,
 				Reason: fmt.Sprintf("rule:ld_so_preload_modified — /etc/ld.so.preload changed on %s (library=%s)",
-					evt.Hostname, evt.PreloadDetail.LibraryPath),
+					evt.Hostname, evt.ExecInjectionDetail.LibraryPath),
 			}
 		},
 	}
@@ -123,6 +130,76 @@ func ruleUnknownBinaryRoot() Rule {
 				Action: event.ActionAlert,
 				Reason: fmt.Sprintf("rule:unknown_binary_root — event from root with no binary hash on %s (exe=%s, type=%s)",
 					evt.Hostname, evt.ExePath, evt.EventType),
+			}
+		},
+	}
+}
+
+// ruleLinkerConfigModified fires when a linker configuration file is modified.
+// These files (/etc/ld.so.preload, /etc/ld.so.conf) affect every dynamically-
+// linked process on the host.
+func ruleLinkerConfigModified() Rule {
+	return Rule{
+		Name:        "linker_config_modified",
+		Description: "Linker configuration file modified",
+		Evaluate: func(evt *event.HookEvent) *event.PolicyResult {
+			if evt.EventType != event.EventLinkerConfig {
+				return nil
+			}
+			filePath := "unknown"
+			if evt.LinkerConfigDetail != nil {
+				filePath = evt.LinkerConfigDetail.FilePath
+			}
+			return &event.PolicyResult{
+				Action: event.ActionAlert,
+				Reason: fmt.Sprintf("rule:linker_config_modified — %s changed on %s",
+					filePath, evt.Hostname),
+			}
+		},
+	}
+}
+
+// rulePtraceFromNonDebugger fires when ptrace is used by a process that isn't
+// a known debugger. PTRACE_POKETEXT/POKEDATA can inject arbitrary code.
+func rulePtraceFromNonDebugger() Rule {
+	return Rule{
+		Name:        "ptrace_injection",
+		Description: "Ptrace code injection detected",
+		Evaluate: func(evt *event.HookEvent) *event.PolicyResult {
+			if evt.EventType != event.EventPtraceInject {
+				return nil
+			}
+			if evt.PtraceDetail == nil {
+				return nil
+			}
+			return &event.PolicyResult{
+				Action: event.ActionAlert,
+				Reason: fmt.Sprintf("rule:ptrace_injection — %s on pid %d from %s (pid=%d) on %s",
+					evt.PtraceDetail.RequestName, evt.PtraceDetail.TargetPID,
+					evt.Comm, evt.PID, evt.Hostname),
+			}
+		},
+	}
+}
+
+// ruleLibraryReplacement fires when a shared library is modified on disk.
+// This could indicate a supply-chain attack or trojanized library.
+func ruleLibraryReplacement() Rule {
+	return Rule{
+		Name:        "library_replacement",
+		Description: "Shared library modified on disk",
+		Evaluate: func(evt *event.HookEvent) *event.PolicyResult {
+			if evt.EventType != event.EventLibIntegrity {
+				return nil
+			}
+			if evt.LibIntegrityDetail == nil {
+				return nil
+			}
+			return &event.PolicyResult{
+				Action: event.ActionAlert,
+				Reason: fmt.Sprintf("rule:library_replacement — %s %s on %s",
+					evt.LibIntegrityDetail.Operation,
+					evt.LibIntegrityDetail.LibraryPath, evt.Hostname),
 			}
 		},
 	}

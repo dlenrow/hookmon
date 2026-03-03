@@ -53,7 +53,8 @@ func NewBPFSyscallSensor() *BPFSyscallSensor {
 	}
 }
 
-func (s *BPFSyscallSensor) Name() string { return "bpf_syscall" }
+func (s *BPFSyscallSensor) Name() string       { return "bpf_syscall" }
+func (s *BPFSyscallSensor) Type() SensorType   { return SensorTypeBPF }
 
 func (s *BPFSyscallSensor) Start() error {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfSyscallBPF))

@@ -104,12 +104,18 @@ func eventDescription(et event.EventType) string {
 		return "BPF Program Loaded"
 	case event.EventBPFAttach:
 		return "BPF Program Attached"
-	case event.EventLDPreload:
-		return "LD_PRELOAD Library Injected"
+	case event.EventExecInjection:
+		return "Exec Injection Detected"
 	case event.EventSHMCreate:
 		return "Suspicious Shared Memory Created"
 	case event.EventDlopen:
 		return "Dynamic Library Loaded via dlopen"
+	case event.EventLinkerConfig:
+		return "Linker Configuration Modified"
+	case event.EventPtraceInject:
+		return "Ptrace Code Injection Detected"
+	case event.EventLibIntegrity:
+		return "Shared Library Modified on Disk"
 	default:
 		return "Unknown Hook Event"
 	}
@@ -146,13 +152,13 @@ func formatCEF(evt *event.HookEvent) string {
 		)
 	}
 
-	// Preload-specific extensions.
-	if evt.PreloadDetail != nil {
+	// Exec injection-specific extensions.
+	if evt.ExecInjectionDetail != nil {
 		ext = append(ext,
 			fmt.Sprintf("cs1Label=LibraryPath"),
-			fmt.Sprintf("cs1=%s", cefEscape(evt.PreloadDetail.LibraryPath)),
+			fmt.Sprintf("cs1=%s", cefEscape(evt.ExecInjectionDetail.LibraryPath)),
 			fmt.Sprintf("cs2Label=SetBy"),
-			fmt.Sprintf("cs2=%s", cefEscape(evt.PreloadDetail.SetBy)),
+			fmt.Sprintf("cs2=%s", cefEscape(evt.ExecInjectionDetail.SetBy)),
 		)
 	}
 
