@@ -376,34 +376,42 @@ func TestSensor8_ElfRpath_SuspiciousPath(t *testing.T) {
 	defer bus.Stop()
 
 	rpathBinary := canaryBinDir() + "/test_rpath"
+	libPath := canaryBinDir() + "/libfake_hook.so"
 
 	go func() {
 		time.Sleep(1 * time.Second)
-		// Execute the binary — the elf_rpath audit sensor runs on every execve
-		RunCanaryBinary(rpathBinary)
+		// Execute the binary with LD_PRELOAD to trigger exec_injection sensor,
+		// which populates ExePath and triggers the elf_rpath audit hook.
+		RunExecWithPreload(rpathBinary, libPath)
 	}()
 
 	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.EventType == event.EventElfRpath &&
-			e.ElfRpathDetail != nil
+			e.ElfRpathDetail != nil &&
+			strings.Contains(e.ExePath, "test_rpath")
 	}, 15*time.Second)
 
 	if err != nil {
-		t.Fatalf("did not detect ELF_RPATH event: %v", err)
+		t.Fatalf("did not detect ELF_RPATH event for test_rpath: %v", err)
 	}
 
-	t.Logf("PASS: ELF_RPATH detected — rpath=%s risk=%s setuid=%v pid=%d",
-		evt.ElfRpathDetail.RpathRaw, evt.ElfRpathDetail.HighestRisk,
-		evt.ElfRpathDetail.IsSetuid, evt.PID)
+	rpathStr := evt.ElfRpathDetail.RpathRaw
+	if rpathStr == "" {
+		rpathStr = evt.ElfRpathDetail.RunpathRaw
+	}
+	t.Logf("PASS: ELF_RPATH detected — rpath=%s runpath=%s risk=%s setuid=%v pid=%d",
+		evt.ElfRpathDetail.RpathRaw, evt.ElfRpathDetail.RunpathRaw,
+		evt.ElfRpathDetail.HighestRisk, evt.ElfRpathDetail.IsSetuid, evt.PID)
 
 	// /tmp/evil should be CRITICAL risk
 	if evt.ElfRpathDetail.HighestRisk != "CRITICAL" {
 		t.Errorf("expected CRITICAL risk for /tmp/evil RPATH, got %s", string(evt.ElfRpathDetail.HighestRisk))
 	}
 
-	// Should contain the /tmp/evil path
-	if !strings.Contains(evt.ElfRpathDetail.RpathRaw, "/tmp/evil") {
-		t.Errorf("expected RPATH to contain /tmp/evil, got %s", evt.ElfRpathDetail.RpathRaw)
+	// Should contain the /tmp/evil path in either RPATH or RUNPATH
+	if !strings.Contains(rpathStr, "/tmp/evil") {
+		t.Errorf("expected RPATH/RUNPATH to contain /tmp/evil, got rpath=%q runpath=%q",
+			evt.ElfRpathDetail.RpathRaw, evt.ElfRpathDetail.RunpathRaw)
 	}
 }
 

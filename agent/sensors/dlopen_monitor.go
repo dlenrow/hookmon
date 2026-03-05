@@ -4,6 +4,7 @@ package sensors
 
 import (
 	"bytes"
+	"debug/elf"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -64,13 +65,14 @@ func (s *DlopenMonitorSensor) Start() error {
 		return errors.New("BPF program 'trace_dlopen' not found")
 	}
 
-	// Try common libdl / libc paths
+	// Try libc first (glibc 2.34+ merged dlopen into libc), then libdl fallback
 	var ex *link.Executable
 	for _, path := range []string{
-		"/lib/x86_64-linux-gnu/libdl.so.2",
-		"/lib64/libdl.so.2",
 		"/lib/x86_64-linux-gnu/libc.so.6",
 		"/lib64/libc.so.6",
+		"/lib/aarch64-linux-gnu/libc.so.6",
+		"/lib/x86_64-linux-gnu/libdl.so.2",
+		"/lib64/libdl.so.2",
 	} {
 		ex, err = link.OpenExecutable(path)
 		if err == nil {
@@ -81,9 +83,25 @@ func (s *DlopenMonitorSensor) Start() error {
 		return fmt.Errorf("open libdl/libc for uprobe: %w", err)
 	}
 
-	s.uprobe, err = ex.Uprobe("dlopen", prog, nil)
-	if err != nil {
-		return fmt.Errorf("attach uprobe: %w", err)
+	// Try standard symbol names. On glibc 2.34+, dlopen is a versioned symbol
+	// (dlopen@@GLIBC_2.34) which some cilium/ebpf versions can't resolve.
+	// If all names fail, resolve the address manually from the ELF.
+	for _, sym := range []string{"dlopen", "__libc_dlopen_mode", "__dlopen"} {
+		s.uprobe, err = ex.Uprobe(sym, prog, nil)
+		if err == nil {
+			break
+		}
+	}
+	if s.uprobe == nil {
+		// Last resort: find dlopen offset from ELF dynamic symbols directly
+		addr, addrErr := findDynSymOffset("dlopen")
+		if addrErr != nil {
+			return fmt.Errorf("attach uprobe (all methods failed): %w", err)
+		}
+		s.uprobe, err = ex.Uprobe("", prog, &link.UprobeOptions{Address: addr})
+		if err != nil {
+			return fmt.Errorf("attach uprobe at offset 0x%x: %w", addr, err)
+		}
 	}
 
 	eventsMap := s.coll.Maps["events"]
@@ -154,6 +172,33 @@ func (s *DlopenMonitorSensor) readLoop() {
 		default:
 		}
 	}
+}
+
+// findDynSymOffset scans standard libc paths for a dynamic symbol and
+// returns its file offset. This handles versioned symbols like dlopen@@GLIBC_2.34
+// that cilium/ebpf's Uprobe can't resolve by name.
+func findDynSymOffset(name string) (uint64, error) {
+	for _, path := range []string{
+		"/lib/x86_64-linux-gnu/libc.so.6",
+		"/lib64/libc.so.6",
+		"/lib/aarch64-linux-gnu/libc.so.6",
+	} {
+		f, err := elf.Open(path)
+		if err != nil {
+			continue
+		}
+		syms, err := f.DynamicSymbols()
+		f.Close()
+		if err != nil {
+			continue
+		}
+		for _, sym := range syms {
+			if sym.Name == name && sym.Value != 0 {
+				return sym.Value, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("symbol %s not found in libc", name)
 }
 
 // dlopenMonitorBPF is provided via go:embed in embed.go

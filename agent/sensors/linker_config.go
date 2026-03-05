@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -46,23 +47,17 @@ func (s *LinkerConfigSensor) Type() SensorType   { return SensorTypeFanotify }
 func (s *LinkerConfigSensor) Events() <-chan *event.HookEvent { return s.eventCh }
 
 func (s *LinkerConfigSensor) Start() error {
-	// FAN_CLASS_NOTIF is unprivileged notification. FAN_CLOSE_WRITE detects
-	// file modifications after the writer closes the fd.
 	fd, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC, unix.O_RDONLY)
 	if err != nil {
 		return fmt.Errorf("fanotify_init: %w", err)
 	}
 	s.fd = fd
 
-	for _, path := range watchedLinkerPaths {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			continue // skip paths that don't exist yet
-		}
-		flags := uint(unix.FAN_CLOSE_WRITE | unix.FAN_CREATE | unix.FAN_DELETE | unix.FAN_MOVED_TO)
-		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD, flags, unix.AT_FDCWD, path); err != nil {
-			// Non-fatal: some paths may not be markable
-			continue
-		}
+	eventMask := uint64(unix.FAN_CLOSE_WRITE)
+	// Use FAN_MARK_MOUNT on /etc to catch writes to any file under /etc,
+	// then filter in handleEvent to only emit events for linker config paths.
+	if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_MOUNT, eventMask, unix.AT_FDCWD, "/etc"); err != nil {
+		return fmt.Errorf("fanotify_mark /etc: %w", err)
 	}
 
 	go s.readLoop()
@@ -113,12 +108,26 @@ func (s *LinkerConfigSensor) readLoop() {
 	}
 }
 
+func isLinkerConfigPath(path string) bool {
+	for _, watched := range watchedLinkerPaths {
+		if path == watched || strings.HasPrefix(path, watched+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *LinkerConfigSensor) handleEvent(meta *unix.FanotifyEventMetadata) {
 	// Resolve fd to path
 	fdPath := fmt.Sprintf("/proc/self/fd/%d", meta.Fd)
 	filePath, err := os.Readlink(fdPath)
 	if err != nil {
 		filePath = "unknown"
+	}
+
+	// Filter: only emit events for linker config paths
+	if !isLinkerConfigPath(filePath) {
+		return
 	}
 
 	op := "write"

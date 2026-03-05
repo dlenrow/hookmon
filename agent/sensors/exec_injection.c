@@ -104,8 +104,9 @@ int trace_execve_enter(struct trace_event_raw_sys_enter *ctx)
 
     char env_entry[MAX_PATH_LEN];
 
-    // Scan first MAX_ENV_VARS environment variables
-    #pragma unroll
+    // Scan first MAX_ENV_VARS environment variables.
+    // No #pragma unroll — the BPF verifier handles bounded loops (kernel 5.3+)
+    // and unrolling 64 iterations overflows clang-18's branch range.
     for (int i = 0; i < MAX_ENV_VARS; i++) {
         const char *env_ptr = NULL;
         bpf_probe_read_user(&env_ptr, sizeof(env_ptr), &envp[i]);

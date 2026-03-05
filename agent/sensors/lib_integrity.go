@@ -51,15 +51,23 @@ func (s *LibIntegritySensor) Start() error {
 	}
 	s.fd = fd
 
+	// Use FAN_MARK_MOUNT to catch writes to files within library directories.
+	// FAN_CLOSE_WRITE is the only event mask that delivers fd-based events
+	// without FAN_REPORT_FID; filtering to .so files happens in handleEvent.
+	marked := make(map[string]bool)
 	for _, dir := range watchedLibDirs {
 		if _, err := os.Stat(dir); os.IsNotExist(err) {
 			continue
 		}
-		// FAN_MARK_FILESYSTEM monitors the entire filesystem subtree under the path.
-		flags := uint(unix.FAN_CLOSE_WRITE | unix.FAN_CREATE | unix.FAN_DELETE | unix.FAN_MOVED_TO)
-		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD, flags, unix.AT_FDCWD, dir); err != nil {
+		// Avoid double-marking the same mount point
+		if marked[dir] {
 			continue
 		}
+		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_MOUNT,
+			uint64(unix.FAN_CLOSE_WRITE), unix.AT_FDCWD, dir); err != nil {
+			continue
+		}
+		marked[dir] = true
 	}
 
 	go s.readLoop()
@@ -117,8 +125,18 @@ func (s *LibIntegritySensor) handleEvent(meta *unix.FanotifyEventMetadata) {
 		return
 	}
 
-	// Only care about shared object files
+	// Only care about shared object files in watched library directories
 	if !strings.HasSuffix(filePath, ".so") && !strings.Contains(filePath, ".so.") {
+		return
+	}
+	inWatchedDir := false
+	for _, dir := range watchedLibDirs {
+		if strings.HasPrefix(filePath, dir+"/") {
+			inWatchedDir = true
+			break
+		}
+	}
+	if !inWatchedDir {
 		return
 	}
 

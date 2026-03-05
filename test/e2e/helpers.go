@@ -49,8 +49,8 @@ func StartBus(busBin string) (*BusProcess, error) {
 
 	bp := &BusProcess{
 		cmd:    cmd,
-		events: make(chan *event.HookEvent, 100),
-		lines:  make(chan string, 1000),
+		events: make(chan *event.HookEvent, 10000),
+		lines:  make(chan string, 10000),
 		done:   make(chan struct{}),
 	}
 
@@ -130,16 +130,17 @@ func (bp *BusProcess) WaitForEvent(filter func(*event.HookEvent) bool, timeout t
 // LoadCanary runs the BPF canary loader with sudo and returns when it exits.
 func LoadCanary(loaderBin, bpfObj, tpGroup, tpName, progName string) error {
 	cmd := exec.Command("sudo", loaderBin, bpfObj, tpGroup, tpName, progName)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 // RunCanaryBinary executes a canary binary with optional args (with sudo).
+// Output goes to stderr to avoid corrupting the bus's JSON stdout stream.
 func RunCanaryBinary(bin string, args ...string) error {
 	allArgs := append([]string{bin}, args...)
 	cmd := exec.Command("sudo", allArgs...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -148,7 +149,17 @@ func RunCanaryBinary(bin string, args ...string) error {
 func RunShellCanary(script string, args ...string) error {
 	allArgs := append([]string{"bash", script}, args...)
 	cmd := exec.Command("sudo", allArgs...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// RunExecWithPreload executes a binary with LD_PRELOAD set to trigger both
+// the exec_injection sensor (which sees the LD_PRELOAD) and the elf_rpath
+// audit (which runs on the enriched ExePath).
+func RunExecWithPreload(binary, libPath string) error {
+	cmd := exec.Command("sudo", "env", "LD_PRELOAD="+libPath, binary)
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -156,7 +167,7 @@ func RunShellCanary(script string, args ...string) error {
 // RunBpftimeSim executes the bpftime attack simulator.
 func RunBpftimeSim(simBin, libPath, targetBin string) error {
 	cmd := exec.Command("sudo", simBin, libPath, targetBin)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
