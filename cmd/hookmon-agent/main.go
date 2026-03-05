@@ -1,3 +1,6 @@
+// Deprecated: hookmon-agent has been renamed to hookmon-bus.
+// This binary is provided for backward compatibility only.
+// Use cmd/hookmon-bus instead.
 package main
 
 import (
@@ -12,6 +15,7 @@ import (
 
 	"github.com/dlenrow/hookmon/agent"
 	"github.com/dlenrow/hookmon/agent/config"
+	"github.com/dlenrow/hookmon/agent/sensors"
 	"github.com/dlenrow/hookmon/pkg/version"
 )
 
@@ -21,10 +25,21 @@ func main() {
 	consoleMode := flag.Bool("console", false, "print events to stdout as JSON (no server connection)")
 	lokiURL := flag.String("loki-url", "", "Loki push URL (e.g. http://localhost:3100); empty disables")
 	prometheusPort := flag.Int("prometheus-port", 0, "port to expose Prometheus metrics on; 0 disables")
+	scanRpath := flag.String("scan-rpath", "", "scan a directory for ELF RPATH issues and exit (e.g. /usr/bin)")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version.String())
+		os.Exit(0)
+	}
+
+	if *scanRpath != "" {
+		data, err := sensors.ScanDirectoryJSON(*scanRpath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scan-rpath error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
 		os.Exit(0)
 	}
 
@@ -35,6 +50,7 @@ func main() {
 	}
 	defer logger.Sync()
 
+	logger.Warn("hookmon-agent is deprecated — use hookmon-bus instead")
 	logger.Info("starting hookmon-agent", zap.String("version", version.Version), zap.Bool("console", *consoleMode))
 
 	cfg, err := config.Load(*configPath)
@@ -47,7 +63,7 @@ func main() {
 		cfg.LokiURL = *lokiURL
 	}
 	if *prometheusPort > 0 {
-		cfg.PrometheusPort = *prometheusPort
+		cfg.StatusPort = *prometheusPort
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

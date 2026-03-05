@@ -42,9 +42,29 @@ struct {
     __uint(max_entries, 256 * 1024);
 } events SEC(".maps");
 
+// Heartbeat map — written every HOOKMON_HEARTBEAT_INTERVAL_NS nanoseconds.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} hookmon_heartbeat_shm_monitor SEC(".maps");
+
+#define HOOKMON_HEARTBEAT_INTERVAL_NS (10ULL * 1000000000ULL)
+
+static __always_inline void hookmon_heartbeat(void *map) {
+    __u32 key = 0;
+    __u64 now = bpf_ktime_get_ns();
+    __u64 *last = bpf_map_lookup_elem(map, &key);
+    if (!last || (now - *last) >= HOOKMON_HEARTBEAT_INTERVAL_NS) {
+        bpf_map_update_elem(map, &key, &now, BPF_ANY);
+    }
+}
+
 SEC("tracepoint/syscalls/sys_enter_openat")
 int trace_shm_open(struct trace_event_raw_sys_enter *ctx)
 {
+    hookmon_heartbeat(&hookmon_heartbeat_shm_monitor);
     // sys_enter_openat args: [0]=dfd, [1]=filename, [2]=flags, [3]=mode
     const char *filename = (const char *)ctx->args[1];
     if (!filename)

@@ -521,6 +521,11 @@ body {
   color: #818cf8;
 }
 
+.badge-elf-rpath {
+  background-color: rgba(251, 191, 36, 0.12);
+  color: #fbbf24;
+}
+
 /* Action badges */
 .badge-allow {
   background-color: rgba(34, 197, 94, 0.12);

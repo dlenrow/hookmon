@@ -116,6 +116,8 @@ func eventDescription(et event.EventType) string {
 		return "Ptrace Code Injection Detected"
 	case event.EventLibIntegrity:
 		return "Shared Library Modified on Disk"
+	case event.EventElfRpath:
+		return "Suspicious ELF RPATH/RUNPATH Detected"
 	default:
 		return "Unknown Hook Event"
 	}
@@ -176,6 +178,26 @@ func formatCEF(evt *event.HookEvent) string {
 			fmt.Sprintf("cs4Label=PolicyResult"),
 			fmt.Sprintf("cs4=%s", cefEscape(string(evt.PolicyResult.Action))),
 		)
+	}
+
+	// ELF RPATH-specific extensions.
+	if evt.ElfRpathDetail != nil {
+		ext = append(ext,
+			fmt.Sprintf("cs5Label=HighestRisk"),
+			fmt.Sprintf("cs5=%s", cefEscape(string(evt.ElfRpathDetail.HighestRisk))),
+		)
+		if evt.ElfRpathDetail.RpathRaw != "" {
+			ext = append(ext,
+				fmt.Sprintf("cs6Label=RpathRaw"),
+				fmt.Sprintf("cs6=%s", cefEscape(evt.ElfRpathDetail.RpathRaw)),
+			)
+		}
+		if evt.ElfRpathDetail.RunpathRaw != "" {
+			ext = append(ext,
+				fmt.Sprintf("cs7Label=RunpathRaw"),
+				fmt.Sprintf("cs7=%s", cefEscape(evt.ElfRpathDetail.RunpathRaw)),
+			)
+		}
 	}
 
 	// BPF instruction count.

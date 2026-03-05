@@ -16,6 +16,7 @@ const (
 	EventLibIntegrity  EventType = "LIB_INTEGRITY"
 	EventAgentOffline  EventType = "AGENT_OFFLINE"
 	EventAgentRecovered EventType = "AGENT_RECOVERED"
+	EventElfRpath       EventType = "ELF_RPATH"
 )
 
 // Severity levels for events.
@@ -59,6 +60,7 @@ type HookEvent struct {
 	LinkerConfigDetail  *LinkerConfigDetail  `json:"linker_config_detail,omitempty"`
 	PtraceDetail        *PtraceDetail        `json:"ptrace_detail,omitempty"`
 	LibIntegrityDetail  *LibIntegrityDetail  `json:"lib_integrity_detail,omitempty"`
+	ElfRpathDetail      *ElfRpathDetail      `json:"elf_rpath_detail,omitempty"`
 
 	// Filled by server after policy evaluation
 	PolicyResult *PolicyResult `json:"policy_result,omitempty"`
@@ -125,6 +127,39 @@ type LibIntegrityDetail struct {
 	InLdCache   bool   `json:"in_ld_cache"`
 }
 
+// RpathRisk classifies the risk level of an RPATH/RUNPATH entry.
+type RpathRisk string
+
+const (
+	RpathRiskNone     RpathRisk = "NONE"
+	RpathRiskLow      RpathRisk = "LOW"
+	RpathRiskMedium   RpathRisk = "MEDIUM"
+	RpathRiskHigh     RpathRisk = "HIGH"
+	RpathRiskCritical RpathRisk = "CRITICAL"
+)
+
+// RpathEntry describes a single path from DT_RPATH or DT_RUNPATH with its risk classification.
+type RpathEntry struct {
+	Path    string    `json:"path"`
+	Risk    RpathRisk `json:"risk"`
+	Reason  string    `json:"reason"`
+	Exists  bool      `json:"exists"`
+	IsRpath bool      `json:"is_rpath"` // true = DT_RPATH (deprecated), false = DT_RUNPATH
+}
+
+// ElfRpathDetail contains details specific to ELF RPATH/RUNPATH analysis events.
+type ElfRpathDetail struct {
+	HasRpath      bool         `json:"has_rpath"`
+	HasRunpath    bool         `json:"has_runpath"`
+	RpathRaw      string       `json:"rpath_raw,omitempty"`
+	RunpathRaw    string       `json:"runpath_raw,omitempty"`
+	Entries       []RpathEntry `json:"entries"`
+	HighestRisk   RpathRisk    `json:"highest_risk"`
+	UsesOrigin    bool         `json:"uses_origin"`
+	UsesDeprecated bool        `json:"uses_deprecated"` // true if DT_RPATH is present
+	IsSetuid      bool         `json:"is_setuid"`
+}
+
 // PolicyAction defines what the server does when an event matches a policy.
 type PolicyAction string
 
@@ -166,6 +201,7 @@ type AllowlistEntry struct {
 	HostPattern    string      `json:"host_pattern"`
 	UIDRange       *UIDRange   `json:"uid_range"`
 	ContainerImage string      `json:"container_image"`
+	AllowedRpaths  []string    `json:"allowed_rpaths,omitempty"`
 
 	Action  PolicyAction `json:"action"`
 	Expires *time.Time   `json:"expires"`

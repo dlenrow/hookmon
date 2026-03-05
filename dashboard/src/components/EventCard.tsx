@@ -18,6 +18,7 @@ const EVENT_TYPE_CLASS: Record<EventType, string> = {
   LIB_INTEGRITY: 'badge-lib-integrity',
   AGENT_OFFLINE: 'badge-critical',
   AGENT_RECOVERED: 'badge-info',
+  ELF_RPATH: 'badge-elf-rpath',
 };
 
 function eventSummary(event: HookEvent): string {
@@ -51,6 +52,10 @@ function eventSummary(event: HookEvent): string {
       return event.lib_integrity_detail?.library_path
         ? `${event.lib_integrity_detail.operation}: ${event.lib_integrity_detail.library_path}`
         : 'Library modified';
+    case 'ELF_RPATH':
+      return event.elf_rpath_detail
+        ? `RPATH risk: ${event.elf_rpath_detail.highest_risk} in ${event.exe_path}`
+        : 'Suspicious ELF RPATH detected';
     case 'AGENT_OFFLINE':
       return 'Agent went offline';
     case 'AGENT_RECOVERED':

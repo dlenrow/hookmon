@@ -141,6 +141,10 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal lib_integrity_detail: %w", err)
 	}
+	elfRpathJSON, err := nullableJSON(ev.ElfRpathDetail)
+	if err != nil {
+		return fmt.Errorf("marshal elf_rpath_detail: %w", err)
+	}
 	policyJSON, err := nullableJSON(ev.PolicyResult)
 	if err != nil {
 		return fmt.Errorf("marshal policy_result: %w", err)
@@ -155,6 +159,7 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 			cgroup_path, container_id, namespace,
 			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
 			linker_config_detail, ptrace_detail, lib_integrity_detail,
+			elf_rpath_detail,
 			policy_result
 		) VALUES (
 			$1, $2, $3, $4,
@@ -164,7 +169,8 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 			$15, $16, $17,
 			$18, $19, $20, $21,
 			$22, $23, $24,
-			$25
+			$25,
+			$26
 		)`
 
 	_, err = s.pool.Exec(ctx, query,
@@ -175,6 +181,7 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 		ev.CgroupPath, ev.ContainerID, ev.Namespace,
 		bpfJSON, execInjJSON, shmJSON, dlopenJSON,
 		linkerJSON, ptraceJSON, libIntJSON,
+		elfRpathJSON,
 		policyJSON,
 	)
 	if err != nil {
@@ -239,6 +246,7 @@ func (s *Store) QueryEvents(ctx context.Context, filter EventFilter) ([]*event.H
 			cgroup_path, container_id, namespace,
 			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
 			linker_config_detail, ptrace_detail, lib_integrity_detail,
+			elf_rpath_detail,
 			policy_result
 		FROM events
 		%s
@@ -274,7 +282,7 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 	var ev event.HookEvent
 	var eventType, severity string
 	var bpfJSON, execInjJSON, shmJSON, dlopenJSON []byte
-	var linkerJSON, ptraceJSON, libIntJSON, policyJSON []byte
+	var linkerJSON, ptraceJSON, libIntJSON, elfRpathJSON, policyJSON []byte
 
 	err := rows.Scan(
 		&ev.ID, &ev.Timestamp, &ev.HostID, &ev.Hostname,
@@ -284,6 +292,7 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 		&ev.CgroupPath, &ev.ContainerID, &ev.Namespace,
 		&bpfJSON, &execInjJSON, &shmJSON, &dlopenJSON,
 		&linkerJSON, &ptraceJSON, &libIntJSON,
+		&elfRpathJSON,
 		&policyJSON,
 	)
 	if err != nil {
@@ -335,6 +344,12 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 			return nil, fmt.Errorf("unmarshal lib_integrity_detail: %w", err)
 		}
 	}
+	if len(elfRpathJSON) > 0 {
+		ev.ElfRpathDetail = &event.ElfRpathDetail{}
+		if err := json.Unmarshal(elfRpathJSON, ev.ElfRpathDetail); err != nil {
+			return nil, fmt.Errorf("unmarshal elf_rpath_detail: %w", err)
+		}
+	}
 	if len(policyJSON) > 0 {
 		ev.PolicyResult = &event.PolicyResult{}
 		if err := json.Unmarshal(policyJSON, ev.PolicyResult); err != nil {
@@ -355,6 +370,7 @@ func (s *Store) GetEvent(ctx context.Context, id string) (*event.HookEvent, erro
 			cgroup_path, container_id, namespace,
 			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
 			linker_config_detail, ptrace_detail, lib_integrity_detail,
+			elf_rpath_detail,
 			policy_result
 		FROM events WHERE id = $1`
 
@@ -407,6 +423,7 @@ func (s *Store) GetAllowlist(ctx context.Context) ([]*event.AllowlistEntry, erro
 			library_hash, library_path,
 			prog_name, prog_type, host_pattern,
 			uid_range, container_image,
+			allowed_rpaths,
 			action, expires, enabled
 		FROM allowlist
 		ORDER BY created_at DESC`
@@ -444,6 +461,14 @@ func (s *Store) CreateAllowlistEntry(ctx context.Context, entry *event.Allowlist
 		return fmt.Errorf("marshal uid_range: %w", err)
 	}
 
+	var allowedRpathsJSON []byte
+	if len(entry.AllowedRpaths) > 0 {
+		allowedRpathsJSON, err = json.Marshal(entry.AllowedRpaths)
+		if err != nil {
+			return fmt.Errorf("marshal allowed_rpaths: %w", err)
+		}
+	}
+
 	const query = `
 		INSERT INTO allowlist (
 			id, created_at, created_by, description,
@@ -451,6 +476,7 @@ func (s *Store) CreateAllowlistEntry(ctx context.Context, entry *event.Allowlist
 			library_hash, library_path,
 			prog_name, prog_type, host_pattern,
 			uid_range, container_image,
+			allowed_rpaths,
 			action, expires, enabled
 		) VALUES (
 			$1, $2, $3, $4,
@@ -458,7 +484,8 @@ func (s *Store) CreateAllowlistEntry(ctx context.Context, entry *event.Allowlist
 			$8, $9,
 			$10, $11, $12,
 			$13, $14,
-			$15, $16, $17
+			$15,
+			$16, $17, $18
 		)`
 
 	_, err = s.pool.Exec(ctx, query,
@@ -467,6 +494,7 @@ func (s *Store) CreateAllowlistEntry(ctx context.Context, entry *event.Allowlist
 		entry.LibraryHash, entry.LibraryPath,
 		entry.ProgName, entry.ProgType, entry.HostPattern,
 		uidRangeJSON, entry.ContainerImage,
+		allowedRpathsJSON,
 		string(entry.Action), entry.Expires, entry.Enabled,
 	)
 	if err != nil {
@@ -498,6 +526,7 @@ func scanAllowlistEntry(rows pgx.Rows) (*event.AllowlistEntry, error) {
 	var action string
 	var eventTypesJSON []byte
 	var uidRangeJSON []byte
+	var allowedRpathsJSON []byte
 
 	err := rows.Scan(
 		&entry.ID, &entry.CreatedAt, &entry.CreatedBy, &entry.Description,
@@ -505,6 +534,7 @@ func scanAllowlistEntry(rows pgx.Rows) (*event.AllowlistEntry, error) {
 		&entry.LibraryHash, &entry.LibraryPath,
 		&entry.ProgName, &entry.ProgType, &entry.HostPattern,
 		&uidRangeJSON, &entry.ContainerImage,
+		&allowedRpathsJSON,
 		&action, &entry.Expires, &entry.Enabled,
 	)
 	if err != nil {
@@ -523,6 +553,12 @@ func scanAllowlistEntry(rows pgx.Rows) (*event.AllowlistEntry, error) {
 		entry.UIDRange = &event.UIDRange{}
 		if err := json.Unmarshal(uidRangeJSON, entry.UIDRange); err != nil {
 			return nil, fmt.Errorf("unmarshal uid_range: %w", err)
+		}
+	}
+
+	if len(allowedRpathsJSON) > 0 {
+		if err := json.Unmarshal(allowedRpathsJSON, &entry.AllowedRpaths); err != nil {
+			return nil, fmt.Errorf("unmarshal allowed_rpaths: %w", err)
 		}
 	}
 
@@ -708,6 +744,10 @@ func nullableJSON(v any) ([]byte, error) {
 		}
 	case *event.LibIntegrityDetail:
 		if v.(*event.LibIntegrityDetail) == nil {
+			return nil, nil
+		}
+	case *event.ElfRpathDetail:
+		if v.(*event.ElfRpathDetail) == nil {
 			return nil, nil
 		}
 	case *event.PolicyResult:

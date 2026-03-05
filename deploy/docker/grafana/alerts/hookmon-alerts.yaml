@@ -1,0 +1,38 @@
+groups:
+  - name: hookmon
+    rules:
+      - alert: HookMonHostUnreachable
+        expr: hookmon_fleet_host_reachable == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HookMon sensor bus unreachable on {{ $labels.host }}"
+          description: >
+            The HookMon sensor bus on {{ $labels.host }} has not responded to
+            polling for 2 minutes. This may indicate the sensor bus was killed
+            or the host is down. Investigate immediately.
+
+      - alert: HookMonSensorDead
+        expr: hookmon_fleet_sensor_alive == 0
+        for: 1m
+        labels:
+          severity: high
+        annotations:
+          summary: "HookMon sensor {{ $labels.sensor }} dead on {{ $labels.host }}"
+          description: >
+            Sensor {{ $labels.sensor }} on {{ $labels.host }} has stopped sending
+            heartbeats. This sensor is no longer detecting its class of injection
+            events. This may indicate the sensor was unloaded by an attacker.
+
+      - alert: HookMonFleetDegraded
+        expr: hookmon_fleet_hosts_degraded > 0
+        for: 1m
+        labels:
+          severity: high
+        annotations:
+          summary: "{{ $value }} HookMon hosts have degraded sensor coverage"
+          description: >
+            One or more hosts have sensors that are no longer alive. This means
+            some classes of code injection are no longer being monitored on those
+            hosts. Check the fleet status table for details.

@@ -8,6 +8,7 @@ type SensorType string
 const (
 	SensorTypeBPF      SensorType = "bpf"      // uses eBPF tracepoints/uprobes
 	SensorTypeFanotify SensorType = "fanotify"  // uses fanotify file monitoring
+	SensorTypeAudit    SensorType = "audit"    // userspace post-enrichment audit
 )
 
 // Sensor is the common interface for all sensors.

@@ -13,7 +13,8 @@ export type EventType =
   | 'PTRACE_INJECT'
   | 'LIB_INTEGRITY'
   | 'AGENT_OFFLINE'
-  | 'AGENT_RECOVERED';
+  | 'AGENT_RECOVERED'
+  | 'ELF_RPATH';
 
 export type Severity = 'INFO' | 'WARN' | 'ALERT' | 'CRITICAL';
 
@@ -74,6 +75,28 @@ export interface LibIntegrityDetail {
   in_ld_cache: boolean;
 }
 
+export type RpathRisk = 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export interface RpathEntry {
+  path: string;
+  risk: RpathRisk;
+  reason: string;
+  exists: boolean;
+  is_rpath: boolean;
+}
+
+export interface ElfRpathDetail {
+  has_rpath: boolean;
+  has_runpath: boolean;
+  rpath_raw?: string;
+  runpath_raw?: string;
+  entries: RpathEntry[];
+  highest_risk: RpathRisk;
+  uses_origin: boolean;
+  uses_deprecated: boolean;
+  is_setuid: boolean;
+}
+
 export interface PolicyResult {
   action: PolicyAction;
   matched_entry_id?: string;
@@ -105,6 +128,7 @@ export interface HookEvent {
   linker_config_detail?: LinkerConfigDetail;
   ptrace_detail?: PtraceDetail;
   lib_integrity_detail?: LibIntegrityDetail;
+  elf_rpath_detail?: ElfRpathDetail;
   policy_result?: PolicyResult;
 }
 
@@ -128,6 +152,7 @@ export interface AllowlistEntry {
   host_pattern: string;
   uid_range?: UIDRange;
   container_image: string;
+  allowed_rpaths?: string[];
   action: PolicyAction;
   expires?: string;
   enabled: boolean;

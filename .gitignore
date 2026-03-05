@@ -1,6 +1,8 @@
 # Binaries (only match at repo root, not cmd/ subdirectories)
 bin/
 /hookmon-agent
+/hookmon-bus
+/hookmon-collector
 /hookmon-server
 /hookmon-cli
 *.exe

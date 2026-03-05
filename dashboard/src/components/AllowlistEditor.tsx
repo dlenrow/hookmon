@@ -16,6 +16,7 @@ const EVENT_TYPES: EventType[] = [
   'LINKER_CONFIG',
   'PTRACE_INJECT',
   'LIB_INTEGRITY',
+  'ELF_RPATH',
 ];
 
 const ACTIONS: PolicyAction[] = ['ALLOW', 'ALERT', 'DENY'];
@@ -33,6 +34,7 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
   const [action, setAction] = useState<PolicyAction>(initial?.action || 'ALLOW');
   const [enabled, setEnabled] = useState(initial?.enabled !== false);
   const [createdBy, setCreatedBy] = useState(initial?.created_by || '');
+  const [allowedRpaths, setAllowedRpaths] = useState(initial?.allowed_rpaths?.join('\n') || '');
 
   function handleEventTypeToggle(et: EventType) {
     setEventTypes((prev) =>
@@ -55,6 +57,7 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
       action,
       enabled,
       created_by: createdBy || '',
+      allowed_rpaths: allowedRpaths ? allowedRpaths.split('\n').map(s => s.trim()).filter(Boolean) : undefined,
     });
   }
 
@@ -175,6 +178,17 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
             placeholder="admin@company.com"
           />
         </div>
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">Allowed RPATHs (one glob pattern per line, for ELF_RPATH events)</label>
+        <textarea
+          className="form-textarea"
+          value={allowedRpaths}
+          onChange={(e) => setAllowedRpaths(e.target.value)}
+          placeholder={"/usr/lib/*\n/usr/local/lib/*"}
+          rows={3}
+        />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>

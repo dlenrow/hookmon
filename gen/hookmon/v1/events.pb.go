@@ -23,6 +23,7 @@ const (
 	EventType_EVENT_TYPE_LIB_INTEGRITY   EventType = 8
 	EventType_EVENT_TYPE_AGENT_OFFLINE   EventType = 9
 	EventType_EVENT_TYPE_AGENT_RECOVERED EventType = 10
+	EventType_EVENT_TYPE_ELF_RPATH       EventType = 11
 )
 
 // EventType_name maps enum values to their string names.
@@ -38,6 +39,7 @@ var EventType_name = map[int32]string{
 	8: "EVENT_TYPE_LIB_INTEGRITY",
 	9: "EVENT_TYPE_AGENT_OFFLINE",
 	10: "EVENT_TYPE_AGENT_RECOVERED",
+	11: "EVENT_TYPE_ELF_RPATH",
 }
 
 // EventType_value maps enum string names to their int32 values.
@@ -53,6 +55,7 @@ var EventType_value = map[string]int32{
 	"EVENT_TYPE_LIB_INTEGRITY":   8,
 	"EVENT_TYPE_AGENT_OFFLINE":   9,
 	"EVENT_TYPE_AGENT_RECOVERED": 10,
+	"EVENT_TYPE_ELF_RPATH":       11,
 }
 
 // String returns the string representation of the EventType.
@@ -135,6 +138,7 @@ type HookEvent struct {
 	LinkerConfigDetail  *LinkerConfigDetail  `json:"linker_config_detail,omitempty"`
 	PtraceDetail        *PtraceDetail        `json:"ptrace_detail,omitempty"`
 	LibIntegrityDetail  *LibIntegrityDetail  `json:"lib_integrity_detail,omitempty"`
+	ElfRpathDetail      *ElfRpathDetail      `json:"elf_rpath_detail,omitempty"`
 }
 
 // BPFDetail contains fields specific to bpf() syscall events.
@@ -202,4 +206,28 @@ type LibIntegrityDetail struct {
 	OldHash     string `json:"old_hash,omitempty"`
 	NewHash     string `json:"new_hash,omitempty"`
 	InLdCache   bool   `json:"in_ld_cache"`
+}
+
+// RpathEntry describes a single RPATH/RUNPATH entry with risk classification.
+// Maps to hookmon.v1.RpathEntry.
+type RpathEntry struct {
+	Path    string `json:"path"`
+	Risk    string `json:"risk"`
+	Reason  string `json:"reason"`
+	Exists  bool   `json:"exists"`
+	IsRpath bool   `json:"is_rpath"`
+}
+
+// ElfRpathDetail contains fields specific to ELF RPATH/RUNPATH analysis events.
+// Maps to hookmon.v1.ElfRpathDetail.
+type ElfRpathDetail struct {
+	HasRpath       bool          `json:"has_rpath"`
+	HasRunpath     bool          `json:"has_runpath"`
+	RpathRaw       string        `json:"rpath_raw,omitempty"`
+	RunpathRaw     string        `json:"runpath_raw,omitempty"`
+	Entries        []*RpathEntry `json:"entries"`
+	HighestRisk    string        `json:"highest_risk"`
+	UsesOrigin     bool          `json:"uses_origin"`
+	UsesDeprecated bool          `json:"uses_deprecated"`
+	IsSetuid       bool          `json:"is_setuid"`
 }

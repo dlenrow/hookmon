@@ -416,6 +416,83 @@ export function Investigation() {
               </div>
             )}
 
+            {event.elf_rpath_detail && (
+              <div className="card" style={{ marginBottom: '24px' }}>
+                <div className="card-header">
+                  <h3>ELF RPATH/RUNPATH Detail</h3>
+                  <span className={`badge badge-${event.elf_rpath_detail.highest_risk === 'CRITICAL' ? 'critical' : event.elf_rpath_detail.highest_risk === 'HIGH' ? 'alert' : event.elf_rpath_detail.highest_risk === 'MEDIUM' ? 'warn' : 'info'}`}>
+                    {event.elf_rpath_detail.highest_risk} RISK
+                  </span>
+                </div>
+                <div className="card-body">
+                  <div className="detail-grid">
+                    <span className="detail-label">Has RPATH</span>
+                    <span className="detail-value">{event.elf_rpath_detail.has_rpath ? 'Yes' : 'No'}</span>
+
+                    <span className="detail-label">Has RUNPATH</span>
+                    <span className="detail-value">{event.elf_rpath_detail.has_runpath ? 'Yes' : 'No'}</span>
+
+                    {event.elf_rpath_detail.rpath_raw && (
+                      <>
+                        <span className="detail-label">RPATH Raw</span>
+                        <span className="detail-value mono">{event.elf_rpath_detail.rpath_raw}</span>
+                      </>
+                    )}
+
+                    {event.elf_rpath_detail.runpath_raw && (
+                      <>
+                        <span className="detail-label">RUNPATH Raw</span>
+                        <span className="detail-value mono">{event.elf_rpath_detail.runpath_raw}</span>
+                      </>
+                    )}
+
+                    <span className="detail-label">Uses $ORIGIN</span>
+                    <span className="detail-value">{event.elf_rpath_detail.uses_origin ? 'Yes' : 'No'}</span>
+
+                    <span className="detail-label">Uses Deprecated DT_RPATH</span>
+                    <span className="detail-value">{event.elf_rpath_detail.uses_deprecated ? 'Yes' : 'No'}</span>
+
+                    <span className="detail-label">SUID/SGID Binary</span>
+                    <span className="detail-value">{event.elf_rpath_detail.is_setuid ? 'Yes' : 'No'}</span>
+                  </div>
+
+                  {event.elf_rpath_detail.entries.length > 0 && (
+                    <div style={{ marginTop: '16px' }}>
+                      <h4 style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px' }}>
+                        Path Entries
+                      </h4>
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>Path</th>
+                            <th>Risk</th>
+                            <th>Type</th>
+                            <th>Exists</th>
+                            <th>Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {event.elf_rpath_detail.entries.map((entry, i) => (
+                            <tr key={i}>
+                              <td><span className="mono">{entry.path || '(empty)'}</span></td>
+                              <td>
+                                <span className={`badge badge-${entry.risk === 'CRITICAL' ? 'critical' : entry.risk === 'HIGH' ? 'alert' : entry.risk === 'MEDIUM' ? 'warn' : 'info'}`}>
+                                  {entry.risk}
+                                </span>
+                              </td>
+                              <td>{entry.is_rpath ? 'DT_RPATH' : 'DT_RUNPATH'}</td>
+                              <td>{entry.exists ? 'Yes' : 'No'}</td>
+                              <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{entry.reason}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Policy result */}
             {event.policy_result && (
               <div className="card" style={{ marginBottom: '24px' }}>

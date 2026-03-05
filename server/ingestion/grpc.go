@@ -406,6 +406,7 @@ var protoEventTypeToEventType = map[hookmonv1.EventType]event.EventType{
 	hookmonv1.EventType_EVENT_TYPE_LIB_INTEGRITY:   event.EventLibIntegrity,
 	hookmonv1.EventType_EVENT_TYPE_AGENT_OFFLINE:   event.EventAgentOffline,
 	hookmonv1.EventType_EVENT_TYPE_AGENT_RECOVERED: event.EventAgentRecovered,
+	hookmonv1.EventType_EVENT_TYPE_ELF_RPATH:       event.EventElfRpath,
 }
 
 // protoToEvent converts a proto HookEvent to the canonical event.HookEvent
@@ -513,6 +514,29 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 			OldHash:     pe.LibIntegrityDetail.OldHash,
 			NewHash:     pe.LibIntegrityDetail.NewHash,
 			InLdCache:   pe.LibIntegrityDetail.InLdCache,
+		}
+	}
+	if pe.ElfRpathDetail != nil {
+		entries := make([]event.RpathEntry, len(pe.ElfRpathDetail.Entries))
+		for i, e := range pe.ElfRpathDetail.Entries {
+			entries[i] = event.RpathEntry{
+				Path:    e.Path,
+				Risk:    event.RpathRisk(e.Risk),
+				Reason:  e.Reason,
+				Exists:  e.Exists,
+				IsRpath: e.IsRpath,
+			}
+		}
+		evt.ElfRpathDetail = &event.ElfRpathDetail{
+			HasRpath:       pe.ElfRpathDetail.HasRpath,
+			HasRunpath:     pe.ElfRpathDetail.HasRunpath,
+			RpathRaw:       pe.ElfRpathDetail.RpathRaw,
+			RunpathRaw:     pe.ElfRpathDetail.RunpathRaw,
+			Entries:        entries,
+			HighestRisk:    event.RpathRisk(pe.ElfRpathDetail.HighestRisk),
+			UsesOrigin:     pe.ElfRpathDetail.UsesOrigin,
+			UsesDeprecated: pe.ElfRpathDetail.UsesDeprecated,
+			IsSetuid:       pe.ElfRpathDetail.IsSetuid,
 		}
 	}
 

@@ -12,14 +12,22 @@ LDFLAGS := -ldflags "-X github.com/dlenrow/hookmon/pkg/version.Version=$(VERSION
 # Output
 BIN_DIR := bin
 
-.PHONY: build-all build-agent build-server build-cli build-dashboard
-.PHONY: generate test test-integration test-e2e lint clean
+.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dashboard
+.PHONY: generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
 .PHONY: appliance-ova appliance-qcow2 appliance-iso
 
 ## Build targets
 
-build-all: build-agent build-server build-cli
+build-all: build-bus build-agent build-server build-cli build-collector
+
+build-bus:
+	@mkdir -p $(BIN_DIR)
+	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-bus ./cmd/hookmon-bus
+
+build-collector:
+	@mkdir -p $(BIN_DIR)
+	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-collector ./cmd/hookmon-collector
 
 build-agent:
 	@mkdir -p $(BIN_DIR)
@@ -47,6 +55,18 @@ generate:
 test:
 	go test ./...
 
+test-unit:
+	go test -race -count=1 ./pkg/... ./server/policy/... ./server/connectors/... ./server/ingestion/... ./agent/config/... ./agent/sensors/... ./agent/transport/... ./agent/registry/... ./agent/observability/...
+
+test-registry:
+	go test -race -count=1 ./agent/registry/...
+
+test-collector:
+	go test -race -count=1 ./cmd/hookmon-collector/...
+
+smoketest:
+	go test -v -count=1 ./test/smoketest/...
+
 test-integration:
 	go test -tags integration -count=1 ./test/integration/...
 
@@ -55,6 +75,12 @@ test-e2e:
 
 lint:
 	golangci-lint run ./...
+
+## CI (local equivalent of GitHub Actions)
+
+ci: build-all test-unit
+	go vet ./...
+	@echo "==> CI checks passed"
 
 ## Packaging
 

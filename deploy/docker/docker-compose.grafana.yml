@@ -14,7 +14,13 @@ services:
     network_mode: host
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./grafana/alerts:/etc/prometheus/alerts:ro
       - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  pushgateway:
+    image: prom/pushgateway:latest
+    network_mode: host
     restart: unless-stopped
 
   grafana:

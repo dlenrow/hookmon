@@ -39,8 +39,18 @@ type AgentConfig struct {
 	LokiURL string `yaml:"loki_url"`
 
 	// PrometheusPort is the port to expose Prometheus metrics on (e.g. 2112).
-	// Zero means disabled.
+	// Zero means disabled. Deprecated: use StatusPort instead.
 	PrometheusPort int `yaml:"prometheus_port"`
+
+	// StatusPort is the port for /status and /metrics endpoints.
+	// Defaults to 2112. Zero means disabled.
+	StatusPort int `yaml:"status_port"`
+
+	// HeartbeatSensorInterval is how often each sensor reports its heartbeat.
+	HeartbeatSensorInterval time.Duration `yaml:"heartbeat_sensor_interval"`
+
+	// DeadThreshold is how long since last heartbeat before a sensor is marked dead.
+	DeadThreshold time.Duration `yaml:"dead_threshold"`
 }
 
 // TLSConfig holds mTLS certificate paths.
@@ -61,15 +71,19 @@ type SensorConfig struct {
 	LinkerConfig   bool `yaml:"linker_config"`
 	PtraceMonitor  bool `yaml:"ptrace_monitor"`
 	LibIntegrity   bool `yaml:"lib_integrity"`
+	ElfRpath       bool `yaml:"elf_rpath"`
 }
 
 // DefaultConfig returns an AgentConfig with sensible defaults.
 func DefaultConfig() *AgentConfig {
 	return &AgentConfig{
-		ServerAddr:        "localhost:9443",
-		HeartbeatInterval: 30 * time.Second,
-		FallbackLogPath:   "/var/log/hookmon/fallback.jsonl",
-		LogLevel:          "info",
+		ServerAddr:              "localhost:9443",
+		HeartbeatInterval:       30 * time.Second,
+		FallbackLogPath:         "/var/log/hookmon/fallback.jsonl",
+		LogLevel:                "info",
+		StatusPort:              2112,
+		HeartbeatSensorInterval: 10 * time.Second,
+		DeadThreshold:           35 * time.Second,
 		Sensors: SensorConfig{
 			BPFSyscall:    true,
 			ExecInjection: true,
@@ -78,6 +92,7 @@ func DefaultConfig() *AgentConfig {
 			LinkerConfig:  true,
 			PtraceMonitor: true,
 			LibIntegrity:  true,
+			ElfRpath:      true,
 		},
 	}
 }

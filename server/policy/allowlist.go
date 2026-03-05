@@ -107,6 +107,13 @@ func Matches(entry *event.AllowlistEntry, evt *event.HookEvent) bool {
 		}
 	}
 
+	// AllowedRpaths: each RPATH entry in the event must match at least one allowed glob.
+	if len(entry.AllowedRpaths) > 0 {
+		if !matchAllowedRpaths(entry.AllowedRpaths, evt) {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -162,4 +169,29 @@ func matchContainerImage(pattern string, evt *event.HookEvent) bool {
 	}
 	matched, err := filepath.Match(pattern, target)
 	return err == nil && matched
+}
+
+// matchAllowedRpaths checks that every RPATH entry in the event's ElfRpathDetail
+// matches at least one of the allowed path globs.
+func matchAllowedRpaths(allowed []string, evt *event.HookEvent) bool {
+	if evt.ElfRpathDetail == nil || len(evt.ElfRpathDetail.Entries) == 0 {
+		return true // no entries to check
+	}
+	for _, entry := range evt.ElfRpathDetail.Entries {
+		if !matchAnyGlob(entry.Path, allowed) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchAnyGlob returns true if value matches at least one of the glob patterns.
+func matchAnyGlob(value string, patterns []string) bool {
+	for _, pattern := range patterns {
+		matched, err := filepath.Match(pattern, value)
+		if err == nil && matched {
+			return true
+		}
+	}
+	return false
 }

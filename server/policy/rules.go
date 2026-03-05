@@ -30,6 +30,7 @@ func DefaultRules() []Rule {
 		ruleLinkerConfigModified(),
 		rulePtraceFromNonDebugger(),
 		ruleLibraryReplacement(),
+		ruleElfRpathSuspicious(),
 	}
 }
 
@@ -200,6 +201,31 @@ func ruleLibraryReplacement() Rule {
 				Reason: fmt.Sprintf("rule:library_replacement — %s %s on %s",
 					evt.LibIntegrityDetail.Operation,
 					evt.LibIntegrityDetail.LibraryPath, evt.Hostname),
+			}
+		},
+	}
+}
+
+// ruleElfRpathSuspicious fires when an ELF binary has CRITICAL risk RPATH/RUNPATH entries.
+// These entries allow attacker-controlled library search paths baked into the binary.
+func ruleElfRpathSuspicious() Rule {
+	return Rule{
+		Name:        "elf_rpath_suspicious",
+		Description: "ELF binary with suspicious RPATH/RUNPATH entries",
+		Evaluate: func(evt *event.HookEvent) *event.PolicyResult {
+			if evt.EventType != event.EventElfRpath {
+				return nil
+			}
+			if evt.ElfRpathDetail == nil {
+				return nil
+			}
+			if evt.ElfRpathDetail.HighestRisk != event.RpathRiskCritical {
+				return nil
+			}
+			return &event.PolicyResult{
+				Action: event.ActionAlert,
+				Reason: fmt.Sprintf("rule:elf_rpath_suspicious — CRITICAL RPATH/RUNPATH in %s on %s",
+					evt.ExePath, evt.Hostname),
 			}
 		},
 	}

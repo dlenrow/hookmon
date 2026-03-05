@@ -254,6 +254,30 @@ func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
 		}
 	}
 
+	if evt.ElfRpathDetail != nil {
+		entries := make([]*hookmonv1.RpathEntry, len(evt.ElfRpathDetail.Entries))
+		for i, e := range evt.ElfRpathDetail.Entries {
+			entries[i] = &hookmonv1.RpathEntry{
+				Path:    e.Path,
+				Risk:    string(e.Risk),
+				Reason:  e.Reason,
+				Exists:  e.Exists,
+				IsRpath: e.IsRpath,
+			}
+		}
+		pe.ElfRpathDetail = &hookmonv1.ElfRpathDetail{
+			HasRpath:       evt.ElfRpathDetail.HasRpath,
+			HasRunpath:     evt.ElfRpathDetail.HasRunpath,
+			RpathRaw:       evt.ElfRpathDetail.RpathRaw,
+			RunpathRaw:     evt.ElfRpathDetail.RunpathRaw,
+			Entries:        entries,
+			HighestRisk:    string(evt.ElfRpathDetail.HighestRisk),
+			UsesOrigin:     evt.ElfRpathDetail.UsesOrigin,
+			UsesDeprecated: evt.ElfRpathDetail.UsesDeprecated,
+			IsSetuid:       evt.ElfRpathDetail.IsSetuid,
+		}
+	}
+
 	return pe
 }
 
@@ -279,6 +303,8 @@ func eventTypeToProto(et event.EventType) hookmonv1.EventType {
 		return hookmonv1.EventType_EVENT_TYPE_AGENT_OFFLINE
 	case event.EventAgentRecovered:
 		return hookmonv1.EventType_EVENT_TYPE_AGENT_RECOVERED
+	case event.EventElfRpath:
+		return hookmonv1.EventType_EVENT_TYPE_ELF_RPATH
 	default:
 		return hookmonv1.EventType_EVENT_TYPE_UNSPECIFIED
 	}

@@ -148,6 +148,20 @@ func classifySeverity(result *event.PolicyResult, evt *event.HookEvent) event.Se
 		return event.SeverityAlert
 	}
 
+	// ELF RPATH: severity is driven by the highest risk in the detail.
+	if evt.EventType == event.EventElfRpath && evt.ElfRpathDetail != nil {
+		switch evt.ElfRpathDetail.HighestRisk {
+		case event.RpathRiskCritical:
+			return event.SeverityCritical
+		case event.RpathRiskHigh:
+			return event.SeverityAlert
+		case event.RpathRiskMedium:
+			return event.SeverityWarn
+		default:
+			return event.SeverityInfo
+		}
+	}
+
 	// No allowlist match but known event type: WARN for recognized BPF types,
 	// ALERT for unknown binary hash or other events.
 	if evt.ExeHash == "" {

@@ -32,20 +32,24 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
 │                        MONITORED HOSTS                              │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  hookmon-agent (per host)                                    │   │
+│  │  hookmon-bus (per host, formerly hookmon-agent)              │   │
 │  │                                                              │   │
-│  │  Sensors (7):                                                 │   │
+│  │  Sensors (8):                                                 │   │
 │  │    ├── bpf_syscall      — hooks bpf() syscall (eBPF)         │   │
 │  │    ├── exec_injection   — hooks execve(), checks env (eBPF)  │   │
 │  │    ├── shm_monitor      — detects /dev/shm patterns (eBPF)   │   │
 │  │    ├── dlopen_monitor   — hooks dlopen() (eBPF uprobe)       │   │
 │  │    ├── linker_config    — watches ld.so config (fanotify)    │   │
 │  │    ├── ptrace_monitor   — hooks ptrace() inject (eBPF)       │   │
-│  │    └── lib_integrity    — watches .so files (fanotify)       │   │
+│  │    ├── lib_integrity    — watches .so files (fanotify)       │   │
+│  │    └── elf_rpath        — audits ELF RPATH/RUNPATH (Go)      │   │
 │  │                                                              │   │
-│  │  Userspace daemon:                                           │   │
+│  │  Each eBPF sensor: heartbeat BPF map (10s interval)          │   │
+│  │                                                              │   │
+│  │  Sensor bus:                                                 │   │
 │  │    ├── event enrichment (pid → cmdline, cgroup, container)   │   │
-│  │    ├── local cache + dedup                                   │   │
+│  │    ├── sensor health registry (reads heartbeat maps)         │   │
+│  │    ├── /status HTTP endpoint + Prometheus /metrics           │   │
 │  │    ├── mTLS gRPC stream to central server                    │   │
 │  │    └── local fallback log (if server unreachable)            │   │
 │  └──────────────────────────────────────────────────────────────┘   │
@@ -53,6 +57,7 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
 │  Deployed via: DEB/RPM package, container sidecar, or Ansible role  │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ mTLS gRPC (port 9443)
+                           │ HTTP /status (port 2112) ← polled by collector
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     HOOKMON APPLIANCE                                │
@@ -80,6 +85,12 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
 │  │ audit_log table             │  │                            │  │
 │  └─────────────────────────────┘  └────────────────────────────┘  │
 │                                                                     │
+│  ┌────────────────────────────┐  ┌────────────────────────────┐  │
+│  │ hookmon-collector          │  │ Prometheus Pushgateway     │  │
+│  │  polls /status on all     │──▶│  :9091                     │  │
+│  │  enrolled hosts (30s)     │  └────────────┬───────────────┘  │
+│  └────────────────────────────┘               │ scraped by       │
+│                                               ▼ Prometheus       │
 │  System services: nginx (TLS termination), systemd, auto-update     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -96,15 +107,22 @@ hookmon/
 ├── go.sum
 │
 ├── cmd/
-│   ├── hookmon-agent/         # Agent binary (runs on monitored hosts)
+│   ├── hookmon-bus/           # Sensor bus binary (runs on monitored hosts)
+│   │   └── main.go
+│   ├── hookmon-agent/         # Deprecated alias for hookmon-bus
+│   │   └── main.go
+│   ├── hookmon-collector/     # Server-side fleet health poller
 │   │   └── main.go
 │   ├── hookmon-server/        # Central server binary
 │   │   └── main.go
 │   └── hookmon-cli/           # CLI for policy management & diagnostics
 │       └── main.go
 │
-├── agent/                     # Agent package
-│   ├── agent.go               # Agent lifecycle (start, stop, reconnect)
+├── agent/                     # Sensor bus package
+│   ├── agent.go               # Sensor bus lifecycle (start, stop, reconnect)
+│   ├── registry/
+│   │   ├── registry.go        # SensorRegistry — heartbeat tracking, liveness
+│   │   └── registry_test.go   # Unit tests for registry
 │   ├── sensors/
 │   │   ├── sensor.go          # Common sensor interface (Sensor, SensorType)
 │   │   ├── bpf_syscall.go     # bpf() syscall hook sensor
@@ -120,7 +138,14 @@ hookmon/
 │   │   ├── ptrace_monitor.c   # eBPF C for ptrace tracepoint
 │   │   ├── lib_integrity.go   # shared library file monitoring (fanotify)
 │   │   ├── embed.go           # eBPF .o file embeds
+│   │   ├── elf_rpath.go       # ELF RPATH/RUNPATH analysis (pure Go, cross-platform)
+│   │   ├── elf_rpath_test.go  # Unit tests for RPATH classification
 │   │   └── sensor_stub.go     # macOS build stubs
+│   ├── observability/
+│   │   ├── prometheus.go      # Prometheus metrics + HTTP server (/metrics + /status)
+│   │   ├── status.go          # /status HTTP handler (sensor health JSON)
+│   │   ├── status_test.go     # Unit tests for /status handler
+│   │   └── loki.go            # Loki log pusher
 │   ├── enrichment/
 │   │   ├── process.go         # pid → cmdline, exe, cgroup, container ID
 │   │   ├── container.go       # Container runtime detection
@@ -289,6 +314,7 @@ type HookEvent struct {
     LinkerConfigDetail   *LinkerConfigDetail   `json:"linker_config_detail,omitempty"`
     PtraceDetail         *PtraceDetail         `json:"ptrace_detail,omitempty"`
     LibIntegrityDetail   *LibIntegrityDetail   `json:"lib_integrity_detail,omitempty"`
+    ElfRpathDetail       *ElfRpathDetail       `json:"elf_rpath_detail,omitempty"`
 
     // Policy evaluation result (filled by server)
     PolicyResult   *PolicyResult   `json:"policy_result,omitempty"`
@@ -304,6 +330,7 @@ const (
     EventLinkerConfig EventType = "LINKER_CONFIG"    // /etc/ld.so.preload or ld.so.conf modified
     EventPtraceInject EventType = "PTRACE_INJECT"    // ptrace attach/poketext/pokedata
     EventLibIntegrity EventType = "LIB_INTEGRITY"    // shared library modified on disk
+    EventElfRpath     EventType = "ELF_RPATH"       // suspicious RPATH/RUNPATH in ELF binary
 )
 
 type BPFDetail struct {
@@ -490,6 +517,41 @@ Pure Go, fanotify-based. Watches standard library directories:
 
 Filters for `.so` files. On write, rename, or delete, produces a LIB_INTEGRITY event with the library path, operation, before/after SHA256 hashes, and whether the library is in the `ld.so.cache`. This detects trojanized library replacement attacks.
 
+### Sensor 8: ELF RPATH Monitor
+
+Pure Go, no eBPF or fanotify. Uses `debug/elf` to inspect DT_RPATH and DT_RUNPATH entries in ELF binaries. This is an **audit-type sensor** (`SensorTypeAudit`) that runs as a post-enrichment hook on every execve event, not as a standalone sensor. It introduces a third `SensorType`: `"audit"`.
+
+When an exec event fires and `cfg.Sensors.ElfRpath` is enabled, the agent:
+1. Checks an LRU cache (keyed by path+inode+mtime, max 10k entries)
+2. If uncached, opens the binary with `debug/elf` and reads `DT_RPATH`/`DT_RUNPATH` via `f.DynString()`
+3. Classifies each path entry by risk (CRITICAL/HIGH/MEDIUM/LOW/NONE)
+4. If highest risk >= MEDIUM, emits a supplementary `ELF_RPATH` event with full process context
+
+Risk classification:
+- CRITICAL: relative paths, `/tmp/*`, `/home/*`, `/dev/shm/*`, `$ORIGIN` in SUID binary
+- HIGH: empty entries (`::`), non-existent directories, world-writable directories
+- MEDIUM: non-standard but existing directories
+- LOW: `$ORIGIN` in non-SUID binary
+- NONE: standard system library paths (`/usr/lib`, `/lib`, etc.)
+
+DT_RPATH (deprecated) bumps severity one level vs DT_RUNPATH.
+
+```go
+type ElfRpathDetail struct {
+    HasRpath       bool         `json:"has_rpath"`
+    HasRunpath     bool         `json:"has_runpath"`
+    RpathRaw       string       `json:"rpath_raw,omitempty"`
+    RunpathRaw     string       `json:"runpath_raw,omitempty"`
+    Entries        []RpathEntry `json:"entries"`
+    HighestRisk    RpathRisk    `json:"highest_risk"`
+    UsesOrigin     bool         `json:"uses_origin"`
+    UsesDeprecated bool         `json:"uses_deprecated"`
+    IsSetuid       bool         `json:"is_setuid"`
+}
+```
+
+CLI batch scan: `hookmon-agent --scan-rpath /usr/bin` analyzes all ELF binaries in a directory and outputs JSON.
+
 ## Server Design Principles
 
 ### Event Processing Pipeline
@@ -519,6 +581,9 @@ Events are auto-classified based on allowlist evaluation:
 | Exec injection from non-root, non-whitelisted library | ALERT | Alert SOC |
 | Ptrace injection detected | ALERT | Alert SOC, process memory manipulation |
 | Shared library modified on disk | ALERT | Alert SOC, possible trojanized library |
+| ELF RPATH with CRITICAL risk entries | CRITICAL | Attacker-controlled library search path |
+| ELF RPATH with HIGH risk entries | ALERT | Suspicious library search path |
+| ELF RPATH with MEDIUM risk entries | WARN | Non-standard library search path |
 | bpftime-pattern shared memory from non-whitelisted process | CRITICAL | Alert SOC, possible active attack |
 | Linker configuration modified | CRITICAL | Alert SOC, system-wide injection vector |
 | Any event from process with no matching allowlist AND running as root | CRITICAL | Alert SOC, priority |
@@ -629,11 +694,13 @@ Console-based setup wizard on first boot:
 
 ```makefile
 make generate          # eBPF codegen + protobuf codegen
-make build-agent       # Build agent binary
+make build-bus         # Build sensor bus binary (hookmon-bus)
+make build-agent       # Build deprecated agent binary (alias for hookmon-bus)
+make build-collector   # Build collector binary (hookmon-collector)
 make build-server      # Build server binary
 make build-cli         # Build CLI tool
 make build-dashboard   # Build dashboard static assets
-make build-all         # All of the above
+make build-all         # All of the above (bus, agent, collector, server, cli)
 
 make test              # Unit tests
 make test-integration  # Integration tests (requires privileged container)
@@ -695,7 +762,7 @@ At this point you have a working standalone agent that detects BPF loads and exe
 
 ### Phase 6: Advanced Sensors (Complete)
 
-All 7 sensors implemented:
+All 8 sensors implemented:
 1. `bpf_syscall` — kernel eBPF detection (eBPF tracepoint)
 2. `exec_injection` — LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH/LD_DEBUG detection (eBPF tracepoint)
 3. `shm_monitor` — bpftime-style shared memory detection (eBPF tracepoint)
@@ -703,23 +770,46 @@ All 7 sensors implemented:
 5. `linker_config` — ld.so config file monitoring (fanotify)
 6. `ptrace_monitor` — ptrace code injection detection (eBPF tracepoint)
 7. `lib_integrity` — shared library file integrity (fanotify)
+8. `elf_rpath` — ELF RPATH/RUNPATH binary audit (pure Go, audit type)
 
-Future: Enforcement mode (optional, careful)
+Future: Enforcement mode (optional, explicitly opt-in, off by default)
+
+### Phase 7: Sensor Bus Heartbeat and Anti-Tampering
+
+1. Per-sensor heartbeat BPF maps (5 eBPF sensors write kernel timestamps)
+2. Go-side heartbeat tickers for fanotify and audit sensors
+3. `SensorRegistry` with Beat/Evaluate/Overall/Snapshot
+4. `/status` HTTP endpoint on sensor bus (alongside `/metrics`)
+5. Per-sensor Prometheus metrics (`hookmon_sensor_alive`, etc.)
+6. Binary rename: `hookmon-bus` (formerly `hookmon-agent`)
+7. `hookmon-collector` — server-side fleet health poller
+8. SSH transport option for collector
+9. Pushgateway integration + Grafana alert rules
+10. Fleet health banner + sensor grid panels in Grafana dashboard
 
 ## Security of HookMon Itself
 
-The agent runs with elevated privileges (CAP_BPF, CAP_SYS_ADMIN for some hooks). This makes the agent itself a high-value target.
+The sensor bus runs with elevated privileges (CAP_BPF, CAP_SYS_ADMIN for some hooks). This makes it a high-value target.
 
 Mitigations:
-- Agent binary is statically compiled, minimal attack surface
-- Agent communicates only with the central server via mTLS (no other network)
-- Agent config file is root-readable only
-- Agent private key is root-readable only
+- Sensor bus binary is statically compiled, minimal attack surface
+- Sensor bus communicates only with the central server via mTLS (no other network)
+- Config file is root-readable only
+- Private key is root-readable only
 - Server API requires authentication for all endpoints
-- Appliance runs with firewall rules (only ports 9443 gRPC, 443 HTTPS)
+- Appliance runs with firewall rules (only ports 9443 gRPC, 443 HTTPS, 2112 status)
 - All inter-component communication is TLS-encrypted
 - PostgreSQL listens only on localhost
-- Agent binary integrity: server can verify agent binary hash at enrollment
+- Binary integrity: server can verify sensor bus binary hash at enrollment
+
+### Tamper Detection
+
+A sophisticated attacker will attempt to disable HookMon before proceeding. The heartbeat and polling design provides layered tamper detection:
+
+- **Per-sensor heartbeat maps:** Each eBPF sensor writes a kernel timestamp to a BPF map every 10 seconds. If the sensor's eBPF program is unloaded, its heartbeat stops. The sensor bus detects staleness within 35 seconds.
+- **Server-side polling:** The `hookmon-collector` polls each host's `/status` endpoint every 30 seconds. If the sensor bus process is killed, the endpoint becomes unreachable — the collector detects this within one poll interval.
+- **Out-of-band verification:** The collector can optionally SSH to hosts and run `bpftool prog list | grep hookmon` to independently verify the kernel BPF program inventory, completely bypassing the sensor bus.
+- **Grafana alerting:** Fleet health banner fires immediately on any degraded or unreachable host. Individual sensor death alerts fire within 1 minute.
 
 ## Key Technical Decisions
 
@@ -745,7 +835,10 @@ Mitigations:
 ## Naming
 
 - **HookMon** — the project, the product, the appliance
-- **hookmon-agent** — the per-host agent binary
+- **Sensors** — the eBPF programs and fanotify watchers. Read-only observation hooks. Cannot block, modify, or enforce anything in default mode.
+- **Sensor bus** (`hookmon-bus`) — the lightweight per-host userspace process. Receives events from sensors, maintains the sensor health registry, exposes a local /status endpoint. Not a general-purpose agent. No policy engine, no enforcement capability in default mode.
+- **hookmon-bus** — the per-host sensor bus binary (formerly `hookmon-agent` in early releases)
+- **hookmon-collector** — the server-side polling binary. Polls sensor bus /status endpoints, pushes fleet health metrics to Pushgateway.
 - **hookmon-server** — the central server binary
 - **hookmon-cli** — the command-line policy management tool
 - **HookMon Dashboard** — the web UI

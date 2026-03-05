@@ -1,0 +1,9 @@
+#!/bin/bash
+# HookMon pre-push hook — runs smoketests before allowing push.
+# Install: cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+
+set -e
+
+echo "==> Running smoketests before push..."
+go test -count=1 ./test/smoketest/...
+echo "==> Smoketests passed."
