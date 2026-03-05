@@ -12,7 +12,7 @@ LDFLAGS := -ldflags "-X github.com/dlenrow/hookmon/pkg/version.Version=$(VERSION
 # Output
 BIN_DIR := bin
 
-.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dashboard
+.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dashboard build-canaries
 .PHONY: generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
 .PHONY: appliance-ova appliance-qcow2 appliance-iso
@@ -70,8 +70,20 @@ smoketest:
 test-integration:
 	go test -tags integration -count=1 ./test/integration/...
 
-test-e2e:
-	go test -tags e2e -count=1 ./test/e2e/...
+build-canaries:
+	$(MAKE) -C test/canary all
+
+build-canaries-noebpf:
+	$(MAKE) -C test/canary canaries-noebpf
+
+test-e2e: build-bus build-canaries
+	@echo "==> Deploying canaries and bus to /tmp for e2e..."
+	@mkdir -p /tmp/canary/bin
+	cp $(BIN_DIR)/hookmon-bus /tmp/hookmon-bus
+	cp test/canary/bin/* /tmp/canary/bin/ 2>/dev/null || true
+	cp test/canary/*.o /tmp/canary/ 2>/dev/null || true
+	cp test/canary/*.sh /tmp/canary/
+	sudo go test -tags e2e -v -count=1 -timeout 300s ./test/e2e/...
 
 lint:
 	golangci-lint run ./...
@@ -114,4 +126,5 @@ appliance-iso:
 clean:
 	rm -rf $(BIN_DIR)
 	rm -rf dashboard/dist
+	$(MAKE) -C test/canary clean
 	go clean -cache -testcache

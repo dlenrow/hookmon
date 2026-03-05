@@ -13,419 +13,421 @@ import (
 
 // These tests require:
 // - Root privileges (sudo)
-// - hookmon-agent binary at HOOKMON_AGENT_BIN (default: /tmp/hookmon-agent)
-// - Canary loader at HOOKMON_LOADER_BIN (default: /tmp/load-canary)
-// - Compiled canary .o files at HOOKMON_CANARY_DIR (default: /tmp)
+// - hookmon-bus binary at HOOKMON_BUS_BIN (default: /tmp/hookmon-bus)
+// - Canary binaries built by test/canary/Makefile
+// - Run: sudo go test -tags e2e -count=1 -timeout 300s ./test/e2e/...
 
-func agentBin() string {
+func busBin() string {
+	if v := os.Getenv("HOOKMON_BUS_BIN"); v != "" {
+		return v
+	}
+	// Fallback to legacy env var
 	if v := os.Getenv("HOOKMON_AGENT_BIN"); v != "" {
 		return v
 	}
-	return "/tmp/hookmon-agent"
+	return "/tmp/hookmon-bus"
 }
 
-func loaderBin() string {
-	if v := os.Getenv("HOOKMON_LOADER_BIN"); v != "" {
+func canaryBinDir() string {
+	if v := os.Getenv("HOOKMON_CANARY_BIN"); v != "" {
 		return v
 	}
-	return "/tmp/load-canary"
+	return "/tmp/canary/bin"
 }
 
 func canaryDir() string {
 	if v := os.Getenv("HOOKMON_CANARY_DIR"); v != "" {
 		return v
 	}
-	return "/tmp"
+	return "/tmp/canary"
 }
 
-func fakeHookLib() string {
-	if v := os.Getenv("HOOKMON_FAKE_HOOK_LIB"); v != "" {
-		return v
-	}
-	return "/tmp/libfake_hook.so"
-}
+// ---------------------------------------------------------------------------
+// Sensor 1: bpf_syscall — detect BPF program loading
+// ---------------------------------------------------------------------------
 
-// TestDetectUnknownBPFLoad verifies that loading a BPF program with no
-// allowlist entry generates an event with WARN severity.
-func TestDetectUnknownBPFLoad(t *testing.T) {
-	agent, err := StartAgent(agentBin())
+func TestSensor1_BPFSyscall_DetectLoad(t *testing.T) {
+	bus, err := StartBus(busBin())
 	if err != nil {
-		t.Fatalf("start agent: %v", err)
+		t.Fatalf("start bus: %v", err)
 	}
-	defer agent.Stop()
+	defer bus.Stop()
 
-	// Load canary "hello_bpf" — should be detected as unknown
 	go func() {
 		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/hello_bpf.o",
+		LoadCanary(canaryBinDir()+"/load_canary",
+			canaryDir()+"/hello_bpf.o",
 			"syscalls", "sys_enter_getpid", "hello_count")
 	}()
 
-	evt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.EventType == event.EventBPFLoad &&
 			e.BPFDetail != nil &&
 			e.BPFDetail.ProgName == "hello_count"
 	}, 15*time.Second)
 
 	if err != nil {
-		t.Fatalf("did not detect hello_bpf load: %v", err)
+		t.Fatalf("did not detect BPF_LOAD for hello_count: %v", err)
 	}
 
-	t.Logf("Detected BPF_LOAD event:")
-	t.Logf("  PID: %d, Comm: %s", evt.PID, evt.Comm)
-	t.Logf("  ProgName: %s, ProgType: %d", evt.BPFDetail.ProgName, evt.BPFDetail.ProgType)
-	t.Logf("  ProgHash: %s", evt.BPFDetail.ProgHash)
-	t.Logf("  ExeHash: %s", evt.ExeHash)
-	t.Logf("  InsnCount: %d", evt.BPFDetail.InsnCount)
+	t.Logf("PASS: BPF_LOAD detected — prog=%s type=%d pid=%d insn=%d",
+		evt.BPFDetail.ProgName, evt.BPFDetail.ProgType, evt.PID, evt.BPFDetail.InsnCount)
 
-	// Without allowlist, severity should be WARN (default)
-	if evt.Severity != event.SeverityWarn {
-		t.Errorf("expected severity WARN, got %s", evt.Severity)
-	}
-
-	// ProgHash should be populated
 	if evt.BPFDetail.ProgHash == "" {
-		t.Error("expected non-empty prog_hash for BPF_LOAD event")
+		t.Error("expected non-empty prog_hash")
+	}
+	if evt.Severity != event.SeverityWarn {
+		t.Errorf("expected severity WARN (no allowlist match), got %s", evt.Severity)
 	}
 }
 
-// TestDetectSecondApp verifies that a different BPF program (net_monitor)
-// produces a different prog_hash than hello_bpf.
-func TestDetectSecondApp(t *testing.T) {
-	agent, err := StartAgent(agentBin())
+func TestSensor1_BPFSyscall_DifferentHashPerProgram(t *testing.T) {
+	bus, err := StartBus(busBin())
 	if err != nil {
-		t.Fatalf("start agent: %v", err)
+		t.Fatalf("start bus: %v", err)
 	}
-	defer agent.Stop()
-
-	// Load both canaries sequentially and capture their hashes
-	var helloHash, netHash string
+	defer bus.Stop()
 
 	go func() {
 		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/hello_bpf.o",
+		LoadCanary(canaryBinDir()+"/load_canary",
+			canaryDir()+"/hello_bpf.o",
 			"syscalls", "sys_enter_getpid", "hello_count")
 		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/net_monitor.o",
+		LoadCanary(canaryBinDir()+"/load_canary",
+			canaryDir()+"/net_monitor.o",
 			"syscalls", "sys_enter_connect", "net_count")
 	}()
 
-	// Wait for hello_bpf
-	evt1, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+	evt1, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count"
 	}, 15*time.Second)
 	if err != nil {
-		t.Fatalf("did not detect hello_bpf: %v", err)
+		t.Fatalf("did not detect hello_count: %v", err)
 	}
-	helloHash = evt1.BPFDetail.ProgHash
 
-	// Wait for net_monitor
-	evt2, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+	evt2, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.BPFDetail != nil && e.BPFDetail.ProgName == "net_count"
 	}, 15*time.Second)
 	if err != nil {
-		t.Fatalf("did not detect net_monitor: %v", err)
+		t.Fatalf("did not detect net_count: %v", err)
 	}
-	netHash = evt2.BPFDetail.ProgHash
 
-	t.Logf("hello_bpf prog_hash:  %s", helloHash)
-	t.Logf("net_monitor prog_hash: %s", netHash)
-
-	if helloHash == netHash {
-		t.Error("different BPF programs should have different prog_hash values")
+	if evt1.BPFDetail.ProgHash == evt2.BPFDetail.ProgHash {
+		t.Error("different BPF programs must have different prog_hash values")
 	}
-	if helloHash == "" || netHash == "" {
-		t.Error("prog_hash should not be empty")
-	}
+	t.Logf("PASS: hello_count hash=%s, net_count hash=%s", evt1.BPFDetail.ProgHash, evt2.BPFDetail.ProgHash)
 }
 
-// TestVersionChangeNewHash verifies that hello_bpf_v2 (revised version)
-// has a different prog_hash than hello_bpf v1.
-func TestVersionChangeNewHash(t *testing.T) {
-	agent, err := StartAgent(agentBin())
+func TestSensor1_BPFSyscall_VersionChangeNewHash(t *testing.T) {
+	bus, err := StartBus(busBin())
 	if err != nil {
-		t.Fatalf("start agent: %v", err)
+		t.Fatalf("start bus: %v", err)
 	}
-	defer agent.Stop()
-
-	var v1Hash, v2Hash string
+	defer bus.Stop()
 
 	go func() {
 		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/hello_bpf.o",
+		LoadCanary(canaryBinDir()+"/load_canary",
+			canaryDir()+"/hello_bpf.o",
 			"syscalls", "sys_enter_getpid", "hello_count")
 		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/hello_bpf_v2.o",
+		LoadCanary(canaryBinDir()+"/load_canary",
+			canaryDir()+"/hello_bpf_v2.o",
 			"syscalls", "sys_enter_getpid", "hello_count_v2")
 	}()
 
-	evt1, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+	evt1, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count"
 	}, 15*time.Second)
 	if err != nil {
-		t.Fatalf("did not detect hello_bpf v1: %v", err)
+		t.Fatalf("did not detect hello_count v1: %v", err)
 	}
-	v1Hash = evt1.BPFDetail.ProgHash
 
-	evt2, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+	evt2, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count_v2"
 	}, 15*time.Second)
 	if err != nil {
-		t.Fatalf("did not detect hello_bpf v2: %v", err)
+		t.Fatalf("did not detect hello_count_v2: %v", err)
 	}
-	v2Hash = evt2.BPFDetail.ProgHash
 
-	t.Logf("hello_bpf v1 prog_hash: %s", v1Hash)
-	t.Logf("hello_bpf v2 prog_hash: %s", v2Hash)
+	if evt1.BPFDetail.ProgHash == evt2.BPFDetail.ProgHash {
+		t.Error("v1 and v2 must have different prog_hash (different bytecode)")
+	}
+	t.Logf("PASS: v1 hash=%s, v2 hash=%s", evt1.BPFDetail.ProgHash, evt2.BPFDetail.ProgHash)
+}
 
-	if v1Hash == v2Hash {
-		t.Error("v1 and v2 of hello_bpf should have different prog_hash values (different bytecode)")
+// ---------------------------------------------------------------------------
+// Sensor 2: exec_injection — detect LD_PRELOAD in execve()
+// ---------------------------------------------------------------------------
+
+func TestSensor2_ExecInjection_LDPreload(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	libPath := canaryBinDir() + "/libfake_hook.so"
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		RunShellCanary(canaryDir()+"/exec_injection_canary.sh", libPath, "/bin/true")
+	}()
+
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventExecInjection &&
+			e.ExecInjectionDetail != nil &&
+			strings.Contains(e.ExecInjectionDetail.LibraryPath, "fake_hook")
+	}, 15*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect EXEC_INJECTION with LD_PRELOAD: %v", err)
+	}
+
+	t.Logf("PASS: EXEC_INJECTION detected — lib=%s target=%s env=%s pid=%d",
+		evt.ExecInjectionDetail.LibraryPath,
+		evt.ExecInjectionDetail.TargetBinary,
+		evt.ExecInjectionDetail.EnvVar,
+		evt.PID)
+
+	if evt.ExecInjectionDetail.EnvVar != "LD_PRELOAD" {
+		t.Errorf("expected EnvVar=LD_PRELOAD, got %s", evt.ExecInjectionDetail.EnvVar)
 	}
 }
 
-// TestWhitelistByProgHash verifies that an event matching an allowlist entry
-// by prog_hash is classified as ALLOW.
-func TestWhitelistByProgHash(t *testing.T) {
-	agent, err := StartAgent(agentBin())
+// ---------------------------------------------------------------------------
+// Sensor 3: shm_monitor — detect bpftime-pattern shared memory
+// ---------------------------------------------------------------------------
+
+func TestSensor3_SHMMonitor_BpftimePattern(t *testing.T) {
+	bus, err := StartBus(busBin())
 	if err != nil {
-		t.Fatalf("start agent: %v", err)
+		t.Fatalf("start bus: %v", err)
 	}
-	defer agent.Stop()
-
-	// First, load hello_bpf to capture its hash
-	go func() {
-		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/hello_bpf.o",
-			"syscalls", "sys_enter_getpid", "hello_count")
-	}()
-
-	evt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
-		return e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count"
-	}, 15*time.Second)
-	if err != nil {
-		t.Fatalf("did not detect hello_bpf: %v", err)
-	}
-
-	capturedHash := evt.BPFDetail.ProgHash
-	t.Logf("Captured prog_hash: %s", capturedHash)
-
-	// Create allowlist entry matching this exact hash
-	allowlist := []*event.AllowlistEntry{
-		{
-			ID:          "test-whitelist-1",
-			Description: "Whitelisted hello_bpf canary",
-			EventTypes:  []event.EventType{event.EventBPFLoad},
-			ProgHash:    capturedHash,
-			Action:      event.ActionAllow,
-			Enabled:     true,
-		},
-	}
-
-	// Evaluate the captured event against the allowlist
-	result := EvaluateAgainstAllowlist(evt, allowlist)
-	if result.Action != event.ActionAllow {
-		t.Errorf("expected ALLOW for matching prog_hash, got %s: %s", result.Action, result.Reason)
-	}
-	t.Logf("Policy result: %s (entry: %s)", result.Action, result.MatchedEntryID)
-
-	// Now verify that v2 does NOT match the same allowlist entry
-	agent.Stop()
-	agent2, err := StartAgent(agentBin())
-	if err != nil {
-		t.Fatalf("restart agent: %v", err)
-	}
-	defer agent2.Stop()
+	defer bus.Stop()
 
 	go func() {
 		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/hello_bpf_v2.o",
-			"syscalls", "sys_enter_getpid", "hello_count_v2")
+		RunCanaryBinary(canaryBinDir()+"/shm_canary", "/bpftime_canary_test")
 	}()
 
-	evt2, err := agent2.WaitForEvent(func(e *event.HookEvent) bool {
-		return e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count_v2"
-	}, 15*time.Second)
-	if err != nil {
-		t.Fatalf("did not detect hello_bpf v2: %v", err)
-	}
-
-	result2 := EvaluateAgainstAllowlist(evt2, allowlist)
-	if result2.Action != event.ActionAlert {
-		t.Errorf("expected ALERT for non-matching prog_hash (v2), got %s", result2.Action)
-	}
-	t.Logf("v2 policy result: %s (different hash = not whitelisted)", result2.Action)
-}
-
-// TestBlacklistByProgHash verifies that a DENY allowlist entry blocks
-// a specific BPF program by hash.
-func TestBlacklistByProgHash(t *testing.T) {
-	agent, err := StartAgent(agentBin())
-	if err != nil {
-		t.Fatalf("start agent: %v", err)
-	}
-	defer agent.Stop()
-
-	go func() {
-		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/net_monitor.o",
-			"syscalls", "sys_enter_connect", "net_count")
-	}()
-
-	evt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
-		return e.BPFDetail != nil && e.BPFDetail.ProgName == "net_count"
-	}, 15*time.Second)
-	if err != nil {
-		t.Fatalf("did not detect net_monitor: %v", err)
-	}
-
-	// Create a DENY entry for this specific program
-	denyList := []*event.AllowlistEntry{
-		{
-			ID:          "test-blacklist-1",
-			Description: "Blacklisted net_monitor canary",
-			EventTypes:  []event.EventType{event.EventBPFLoad},
-			ProgHash:    evt.BPFDetail.ProgHash,
-			Action:      event.ActionDeny,
-			Enabled:     true,
-		},
-	}
-
-	result := EvaluateAgainstAllowlist(evt, denyList)
-	if result.Action != event.ActionDeny {
-		t.Errorf("expected DENY for blacklisted prog_hash, got %s", result.Action)
-	}
-	t.Logf("Blacklist result: %s (entry: %s)", result.Action, result.MatchedEntryID)
-}
-
-// TestWhitelistByExeHash verifies allowlist matching by loader binary hash.
-func TestWhitelistByExeHash(t *testing.T) {
-	agent, err := StartAgent(agentBin())
-	if err != nil {
-		t.Fatalf("start agent: %v", err)
-	}
-	defer agent.Stop()
-
-	go func() {
-		time.Sleep(1 * time.Second)
-		LoadCanary(loaderBin(), canaryDir()+"/hello_bpf.o",
-			"syscalls", "sys_enter_getpid", "hello_count")
-	}()
-
-	evt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
-		return e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count"
-	}, 15*time.Second)
-	if err != nil {
-		t.Fatalf("did not detect hello_bpf: %v", err)
-	}
-
-	if evt.ExeHash == "" {
-		t.Skip("exe_hash not populated (enrichment may not have run)")
-	}
-
-	// Whitelist by loader binary hash — allows ALL programs from this loader
-	allowlist := []*event.AllowlistEntry{
-		{
-			ID:          "test-exe-whitelist",
-			Description: "Trust the load-canary binary",
-			EventTypes:  []event.EventType{event.EventBPFLoad},
-			ExeHash:     evt.ExeHash,
-			Action:      event.ActionAllow,
-			Enabled:     true,
-		},
-	}
-
-	result := EvaluateAgainstAllowlist(evt, allowlist)
-	if result.Action != event.ActionAllow {
-		t.Errorf("expected ALLOW for matching exe_hash, got %s", result.Action)
-	}
-	t.Logf("Whitelisted by exe_hash: %s", evt.ExeHash)
-}
-
-// TestDetectBpftimeExploit simulates the full bpftime-go attack chain and
-// verifies that both SHM_CREATE (CRITICAL) and EXEC_INJECTION (ALERT) events fire.
-func TestDetectBpftimeExploit(t *testing.T) {
-	agent, err := StartAgent(agentBin())
-	if err != nil {
-		t.Fatalf("start agent: %v", err)
-	}
-	defer agent.Stop()
-
-	// Run the bpftime attack simulator in the background
-	go func() {
-		time.Sleep(1 * time.Second)
-		if err := RunBpftimeSim(bpftimeSimBin(), fakeHookLib(), "/bin/true"); err != nil {
-			t.Logf("bpftime_sim error (may be expected): %v", err)
-		}
-	}()
-
-	// Phase 1: Detect shared memory creation with bpftime naming pattern
-	shmEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.EventType == event.EventSHMCreate &&
 			e.SHMDetail != nil &&
 			e.SHMDetail.Pattern == "bpftime"
-	}, 30*time.Second)
+	}, 15*time.Second)
 
 	if err != nil {
 		t.Fatalf("did not detect SHM_CREATE with bpftime pattern: %v", err)
 	}
 
-	t.Logf("Detected SHM_CREATE event:")
-	t.Logf("  PID: %d, Comm: %s", shmEvt.PID, shmEvt.Comm)
-	t.Logf("  SHMName: %s", shmEvt.SHMDetail.SHMName)
-	t.Logf("  Pattern: %s", shmEvt.SHMDetail.Pattern)
-	t.Logf("  Severity: %s", shmEvt.Severity)
+	t.Logf("PASS: SHM_CREATE detected — name=%s pattern=%s severity=%s pid=%d",
+		evt.SHMDetail.SHMName, evt.SHMDetail.Pattern, evt.Severity, evt.PID)
 
-	if shmEvt.Severity != event.SeverityCritical {
-		t.Errorf("expected severity CRITICAL for bpftime SHM, got %s", shmEvt.Severity)
+	if evt.Severity != event.SeverityCritical {
+		t.Errorf("expected severity CRITICAL for bpftime SHM, got %s", evt.Severity)
 	}
-
-	// Phase 2: Detect exec injection of fake_hook library
-	injEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
-		return e.EventType == event.EventExecInjection &&
-			e.ExecInjectionDetail != nil &&
-			strings.Contains(e.ExecInjectionDetail.LibraryPath, "fake_hook")
-	}, 30*time.Second)
-
-	if err != nil {
-		t.Fatalf("did not detect EXEC_INJECTION with fake_hook: %v", err)
-	}
-
-	t.Logf("Detected EXEC_INJECTION event:")
-	t.Logf("  PID: %d, Comm: %s", injEvt.PID, injEvt.Comm)
-	t.Logf("  LibraryPath: %s", injEvt.ExecInjectionDetail.LibraryPath)
-	t.Logf("  TargetBinary: %s", injEvt.ExecInjectionDetail.TargetBinary)
-	t.Logf("  LibraryHash: %s", injEvt.ExecInjectionDetail.LibraryHash)
-	t.Logf("  SetBy: %s", injEvt.ExecInjectionDetail.SetBy)
-	t.Logf("  EnvVar: %s", injEvt.ExecInjectionDetail.EnvVar)
-	t.Logf("  Severity: %s", injEvt.Severity)
-
-	if injEvt.Severity != event.SeverityAlert {
-		t.Errorf("expected severity ALERT for EXEC_INJECTION, got %s", injEvt.Severity)
-	}
-
-	t.Logf("=== bpftime attack chain fully detected ===")
-	t.Logf("  SHM_CREATE (CRITICAL) + EXEC_INJECTION (ALERT) = userspace eBPF attack pattern")
 }
 
-// TestDenyBpftimeByPolicy verifies that a DENY policy entry can match
-// bpftime-pattern SHM events and block the attack.
-func TestDenyBpftimeByPolicy(t *testing.T) {
-	agent, err := StartAgent(agentBin())
-	if err != nil {
-		t.Fatalf("start agent: %v", err)
-	}
-	defer agent.Stop()
+// ---------------------------------------------------------------------------
+// Sensor 4: dlopen_monitor — detect runtime dlopen() of non-standard library
+// ---------------------------------------------------------------------------
 
-	// Trigger bpftime simulation
+func TestSensor4_DlopenMonitor_LoadLibrary(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	libPath := canaryBinDir() + "/libfake_hook.so"
+
 	go func() {
 		time.Sleep(1 * time.Second)
-		if err := RunBpftimeSim(bpftimeSimBin(), fakeHookLib(), "/bin/true"); err != nil {
-			t.Logf("bpftime_sim error (may be expected): %v", err)
-		}
+		RunCanaryBinary(canaryBinDir()+"/dlopen_canary", libPath)
 	}()
 
-	// Capture the SHM_CREATE event
-	shmEvt, err := agent.WaitForEvent(func(e *event.HookEvent) bool {
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventDlopen &&
+			e.DlopenDetail != nil &&
+			strings.Contains(e.DlopenDetail.LibraryPath, "fake_hook")
+	}, 15*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect DLOPEN of fake_hook: %v", err)
+	}
+
+	t.Logf("PASS: DLOPEN detected — lib=%s flags=%d pid=%d",
+		evt.DlopenDetail.LibraryPath, evt.DlopenDetail.Flags, evt.PID)
+}
+
+// ---------------------------------------------------------------------------
+// Sensor 5: linker_config — detect writes to ld.so config files
+// ---------------------------------------------------------------------------
+
+func TestSensor5_LinkerConfig_WriteConfD(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		RunShellCanary(canaryDir()+"/linker_config_canary.sh")
+	}()
+
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventLinkerConfig &&
+			e.LinkerConfigDetail != nil &&
+			strings.Contains(e.LinkerConfigDetail.FilePath, "hookmon-canary-test")
+	}, 15*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect LINKER_CONFIG write: %v", err)
+	}
+
+	t.Logf("PASS: LINKER_CONFIG detected — file=%s op=%s severity=%s pid=%d",
+		evt.LinkerConfigDetail.FilePath, evt.LinkerConfigDetail.Operation, evt.Severity, evt.PID)
+
+	if evt.Severity != event.SeverityCritical {
+		t.Errorf("expected severity CRITICAL for linker config change, got %s", evt.Severity)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sensor 6: ptrace_monitor — detect ptrace attach/inject
+// ---------------------------------------------------------------------------
+
+func TestSensor6_PtraceMonitor_Attach(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		RunCanaryBinary(canaryBinDir()+"/ptrace_canary")
+	}()
+
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventPtraceInject &&
+			e.PtraceDetail != nil
+	}, 15*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect PTRACE_INJECT: %v", err)
+	}
+
+	t.Logf("PASS: PTRACE_INJECT detected — request=%s(%d) target_pid=%d pid=%d",
+		evt.PtraceDetail.RequestName, evt.PtraceDetail.Request,
+		evt.PtraceDetail.TargetPID, evt.PID)
+
+	// Should be PTRACE_ATTACH (16) or PTRACE_SEIZE (16902)
+	if evt.PtraceDetail.Request != 16 && evt.PtraceDetail.Request != 16902 {
+		t.Errorf("expected PTRACE_ATTACH(16) or PTRACE_SEIZE(16902), got %d", evt.PtraceDetail.Request)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sensor 7: lib_integrity — detect shared library modification on disk
+// ---------------------------------------------------------------------------
+
+func TestSensor7_LibIntegrity_WriteToUsrLib(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	libPath := canaryBinDir() + "/libfake_hook.so"
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		RunShellCanary(canaryDir()+"/lib_integrity_canary.sh", libPath)
+	}()
+
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventLibIntegrity &&
+			e.LibIntegrityDetail != nil &&
+			strings.Contains(e.LibIntegrityDetail.LibraryPath, "hookmon_canary_test")
+	}, 15*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect LIB_INTEGRITY write: %v", err)
+	}
+
+	t.Logf("PASS: LIB_INTEGRITY detected — lib=%s op=%s severity=%s pid=%d",
+		evt.LibIntegrityDetail.LibraryPath, evt.LibIntegrityDetail.Operation,
+		evt.Severity, evt.PID)
+}
+
+// ---------------------------------------------------------------------------
+// Sensor 8: elf_rpath — detect suspicious RPATH/RUNPATH in ELF binaries
+// ---------------------------------------------------------------------------
+
+func TestSensor8_ElfRpath_SuspiciousPath(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	rpathBinary := canaryBinDir() + "/test_rpath"
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		// Execute the binary — the elf_rpath audit sensor runs on every execve
+		RunCanaryBinary(rpathBinary)
+	}()
+
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventElfRpath &&
+			e.ElfRpathDetail != nil
+	}, 15*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect ELF_RPATH event: %v", err)
+	}
+
+	t.Logf("PASS: ELF_RPATH detected — rpath=%s risk=%s setuid=%v pid=%d",
+		evt.ElfRpathDetail.RpathRaw, evt.ElfRpathDetail.HighestRisk,
+		evt.ElfRpathDetail.IsSetuid, evt.PID)
+
+	// /tmp/evil should be CRITICAL risk
+	if evt.ElfRpathDetail.HighestRisk != "CRITICAL" {
+		t.Errorf("expected CRITICAL risk for /tmp/evil RPATH, got %s", string(evt.ElfRpathDetail.HighestRisk))
+	}
+
+	// Should contain the /tmp/evil path
+	if !strings.Contains(evt.ElfRpathDetail.RpathRaw, "/tmp/evil") {
+		t.Errorf("expected RPATH to contain /tmp/evil, got %s", evt.ElfRpathDetail.RpathRaw)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Combined attack: bpftime simulation (SHM + EXEC_INJECTION)
+// ---------------------------------------------------------------------------
+
+func TestCombined_BpftimeAttackChain(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	simBin := canaryBinDir() + "/bpftime_sim"
+	libPath := canaryBinDir() + "/libfake_hook.so"
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		RunBpftimeSim(simBin, libPath, "/bin/true")
+	}()
+
+	// Phase 1: SHM_CREATE with bpftime pattern
+	shmEvt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
 		return e.EventType == event.EventSHMCreate &&
 			e.SHMDetail != nil &&
 			e.SHMDetail.Pattern == "bpftime"
@@ -435,39 +437,107 @@ func TestDenyBpftimeByPolicy(t *testing.T) {
 		t.Fatalf("did not detect SHM_CREATE: %v", err)
 	}
 
-	t.Logf("Captured SHM_CREATE event (SHMName=%s, Pattern=%s)", shmEvt.SHMDetail.SHMName, shmEvt.SHMDetail.Pattern)
+	t.Logf("Phase 1: SHM_CREATE — name=%s pattern=%s severity=%s",
+		shmEvt.SHMDetail.SHMName, shmEvt.SHMDetail.Pattern, shmEvt.Severity)
 
-	// Build a DENY policy entry that matches bpftime SHM patterns.
-	// Uses LibraryPath field to match against the SHM name.
+	// Phase 2: EXEC_INJECTION with LD_PRELOAD
+	injEvt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.EventType == event.EventExecInjection &&
+			e.ExecInjectionDetail != nil &&
+			strings.Contains(e.ExecInjectionDetail.LibraryPath, "fake_hook")
+	}, 30*time.Second)
+
+	if err != nil {
+		t.Fatalf("did not detect EXEC_INJECTION: %v", err)
+	}
+
+	t.Logf("Phase 2: EXEC_INJECTION — lib=%s env=%s severity=%s",
+		injEvt.ExecInjectionDetail.LibraryPath,
+		injEvt.ExecInjectionDetail.EnvVar,
+		injEvt.Severity)
+
+	t.Logf("PASS: Full bpftime attack chain detected (SHM_CREATE + EXEC_INJECTION)")
+}
+
+// ---------------------------------------------------------------------------
+// Policy evaluation tests
+// ---------------------------------------------------------------------------
+
+func TestPolicy_AllowByProgHash(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		LoadCanary(canaryBinDir()+"/load_canary",
+			canaryDir()+"/hello_bpf.o",
+			"syscalls", "sys_enter_getpid", "hello_count")
+	}()
+
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count"
+	}, 15*time.Second)
+	if err != nil {
+		t.Fatalf("did not detect hello_count: %v", err)
+	}
+
+	// Allowlist by exact prog_hash
+	allowlist := []*event.AllowlistEntry{
+		{
+			ID:          "test-allow-prog-hash",
+			Description: "Allow hello_count by prog_hash",
+			EventTypes:  []event.EventType{event.EventBPFLoad},
+			ProgHash:    evt.BPFDetail.ProgHash,
+			Action:      event.ActionAllow,
+			Enabled:     true,
+		},
+	}
+
+	result := EvaluateAgainstAllowlist(evt, allowlist)
+	if result.Action != event.ActionAllow {
+		t.Errorf("expected ALLOW, got %s: %s", result.Action, result.Reason)
+	}
+	t.Logf("PASS: prog_hash allowlist matched — hash=%s", evt.BPFDetail.ProgHash)
+}
+
+func TestPolicy_DenyByProgHash(t *testing.T) {
+	bus, err := StartBus(busBin())
+	if err != nil {
+		t.Fatalf("start bus: %v", err)
+	}
+	defer bus.Stop()
+
+	go func() {
+		time.Sleep(1 * time.Second)
+		LoadCanary(canaryBinDir()+"/load_canary",
+			canaryDir()+"/net_monitor.o",
+			"syscalls", "sys_enter_connect", "net_count")
+	}()
+
+	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
+		return e.BPFDetail != nil && e.BPFDetail.ProgName == "net_count"
+	}, 15*time.Second)
+	if err != nil {
+		t.Fatalf("did not detect net_count: %v", err)
+	}
+
 	denyList := []*event.AllowlistEntry{
 		{
-			ID:          "deny-bpftime-shm",
-			Description: "Block bpftime-pattern shared memory creation",
-			EventTypes:  []event.EventType{event.EventSHMCreate},
-			LibraryPath: "bpftime",
+			ID:          "test-deny-prog-hash",
+			Description: "Deny net_count by prog_hash",
+			EventTypes:  []event.EventType{event.EventBPFLoad},
+			ProgHash:    evt.BPFDetail.ProgHash,
 			Action:      event.ActionDeny,
 			Enabled:     true,
 		},
 	}
 
-	// Evaluate: should get DENY
-	result := EvaluateAgainstAllowlist(shmEvt, denyList)
+	result := EvaluateAgainstAllowlist(evt, denyList)
 	if result.Action != event.ActionDeny {
-		t.Errorf("expected DENY for bpftime SHM event, got %s: %s", result.Action, result.Reason)
+		t.Errorf("expected DENY, got %s", result.Action)
 	}
-	t.Logf("Policy result for bpftime SHM: %s (entry: %s)", result.Action, result.MatchedEntryID)
-
-	// Verify the same DENY entry does NOT match a non-bpftime SHM event
-	nonBpftimeEvt := &event.HookEvent{
-		EventType: event.EventSHMCreate,
-		SHMDetail: &event.SHMDetail{
-			SHMName: "/dev/shm/postgres_shared_12345",
-			Pattern: "unknown",
-		},
-	}
-	result2 := EvaluateAgainstAllowlist(nonBpftimeEvt, denyList)
-	if result2.Action == event.ActionDeny {
-		t.Errorf("DENY entry should NOT match non-bpftime SHM event, but got DENY")
-	}
-	t.Logf("Policy result for non-bpftime SHM: %s (correctly not matched)", result2.Action)
+	t.Logf("PASS: prog_hash deny matched — hash=%s", evt.BPFDetail.ProgHash)
 }

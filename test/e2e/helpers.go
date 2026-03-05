@@ -14,8 +14,8 @@ import (
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
-// AgentProcess manages a hookmon-agent running in console mode for testing.
-type AgentProcess struct {
+// BusProcess manages a hookmon-bus running in console mode for testing.
+type BusProcess struct {
 	cmd    *exec.Cmd
 	events chan *event.HookEvent
 	lines  chan string
@@ -26,21 +26,20 @@ func lokiURL() string {
 	return os.Getenv("HOOKMON_LOKI_URL")
 }
 
-func prometheusPort() string {
-	return os.Getenv("HOOKMON_PROMETHEUS_PORT")
+func statusPort() string {
+	return os.Getenv("HOOKMON_STATUS_PORT")
 }
 
-// StartAgent launches hookmon-agent --console and captures its JSON output.
-// Set HOOKMON_LOKI_URL and HOOKMON_PROMETHEUS_PORT env vars to enable observability.
-func StartAgent(agentBin string) (*AgentProcess, error) {
+// StartBus launches hookmon-bus --console and captures its JSON output.
+func StartBus(busBin string) (*BusProcess, error) {
 	args := []string{"--console"}
 	if u := lokiURL(); u != "" {
 		args = append(args, "--loki-url", u)
 	}
-	if p := prometheusPort(); p != "" {
-		args = append(args, "--prometheus-port", p)
+	if p := statusPort(); p != "" {
+		args = append(args, "--status-port", p)
 	}
-	cmd := exec.Command(agentBin, args...)
+	cmd := exec.Command(busBin, args...)
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
@@ -48,7 +47,7 @@ func StartAgent(agentBin string) (*AgentProcess, error) {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	ap := &AgentProcess{
+	bp := &BusProcess{
 		cmd:    cmd,
 		events: make(chan *event.HookEvent, 100),
 		lines:  make(chan string, 1000),
@@ -56,22 +55,21 @@ func StartAgent(agentBin string) (*AgentProcess, error) {
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start agent: %w", err)
+		return nil, fmt.Errorf("start bus: %w", err)
 	}
 
 	// Parse JSON events from stdout
 	go func() {
-		defer close(ap.done)
+		defer close(bp.done)
 		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 1<<20), 1<<20) // 1MB buffer for large JSON
+		scanner.Buffer(make([]byte, 1<<20), 1<<20)
 		var jsonBuf strings.Builder
 		braceDepth := 0
 
 		for scanner.Scan() {
 			line := scanner.Text()
-			ap.lines <- line
+			bp.lines <- line
 
-			// Accumulate JSON object lines (pretty-printed JSON spans multiple lines)
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "{" || strings.HasPrefix(trimmed, "{") {
 				if braceDepth == 0 {
@@ -92,34 +90,34 @@ func StartAgent(agentBin string) (*AgentProcess, error) {
 			if braceDepth == 0 && jsonBuf.Len() > 2 {
 				var evt event.HookEvent
 				if err := json.Unmarshal([]byte(jsonBuf.String()), &evt); err == nil {
-					ap.events <- &evt
+					bp.events <- &evt
 				}
 				jsonBuf.Reset()
 			}
 		}
 	}()
 
-	// Give agent time to start sensors
+	// Give bus time to start sensors
 	time.Sleep(2 * time.Second)
-	return ap, nil
+	return bp, nil
 }
 
-// Stop terminates the agent process.
-func (ap *AgentProcess) Stop() error {
-	if ap.cmd.Process != nil {
-		ap.cmd.Process.Signal(os.Interrupt)
+// Stop terminates the bus process.
+func (bp *BusProcess) Stop() error {
+	if bp.cmd.Process != nil {
+		bp.cmd.Process.Signal(os.Interrupt)
 		time.Sleep(500 * time.Millisecond)
-		ap.cmd.Process.Kill()
+		bp.cmd.Process.Kill()
 	}
-	return ap.cmd.Wait()
+	return bp.cmd.Wait()
 }
 
-// WaitForEvent waits for an event matching the filter function within the timeout.
-func (ap *AgentProcess) WaitForEvent(filter func(*event.HookEvent) bool, timeout time.Duration) (*event.HookEvent, error) {
+// WaitForEvent waits for an event matching the filter within the timeout.
+func (bp *BusProcess) WaitForEvent(filter func(*event.HookEvent) bool, timeout time.Duration) (*event.HookEvent, error) {
 	deadline := time.After(timeout)
 	for {
 		select {
-		case evt := <-ap.events:
+		case evt := <-bp.events:
 			if filter(evt) {
 				return evt, nil
 			}
@@ -129,7 +127,7 @@ func (ap *AgentProcess) WaitForEvent(filter func(*event.HookEvent) bool, timeout
 	}
 }
 
-// LoadCanary runs the canary loader and returns when it exits.
+// LoadCanary runs the BPF canary loader with sudo and returns when it exits.
 func LoadCanary(loaderBin, bpfObj, tpGroup, tpName, progName string) error {
 	cmd := exec.Command("sudo", loaderBin, bpfObj, tpGroup, tpName, progName)
 	cmd.Stdout = os.Stdout
@@ -137,26 +135,25 @@ func LoadCanary(loaderBin, bpfObj, tpGroup, tpName, progName string) error {
 	return cmd.Run()
 }
 
-// LoadCanaryAsync runs the canary loader in the background and returns immediately.
-func LoadCanaryAsync(loaderBin, bpfObj, tpGroup, tpName, progName string) (*exec.Cmd, error) {
-	cmd := exec.Command("sudo", loaderBin, bpfObj, tpGroup, tpName, progName)
+// RunCanaryBinary executes a canary binary with optional args (with sudo).
+func RunCanaryBinary(bin string, args ...string) error {
+	allArgs := append([]string{bin}, args...)
+	cmd := exec.Command("sudo", allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	return cmd, nil
+	return cmd.Run()
 }
 
-// bpftimeSimBin returns the path to the bpftime_sim binary.
-func bpftimeSimBin() string {
-	if v := os.Getenv("HOOKMON_BPFTIME_SIM"); v != "" {
-		return v
-	}
-	return "/tmp/bpftime_sim"
+// RunShellCanary executes a shell canary script with optional args (with sudo).
+func RunShellCanary(script string, args ...string) error {
+	allArgs := append([]string{"bash", script}, args...)
+	cmd := exec.Command("sudo", allArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
-// RunBpftimeSim executes the bpftime attack simulator with the given library and target.
+// RunBpftimeSim executes the bpftime attack simulator.
 func RunBpftimeSim(simBin, libPath, targetBin string) error {
 	cmd := exec.Command("sudo", simBin, libPath, targetBin)
 	cmd.Stdout = os.Stdout
@@ -164,7 +161,7 @@ func RunBpftimeSim(simBin, libPath, targetBin string) error {
 	return cmd.Run()
 }
 
-// EvaluateAgainstAllowlist evaluates an event against a set of allowlist entries
+// EvaluateAgainstAllowlist evaluates an event against allowlist entries
 // using the same logic as the server policy engine.
 func EvaluateAgainstAllowlist(evt *event.HookEvent, entries []*event.AllowlistEntry) *event.PolicyResult {
 	for _, entry := range entries {
@@ -223,6 +220,10 @@ func matchesEntry(entry *event.AllowlistEntry, evt *event.HookEvent) bool {
 			}
 		case event.EventSHMCreate:
 			if evt.SHMDetail == nil || !strings.Contains(evt.SHMDetail.SHMName, entry.LibraryPath) {
+				return false
+			}
+		case event.EventDlopen:
+			if evt.DlopenDetail == nil || !strings.Contains(evt.DlopenDetail.LibraryPath, entry.LibraryPath) {
 				return false
 			}
 		default:
