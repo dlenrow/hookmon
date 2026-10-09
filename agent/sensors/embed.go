@@ -18,3 +18,6 @@ var dlopenMonitorBPF []byte
 
 //go:embed ptrace_monitor.o
 var ptraceMonitorBPF []byte
+
+//go:embed elf_rpath.o
+var elfRpathBPF []byte

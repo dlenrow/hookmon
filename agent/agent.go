@@ -17,12 +17,10 @@ import (
 	"github.com/dlenrow/hookmon/agent/transport"
 	"github.com/dlenrow/hookmon/pkg/event"
 	"github.com/dlenrow/hookmon/pkg/version"
-	"github.com/google/uuid"
 )
 
 // allSensorNames returns the names of the enabled sensors, which are the ones
-// the registry tracks. elf_rpath is an analysis run on exec events, not a
-// started sensor, so it has no liveness to report.
+// the registry tracks.
 func allSensorNames(cfg *config.AgentConfig) []string {
 	var names []string
 	if cfg.Sensors.BPFSyscall {
@@ -45,6 +43,9 @@ func allSensorNames(cfg *config.AgentConfig) []string {
 	}
 	if cfg.Sensors.LibIntegrity {
 		names = append(names, "lib_integrity")
+	}
+	if cfg.Sensors.ElfRpath {
+		names = append(names, "elf_rpath")
 	}
 	return names
 }
@@ -88,7 +89,6 @@ type Agent struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 
-	rpathCache *sensors.RpathCache
 	registry   *registry.Registry
 	health     *healthChecker
 	filter     probeFilter
@@ -127,7 +127,6 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 		logger:     logger,
 		transport:  t,
 		hostname:   hostname,
-		rpathCache: sensors.NewRpathCache(10000),
 		registry:   reg,
 		filter:     probeFilter{self: uint32(os.Getpid())},
 		healthDone: make(chan struct{}),
@@ -256,6 +255,9 @@ func (a *Agent) initSensors() {
 	if a.cfg.Sensors.LibIntegrity {
 		a.sensors = append(a.sensors, sensors.NewLibIntegritySensor())
 	}
+	if a.cfg.Sensors.ElfRpath {
+		a.sensors = append(a.sensors, sensors.NewElfRpathSensor())
+	}
 }
 
 func (a *Agent) forwardEvents(ctx context.Context, s sensors.Sensor) {
@@ -274,7 +276,13 @@ func (a *Agent) forwardEvents(ctx context.Context, s sensors.Sensor) {
 			evt.HostID = a.cfg.HostID
 			evt.Hostname = a.hostname
 
+			exePath := evt.ExePath
 			enrichment.EnrichProcess(evt)
+			if evt.EventType == event.EventElfRpath && exePath != "" {
+				// elf_rpath names the binary the kernel loaded for this
+				// exec; /proc/<pid>/exe may already name a later exec.
+				evt.ExePath = exePath
+			}
 
 			// Hash the binary if we have the path
 			if evt.ExePath != "" && evt.ExeHash == "" {
@@ -288,11 +296,6 @@ func (a *Agent) forwardEvents(ctx context.Context, s sensors.Sensor) {
 			}
 
 			a.sendEvent(evt)
-
-			// ELF RPATH audit: analyze the binary and emit a supplementary event if risky.
-			if a.cfg.Sensors.ElfRpath && evt.ExePath != "" {
-				a.analyzeAndEmitRpath(evt)
-			}
 		}
 	}
 }
@@ -308,53 +311,6 @@ func (a *Agent) sendEvent(evt *event.HookEvent) {
 	if a.metrics != nil {
 		a.metrics.RecordEvent(evt)
 	}
-}
-
-// analyzeAndEmitRpath checks the binary's ELF RPATH/RUNPATH and emits an
-// ELF_RPATH event if the highest risk is MEDIUM or above.
-func (a *Agent) analyzeAndEmitRpath(origEvt *event.HookEvent) {
-	// Check cache first.
-	inode, mtime, err := sensors.FileInodeAndMtime(origEvt.ExePath)
-	if err != nil {
-		return
-	}
-
-	detail := a.rpathCache.Get(origEvt.ExePath, inode, mtime.UnixNano())
-	if detail == nil {
-		var analyzeErr error
-		detail, analyzeErr = sensors.AnalyzeElfRpath(origEvt.ExePath)
-		if analyzeErr != nil || detail == nil {
-			return
-		}
-		a.rpathCache.Put(origEvt.ExePath, inode, mtime.UnixNano(), detail)
-	}
-
-	// Only emit if risk is MEDIUM or above.
-	if sensors.RiskBelow(detail.HighestRisk, event.RpathRiskMedium) {
-		return
-	}
-
-	rpathEvt := &event.HookEvent{
-		ID:          uuid.New().String(),
-		Timestamp:   origEvt.Timestamp,
-		HostID:      origEvt.HostID,
-		Hostname:    origEvt.Hostname,
-		EventType:   event.EventElfRpath,
-		PID:         origEvt.PID,
-		PPID:        origEvt.PPID,
-		UID:         origEvt.UID,
-		GID:         origEvt.GID,
-		Comm:        origEvt.Comm,
-		Cmdline:     origEvt.Cmdline,
-		ExePath:     origEvt.ExePath,
-		ExeHash:     origEvt.ExeHash,
-		CgroupPath:  origEvt.CgroupPath,
-		ContainerID: origEvt.ContainerID,
-		Namespace:   origEvt.Namespace,
-		ElfRpathDetail: detail,
-	}
-
-	a.sendEvent(rpathEvt)
 }
 
 // sensorHeartbeatTicker periodically beats the registry for Go-side sensors.

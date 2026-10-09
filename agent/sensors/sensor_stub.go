@@ -35,3 +35,4 @@ func NewDlopenMonitorSensor() Sensor     { return newStub("dlopen_monitor", Sens
 func NewLinkerConfigSensor() Sensor      { return newStub("linker_config", SensorTypeFanotify) }
 func NewPtraceMonitorSensor() Sensor     { return newStub("ptrace_monitor", SensorTypeBPF) }
 func NewLibIntegritySensor() Sensor      { return newStub("lib_integrity", SensorTypeFanotify) }
+func NewElfRpathSensor() Sensor          { return newStub("elf_rpath", SensorTypeBPF) }

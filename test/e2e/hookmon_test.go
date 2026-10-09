@@ -380,8 +380,9 @@ func TestSensor8_ElfRpath_SuspiciousPath(t *testing.T) {
 
 	go func() {
 		time.Sleep(1 * time.Second)
-		// Execute the binary with LD_PRELOAD to trigger exec_injection sensor,
-		// which populates ExePath and triggers the elf_rpath audit hook.
+		// Execute the binary with LD_PRELOAD. elf_rpath reports the exec on
+		// its own; TestSensor8_ElfRpath_OriginTmpCleanEnv covers a clean
+		// environment.
 		RunExecWithPreload(rpathBinary, libPath)
 	}()
 

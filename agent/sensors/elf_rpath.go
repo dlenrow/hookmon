@@ -1,31 +1,33 @@
 // Package sensors — elf_rpath implements ELF RPATH/RUNPATH analysis.
-// This is a pure-Go userspace analyzer (no eBPF, no build tags) that uses
-// debug/elf to inspect DT_RPATH and DT_RUNPATH entries in ELF binaries.
-// It runs as a post-enrichment audit on execve events, not as a standalone sensor.
+// This file is the pure-Go analyzer (no eBPF, no build tags) that uses
+// debug/elf to inspect DT_RPATH and DT_RUNPATH entries in ELF binaries, plus
+// its cache. The elf_rpath sensor (elf_rpath_sensor.go) runs it on every exec
+// its sched_process_exec program reports.
 package sensors
 
 import (
+	"container/list"
 	"debug/elf"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
 // Standard system library directories considered safe.
 var standardLibDirs = map[string]bool{
-	"/usr/lib":       true,
-	"/usr/lib64":     true,
-	"/usr/lib32":     true,
-	"/lib":           true,
-	"/lib64":         true,
-	"/lib32":         true,
-	"/usr/local/lib": true,
+	"/usr/lib":         true,
+	"/usr/lib64":       true,
+	"/usr/lib32":       true,
+	"/lib":             true,
+	"/lib64":           true,
+	"/lib32":           true,
+	"/usr/local/lib":   true,
 	"/usr/local/lib64": true,
 }
 
@@ -37,64 +39,135 @@ var dangerousPrefixes = []string{
 	"/home/",
 }
 
-// rpathCacheKey identifies a cached analysis by path, inode, and mtime.
-type rpathCacheKey struct {
-	path  string
-	inode uint64
-	mtime int64
+// rpathCacheCap bounds the sensor's analysis cache, one entry per binary
+// version.
+const rpathCacheCap = 10000
+
+// FileID identifies one version of a file: its device, inode, mtime and
+// mode. Rewriting the file in place changes the mtime; replacing it changes
+// the inode. The mode is in the key because chmod u+s changes the
+// classification ($ORIGIN in a setuid binary) without changing the mtime.
+type FileID struct {
+	Dev     uint64
+	Ino     uint64
+	MtimeNs int64
+	Mode    uint32
 }
 
-// RpathCache is a thread-safe LRU-ish cache for RPATH analysis results.
+// RpathResult is one cached analysis. Detail is nil when the binary has no
+// RPATH/RUNPATH or is not ELF. Path is where the binary was analyzed; $ORIGIN
+// was resolved against its directory.
+type RpathResult struct {
+	Detail *event.ElfRpathDetail
+	Path   string
+}
+
+type rpathCacheEntry struct {
+	key    FileID
+	result RpathResult
+}
+
+// RpathCache is a thread-safe LRU cache of RPATH analysis results. It also
+// holds negative results (no RPATH/RUNPATH, not ELF), the common case, so
+// each version of a binary is analyzed once, not once per exec.
 type RpathCache struct {
 	mu      sync.Mutex
-	entries map[rpathCacheKey]*event.ElfRpathDetail
 	maxSize int
+	order   *list.List // front is most recently used; values are *rpathCacheEntry
+	entries map[FileID]*list.Element
 }
 
 // NewRpathCache creates a cache with the given maximum number of entries.
 func NewRpathCache(maxSize int) *RpathCache {
+	if maxSize < 1 {
+		maxSize = 1
+	}
 	return &RpathCache{
-		entries: make(map[rpathCacheKey]*event.ElfRpathDetail, maxSize),
 		maxSize: maxSize,
+		order:   list.New(),
+		entries: make(map[FileID]*list.Element, maxSize),
 	}
 }
 
-// Get returns a cached result if found, or nil.
-func (c *RpathCache) Get(path string, inode uint64, mtime int64) *event.ElfRpathDetail {
+// Get returns the cached result for key and whether there was one. A hit
+// with a nil Detail is a cached negative result. A hit makes the entry the
+// most recently used.
+func (c *RpathCache) Get(key FileID) (RpathResult, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.entries[rpathCacheKey{path, inode, mtime}]
+	el, ok := c.entries[key]
+	if !ok {
+		return RpathResult{}, false
+	}
+	c.order.MoveToFront(el)
+	return el.Value.(*rpathCacheEntry).result, true
 }
 
-// Put stores a result. If the cache is full, it evicts an arbitrary entry.
-func (c *RpathCache) Put(path string, inode uint64, mtime int64, detail *event.ElfRpathDetail) {
+// Put stores a result. If the cache is full, it evicts the least recently
+// used entry.
+func (c *RpathCache) Put(key FileID, result RpathResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if len(c.entries) >= c.maxSize {
-		// Evict one arbitrary entry.
-		for k := range c.entries {
-			delete(c.entries, k)
-			break
-		}
+	if el, ok := c.entries[key]; ok {
+		el.Value.(*rpathCacheEntry).result = result
+		c.order.MoveToFront(el)
+		return
 	}
-	c.entries[rpathCacheKey{path, inode, mtime}] = detail
+	if c.order.Len() >= c.maxSize {
+		oldest := c.order.Back()
+		c.order.Remove(oldest)
+		delete(c.entries, oldest.Value.(*rpathCacheEntry).key)
+	}
+	c.entries[key] = c.order.PushFront(&rpathCacheEntry{key: key, result: result})
 }
 
 // Len returns the number of cached entries.
 func (c *RpathCache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.entries)
+	return c.order.Len()
+}
+
+// RpathSeverity maps the highest RPATH risk to an event severity, following
+// the CLAUDE.md severity table: CRITICAL→CRITICAL, HIGH→ALERT, MEDIUM→WARN.
+// Lower risks map to INFO; the sensor emits no event for them.
+func RpathSeverity(risk event.RpathRisk) event.Severity {
+	switch risk {
+	case event.RpathRiskCritical:
+		return event.SeverityCritical
+	case event.RpathRiskHigh:
+		return event.SeverityAlert
+	case event.RpathRiskMedium:
+		return event.SeverityWarn
+	default:
+		return event.SeverityInfo
+	}
 }
 
 // AnalyzeElfRpath opens an ELF binary and analyzes its DT_RPATH and DT_RUNPATH entries.
 // Returns nil detail (no error) if the file is not ELF or has no RPATH/RUNPATH.
 func AnalyzeElfRpath(exePath string) (*event.ElfRpathDetail, error) {
-	f, err := elf.Open(exePath)
+	f, err := os.Open(exePath)
 	if err != nil {
-		// Not an ELF binary or unreadable — not an error for our purposes.
+		// Unreadable — not an error for our purposes.
 		return nil, nil
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil
+	}
+	return analyzeElfRpath(f, exePath, isSetuidMode(info.Mode())), nil
+}
+
+// analyzeElfRpath analyzes the ELF image in r. exePath is the binary's path,
+// used to resolve $ORIGIN, and isSetuid says whether it has the SUID or SGID
+// bit. Returns nil if r is not ELF or has no RPATH/RUNPATH.
+func analyzeElfRpath(r io.ReaderAt, exePath string, isSetuid bool) *event.ElfRpathDetail {
+	f, err := elf.NewFile(r)
+	if err != nil {
+		// Not an ELF binary — not an error for our purposes.
+		return nil
 	}
 	defer f.Close()
 
@@ -105,11 +178,10 @@ func AnalyzeElfRpath(exePath string) (*event.ElfRpathDetail, error) {
 	hasRpath := rpathErr == nil && len(rpath) > 0 && rpath[0] != ""
 	hasRunpath := runpathErr == nil && len(runpath) > 0 && runpath[0] != ""
 	if !hasRpath && !hasRunpath {
-		return nil, nil
+		return nil
 	}
 
 	binaryDir := filepath.Dir(exePath)
-	isSetuid := checkSetuid(exePath)
 
 	detail := &event.ElfRpathDetail{
 		HasRpath:       hasRpath,
@@ -148,7 +220,7 @@ func AnalyzeElfRpath(exePath string) (*event.ElfRpathDetail, error) {
 		}
 	}
 
-	return detail, nil
+	return detail
 }
 
 // classifyEntry evaluates a single RPATH/RUNPATH path entry and assigns a risk level.
@@ -165,18 +237,27 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 		return entry
 	}
 
-	// Check if $ORIGIN is used.
+	// Check if $ORIGIN is used. An $ORIGIN path is only as safe as the
+	// directory it resolves to, so one that resolves into a writable
+	// location is flagged like that absolute path would be.
 	if strings.Contains(path, "$ORIGIN") {
-		if isSetuid {
+		resolved := filepath.Clean(strings.ReplaceAll(path, "$ORIGIN", binaryDir))
+		entry.Exists = dirExists(resolved)
+		prefix := dangerousPrefix(resolved + "/")
+		switch {
+		case isSetuid:
 			entry.Risk = event.RpathRiskCritical
 			entry.Reason = "$ORIGIN in SUID/SGID binary allows privilege escalation"
-		} else {
+		case prefix != "":
+			entry.Risk = event.RpathRiskCritical
+			entry.Reason = fmt.Sprintf("$ORIGIN resolves to %s, in writable/attacker-controlled directory %s", resolved, prefix)
+		case entry.Exists && isWorldWritable(resolved):
+			entry.Risk = event.RpathRiskHigh
+			entry.Reason = fmt.Sprintf("$ORIGIN resolves to world-writable directory %s", resolved)
+		default:
 			entry.Risk = event.RpathRiskLow
 			entry.Reason = "$ORIGIN-relative path in non-SUID binary"
 		}
-		// Resolve $ORIGIN for exists check.
-		resolved := strings.ReplaceAll(path, "$ORIGIN", binaryDir)
-		entry.Exists = dirExists(resolved)
 		entry = bumpIfDeprecated(entry)
 		return entry
 	}
@@ -191,14 +272,12 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	}
 
 	// Check dangerous prefixes.
-	for _, prefix := range dangerousPrefixes {
-		if strings.HasPrefix(path, prefix) {
-			entry.Risk = event.RpathRiskCritical
-			entry.Reason = fmt.Sprintf("writable/attacker-controlled directory: %s", prefix)
-			entry.Exists = dirExists(path)
-			entry = bumpIfDeprecated(entry)
-			return entry
-		}
+	if prefix := dangerousPrefix(path); prefix != "" {
+		entry.Risk = event.RpathRiskCritical
+		entry.Reason = fmt.Sprintf("writable/attacker-controlled directory: %s", prefix)
+		entry.Exists = dirExists(path)
+		entry = bumpIfDeprecated(entry)
+		return entry
 	}
 
 	// Check if this is a standard system library path first (before exists check).
@@ -259,13 +338,19 @@ func bumpIfDeprecated(entry event.RpathEntry) event.RpathEntry {
 	return entry
 }
 
-// checkSetuid checks if a file has SUID or SGID bits set.
-func checkSetuid(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
+// dangerousPrefix returns the entry of dangerousPrefixes that path starts
+// with, or "".
+func dangerousPrefix(path string) string {
+	for _, prefix := range dangerousPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return prefix
+		}
 	}
-	mode := info.Mode()
+	return ""
+}
+
+// isSetuidMode reports whether a file mode has the SUID or SGID bit set.
+func isSetuidMode(mode os.FileMode) bool {
 	return mode&os.ModeSetuid != 0 || mode&os.ModeSetgid != 0
 }
 
@@ -312,9 +397,9 @@ func RiskBelow(a, b event.RpathRisk) bool {
 
 // ScanResult is the output of scanning a single binary for RPATH issues.
 type ScanResult struct {
-	Path   string               `json:"path"`
+	Path   string                `json:"path"`
 	Detail *event.ElfRpathDetail `json:"detail,omitempty"`
-	Error  string               `json:"error,omitempty"`
+	Error  string                `json:"error,omitempty"`
 }
 
 // ScanDirectory walks a directory tree and analyzes every ELF binary for RPATH issues.
@@ -353,16 +438,4 @@ func ScanDirectory(root string) []ScanResult {
 func ScanDirectoryJSON(root string) ([]byte, error) {
 	results := ScanDirectory(root)
 	return json.MarshalIndent(results, "", "  ")
-}
-
-// FileInodeAndMtime returns the inode and mtime for a path, for cache keying.
-func FileInodeAndMtime(path string) (inode uint64, mtime time.Time, err error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, time.Time{}, err
-	}
-	mtime = info.ModTime()
-	// Try to get inode from platform-specific Sys()
-	inode = fileInode(info)
-	return inode, mtime, nil
 }

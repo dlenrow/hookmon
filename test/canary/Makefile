@@ -70,6 +70,11 @@ $(OUT)/test_rpath: test_rpath.c | $(OUT)
 $(OUT)/test_rpath_origin: test_rpath.c | $(OUT)
 	$(CC) -o $@ $< '-Wl,-rpath,$$ORIGIN/../lib'
 
+# RUNPATH (not RPATH) $ORIGIN/../tmp: a library directory next to the binary.
+# The e2e test runs it from a bin/ whose sibling tmp/ is world-writable.
+$(OUT)/test_rpath_origin_tmp: test_rpath.c | $(OUT)
+	$(CC) -o $@ $< '-Wl,--enable-new-dtags,-rpath,$$ORIGIN/../tmp'
+
 $(OUT):
 	mkdir -p $(OUT)
 
@@ -78,13 +83,13 @@ $(OUT):
 all: hello_bpf.o net_monitor.o hello_bpf_v2.o hello_bpf_mod.o raw_tp_canary.o \
      $(OUT)/load_canary $(OUT)/bpf_tag_canary $(OUT)/bpftime_sim $(OUT)/libfake_hook.so \
      $(OUT)/dlopen_canary $(OUT)/ptrace_canary $(OUT)/shm_canary \
-     $(OUT)/test_rpath $(OUT)/test_rpath_origin
+     $(OUT)/test_rpath $(OUT)/test_rpath_origin $(OUT)/test_rpath_origin_tmp
 
 # Build just the canaries that don't need eBPF toolchain
 .PHONY: canaries-noebpf
 canaries-noebpf: $(OUT)/bpftime_sim $(OUT)/libfake_hook.so \
                  $(OUT)/dlopen_canary $(OUT)/ptrace_canary $(OUT)/shm_canary \
-                 $(OUT)/test_rpath $(OUT)/test_rpath_origin
+                 $(OUT)/test_rpath $(OUT)/test_rpath_origin $(OUT)/test_rpath_origin_tmp
 
 # Hash all compiled BPF programs (for reference in allowlist entries)
 .PHONY: hashes

@@ -92,13 +92,12 @@ func TestProbeEventsNotSentOrCounted(t *testing.T) {
 	cfg.Sensors.ElfRpath = false
 	tr := &recordingTransport{got: make(chan struct{}, 10)}
 	a := &Agent{
-		cfg:        cfg,
-		logger:     zap.NewNop(),
-		transport:  tr,
-		registry:   registry.New([]string{"ptrace_monitor"}),
-		rpathCache: sensors.NewRpathCache(10),
-		filter:     probeFilter{self: busPID},
-		metrics:    m,
+		cfg:       cfg,
+		logger:    zap.NewNop(),
+		transport: tr,
+		registry:  registry.New([]string{"ptrace_monitor"}),
+		filter:    probeFilter{self: busPID},
+		metrics:   m,
 	}
 	s := &chanSensor{ch: make(chan *event.HookEvent, 10)}
 	ctx, cancel := context.WithCancel(context.Background())

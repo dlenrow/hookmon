@@ -23,6 +23,7 @@ var allSensors = []sensorSpec{
 	{"linker_config", sensors.SensorTypeFanotify, func() sensors.Sensor { return sensors.NewLinkerConfigSensor() }, func(c *config.SensorConfig) bool { return c.LinkerConfig }},
 	{"ptrace_monitor", sensors.SensorTypeBPF, func() sensors.Sensor { return sensors.NewPtraceMonitorSensor() }, func(c *config.SensorConfig) bool { return c.PtraceMonitor }},
 	{"lib_integrity", sensors.SensorTypeFanotify, func() sensors.Sensor { return sensors.NewLibIntegritySensor() }, func(c *config.SensorConfig) bool { return c.LibIntegrity }},
+	{"elf_rpath", sensors.SensorTypeBPF, func() sensors.Sensor { return sensors.NewElfRpathSensor() }, func(c *config.SensorConfig) bool { return c.ElfRpath }},
 }
 
 // TestSensorConstructors proves each of the 8 sensor constructors returns
@@ -87,7 +88,7 @@ func TestSensorConfigMapping(t *testing.T) {
 // TestSensorTypeClassification proves sensors are correctly classified
 // as bpf, fanotify, or audit — this matters for heartbeat routing.
 func TestSensorTypeClassification(t *testing.T) {
-	ebpfSensors := []string{"bpf_syscall", "exec_injection", "shm_monitor", "dlopen_monitor", "ptrace_monitor"}
+	ebpfSensors := []string{"bpf_syscall", "exec_injection", "shm_monitor", "dlopen_monitor", "ptrace_monitor", "elf_rpath"}
 	fanotifySensors := []string{"linker_config", "lib_integrity"}
 
 	for _, spec := range allSensors {
@@ -119,19 +120,22 @@ func TestSensorStopIdempotent(t *testing.T) {
 	}
 }
 
-// TestElfRpathSensorType proves the elf_rpath sensor is classified as audit type
-// (it's not in allSensors because it doesn't have a traditional constructor).
+// TestElfRpathSensorType proves elf_rpath is an eBPF sensor (its
+// sched_process_exec program reports every exec), not the post-enrichment
+// audit it used to be, so the health checker probes it like the others.
 func TestElfRpathSensorType(t *testing.T) {
 	if sensors.SensorTypeAudit != "audit" {
 		t.Errorf("SensorTypeAudit should be 'audit', got %q", sensors.SensorTypeAudit)
+	}
+	if got := sensors.NewElfRpathSensor().Type(); got != sensors.SensorTypeBPF {
+		t.Errorf("elf_rpath Type(): expected %q, got %q", sensors.SensorTypeBPF, got)
 	}
 }
 
 // TestSensorCount proves we have exactly 8 sensor types accounted for.
 func TestSensorCount(t *testing.T) {
-	// 7 constructable sensors + 1 audit sensor (elf_rpath) = 8 total
-	if len(allSensors) != 7 {
-		t.Errorf("expected 7 constructable sensors (+ elf_rpath audit), got %d", len(allSensors))
+	if len(allSensors) != 8 {
+		t.Errorf("expected 8 constructable sensors, got %d", len(allSensors))
 	}
 }
 

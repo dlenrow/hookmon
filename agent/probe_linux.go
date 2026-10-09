@@ -34,6 +34,7 @@ func newHookProber(dlopenHelper string, logger *zap.Logger) *hookProber {
 
 func (p *hookProber) probe(names []string) map[string]string {
 	unverifiable := make(map[string]string)
+	execProbed := false
 	for _, name := range names {
 		switch name {
 		case "bpf_syscall":
@@ -52,14 +53,22 @@ func (p *hookProber) probe(names []string) map[string]string {
 		case "ptrace_monitor":
 			// pid 0 never names a tracee, so the kernel returns ESRCH.
 			unix.Syscall6(unix.SYS_PTRACE, ptraceProbeRequest, 0, 0, 0, 0, 0)
-		case "exec_injection":
+		case "exec_injection", "elf_rpath":
+			// One /bin/true run fires both hooks: sys_enter_execve
+			// (exec_injection) and, once the exec succeeds,
+			// sched_process_exec (elf_rpath).
+			//
 			// Every cycle, not once a minute as the fix plan suggested: a
 			// sensor is dead after two missed cycles (15 s threshold), so a
 			// minute between probes would mark a healthy sensor dead on a
 			// host that execs nothing else. A clean environment carries no
-			// LD_* variable to report.
+			// LD_* variable to report, and /bin/true has no RPATH.
+			if execProbed {
+				continue
+			}
+			execProbed = true
 			if err := runProbeChild("/bin/true"); err != nil {
-				p.logger.Warn("exec_injection probe: /bin/true failed", zap.Error(err))
+				p.logger.Warn("exec probe: /bin/true failed", zap.String("sensor", name), zap.Error(err))
 			}
 		case "dlopen_monitor":
 			if reason := p.runDlopenHelper(); reason != "" {

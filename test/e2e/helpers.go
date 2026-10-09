@@ -175,9 +175,9 @@ func RunShellCanary(script string, args ...string) error {
 	return cmd.Run()
 }
 
-// RunExecWithPreload executes a binary with LD_PRELOAD set to trigger both
-// the exec_injection sensor (which sees the LD_PRELOAD) and the elf_rpath
-// audit (which runs on the enriched ExePath).
+// RunExecWithPreload executes a binary with LD_PRELOAD set. The exec
+// triggers both the exec_injection sensor (which sees the LD_PRELOAD) and
+// the elf_rpath sensor (which sees every exec).
 func RunExecWithPreload(binary, libPath string) error {
 	cmd := exec.Command("sudo", "env", "LD_PRELOAD="+libPath, binary)
 	cmd.Stdout = os.Stderr

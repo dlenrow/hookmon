@@ -22,11 +22,10 @@ import (
 // Heartbeat and tamper-detection tests (fix plan step 3). Each test runs its
 // own bus on its own status port so they never collide with the bus on 2112.
 
-// expectedSensors is every sensor enabled by default. elf_rpath is an
-// analysis of exec events, not a started sensor, so it is not registered.
+// expectedSensors is every sensor enabled by default.
 var expectedSensors = []string{
 	"bpf_syscall", "exec_injection", "shm_monitor", "dlopen_monitor",
-	"linker_config", "ptrace_monitor", "lib_integrity",
+	"linker_config", "ptrace_monitor", "lib_integrity", "elf_rpath",
 }
 
 func getStatus(port string) (*observability.StatusResponse, error) {

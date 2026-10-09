@@ -7,6 +7,10 @@
  * Or with $ORIGIN (less suspicious in non-SUID context):
  *   gcc -o test_rpath_origin test_rpath.c '-Wl,-rpath,$ORIGIN/../lib'
  *
+ * Or with a RUNPATH $ORIGIN entry that resolves to a writable directory
+ * (HIGH if world-writable, CRITICAL under /tmp, /home, ...):
+ *   gcc -o test_rpath_origin_tmp test_rpath.c '-Wl,--enable-new-dtags,-rpath,$ORIGIN/../tmp'
+ *
  * Verify with readelf:
  *   readelf -d test_rpath | grep -i path
  *
