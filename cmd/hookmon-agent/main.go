@@ -25,6 +25,8 @@ func main() {
 	consoleMode := flag.Bool("console", false, "print events to stdout as JSON (no server connection)")
 	lokiURL := flag.String("loki-url", "", "Loki push URL (e.g. http://localhost:3100); empty disables")
 	prometheusPort := flag.Int("prometheus-port", 0, "port to expose Prometheus metrics on; 0 disables")
+	statusAddr := flag.String("status-addr", "", "bind address for /status and /metrics (e.g. 127.0.0.1); overrides config")
+	dlopenProbe := flag.String("dlopen-probe", "", "path to the hookmon-dlopen-probe helper; overrides config")
 	scanRpath := flag.String("scan-rpath", "", "scan a directory for ELF RPATH issues and exit (e.g. /usr/bin)")
 	flag.Parse()
 
@@ -64,6 +66,12 @@ func main() {
 	}
 	if *prometheusPort > 0 {
 		cfg.StatusPort = *prometheusPort
+	}
+	if *statusAddr != "" {
+		cfg.StatusAddr = *statusAddr
+	}
+	if *dlopenProbe != "" {
+		cfg.DlopenProbePath = *dlopenProbe
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

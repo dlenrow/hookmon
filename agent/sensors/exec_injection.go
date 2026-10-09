@@ -37,6 +37,7 @@ type ExecInjectionSensor struct {
 	tp      link.Link
 	reader  *ringbuf.Reader
 	coll    *ebpf.Collection
+	prog    *ebpf.Program
 	done    chan struct{}
 }
 
@@ -61,12 +62,12 @@ func (s *ExecInjectionSensor) Start() error {
 		return fmt.Errorf("create BPF collection: %w", err)
 	}
 
-	prog := s.coll.Programs["trace_execve_enter"]
-	if prog == nil {
+	s.prog = s.coll.Programs["trace_execve_enter"]
+	if s.prog == nil {
 		return errors.New("BPF program 'trace_execve_enter' not found")
 	}
 
-	s.tp, err = link.Tracepoint("syscalls", "sys_enter_execve", prog, nil)
+	s.tp, err = link.Tracepoint("syscalls", "sys_enter_execve", s.prog, nil)
 	if err != nil {
 		return fmt.Errorf("attach tracepoint: %w", err)
 	}
@@ -100,6 +101,14 @@ func (s *ExecInjectionSensor) Stop() error {
 }
 
 func (s *ExecInjectionSensor) Events() <-chan *event.HookEvent { return s.eventCh }
+
+// HeartbeatNs implements BPFHealth.
+func (s *ExecInjectionSensor) HeartbeatNs() (uint64, error) {
+	return readHeartbeat(s.coll, "hookmon_heartbeat_exec_injection")
+}
+
+// CheckAttached implements BPFHealth.
+func (s *ExecInjectionSensor) CheckAttached() error { return checkAttached(s.prog, s.tp) }
 
 func (s *ExecInjectionSensor) readLoop() {
 	for {

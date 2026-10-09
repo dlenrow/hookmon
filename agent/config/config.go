@@ -46,11 +46,24 @@ type AgentConfig struct {
 	// Defaults to 2112. Zero means disabled.
 	StatusPort int `yaml:"status_port"`
 
-	// HeartbeatSensorInterval is how often each sensor reports its heartbeat.
+	// StatusAddr is the address the /status and /metrics server binds to,
+	// e.g. "127.0.0.1". Empty means all interfaces.
+	StatusAddr string `yaml:"status_addr"`
+
+	// HeartbeatSensorInterval is how often the bus fires every eBPF hook
+	// itself, reads the heartbeat maps and evaluates sensor health. The
+	// fanotify sensors beat on the same interval.
 	HeartbeatSensorInterval time.Duration `yaml:"heartbeat_sensor_interval"`
 
-	// DeadThreshold is how long since last heartbeat before a sensor is marked dead.
+	// DeadThreshold is how long since last heartbeat before a sensor is marked
+	// dead. The default of 15 s is 1.5 check intervals: one missed check is
+	// tolerated, two consecutive misses mark the sensor dead (within 20 s).
+	// Zero means 1.5 x HeartbeatSensorInterval.
 	DeadThreshold time.Duration `yaml:"dead_threshold"`
+
+	// DlopenProbePath is the helper the bus runs to fire the dlopen uprobe.
+	// Empty means hookmon-dlopen-probe in the bus binary's directory.
+	DlopenProbePath string `yaml:"dlopen_probe_path"`
 }
 
 // TLSConfig holds mTLS certificate paths.
@@ -83,7 +96,7 @@ func DefaultConfig() *AgentConfig {
 		LogLevel:                "info",
 		StatusPort:              2112,
 		HeartbeatSensorInterval: 10 * time.Second,
-		DeadThreshold:           35 * time.Second,
+		DeadThreshold:           15 * time.Second,
 		Sensors: SensorConfig{
 			BPFSyscall:    true,
 			ExecInjection: true,

@@ -2,8 +2,9 @@ package observability
 
 import (
 	"context"
-	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -25,6 +26,7 @@ type Metrics struct {
 	sensorAlive       *prometheus.GaugeVec
 	sensorLastBeat    *prometheus.GaugeVec
 	sensorLastBeatAge *prometheus.GaugeVec
+	sensorStatus      *prometheus.GaugeVec
 	busOverall        *prometheus.GaugeVec
 
 	mux    *http.ServeMux
@@ -32,10 +34,15 @@ type Metrics struct {
 	logger *zap.Logger
 }
 
-// NewMetrics creates and registers Prometheus metrics, and starts the HTTP server.
-// If reg is non-nil, a /status endpoint is also served. If statusHandler is non-nil,
-// it is added to the mux.
+// NewMetrics creates and registers Prometheus metrics, and starts the HTTP
+// server on all interfaces. Use RegisterStatusHandler to add /status.
 func NewMetrics(port int, logger *zap.Logger) (*Metrics, error) {
+	return NewMetricsOn("", port, logger)
+}
+
+// NewMetricsOn is NewMetrics bound to addr:port. An empty addr binds all
+// interfaces.
+func NewMetricsOn(addr string, port int, logger *zap.Logger) (*Metrics, error) {
 	promReg := prometheus.NewRegistry()
 
 	m := &Metrics{
@@ -63,8 +70,13 @@ func NewMetrics(port int, logger *zap.Logger) (*Metrics, error) {
 
 		sensorAlive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "hookmon_sensor_alive",
-			Help: "Whether a sensor is alive (1) or dead (0).",
+			Help: "Whether a sensor is alive (1) or not (0): dead, failed, unverifiable or unknown.",
 		}, []string{"sensor"}),
+
+		sensorStatus: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "hookmon_sensor_status",
+			Help: "Sensor status (1 for the sensor's current status, as reported by /status).",
+		}, []string{"sensor", "status"}),
 
 		sensorLastBeat: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "hookmon_sensor_last_beat_seconds",
@@ -84,19 +96,19 @@ func NewMetrics(port int, logger *zap.Logger) (*Metrics, error) {
 
 	promReg.MustRegister(
 		m.eventsTotal, m.sensorErrors, m.sensorsActive, m.bpfInsnCount,
-		m.sensorAlive, m.sensorLastBeat, m.sensorLastBeatAge, m.busOverall,
+		m.sensorAlive, m.sensorLastBeat, m.sensorLastBeatAge, m.sensorStatus, m.busOverall,
 	)
 
 	m.mux = http.NewServeMux()
 	m.mux.Handle("/metrics", promhttp.HandlerFor(promReg, promhttp.HandlerOpts{}))
 
 	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:    net.JoinHostPort(addr, strconv.Itoa(port)),
 		Handler: m.mux,
 	}
 
 	go func() {
-		logger.Info("sensor bus HTTP server starting", zap.Int("port", port))
+		logger.Info("sensor bus HTTP server starting", zap.String("addr", m.server.Addr))
 		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP server error", zap.Error(err))
 		}
@@ -116,10 +128,17 @@ func (m *Metrics) UpdateSensorHealth(reg *registry.Registry) {
 	now := time.Now()
 	for _, s := range snap {
 		var alive float64
-		if s.Status == "alive" {
+		if s.Status == registry.StatusAlive {
 			alive = 1
 		}
 		m.sensorAlive.WithLabelValues(s.Name).Set(alive)
+		for _, st := range sensorStatuses {
+			var v float64
+			if st == s.Status {
+				v = 1
+			}
+			m.sensorStatus.WithLabelValues(s.Name, st).Set(v)
+		}
 
 		if !s.LastBeat.IsZero() {
 			m.sensorLastBeat.WithLabelValues(s.Name).Set(float64(s.LastBeat.Unix()))
@@ -135,6 +154,12 @@ func (m *Metrics) UpdateSensorHealth(reg *registry.Registry) {
 		}
 		m.busOverall.WithLabelValues(st).Set(v)
 	}
+}
+
+// sensorStatuses lists every status a sensor can report.
+var sensorStatuses = []string{
+	registry.StatusUnknown, registry.StatusAlive, registry.StatusDead,
+	registry.StatusFailed, registry.StatusUnverifiable,
 }
 
 // RecordEvent records a hook event in Prometheus metrics.

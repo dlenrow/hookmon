@@ -39,8 +39,9 @@ func TestStatusHandler(t *testing.T) {
 	if resp.Version != "1.0.0-test" {
 		t.Errorf("expected version 1.0.0-test, got %s", resp.Version)
 	}
-	if resp.Overall != "alive" {
-		t.Errorf("expected overall alive, got %s", resp.Overall)
+	// exec_injection has not beaten yet, so the host is not fully alive.
+	if resp.Overall != "degraded" {
+		t.Errorf("expected overall degraded, got %s", resp.Overall)
 	}
 	if len(resp.Sensors) != 2 {
 		t.Fatalf("expected 2 sensors, got %d", len(resp.Sensors))

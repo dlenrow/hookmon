@@ -36,6 +36,7 @@ type DlopenMonitorSensor struct {
 	uprobe  link.Link
 	reader  *ringbuf.Reader
 	coll    *ebpf.Collection
+	prog    *ebpf.Program
 	done    chan struct{}
 }
 
@@ -60,8 +61,8 @@ func (s *DlopenMonitorSensor) Start() error {
 		return fmt.Errorf("create BPF collection: %w", err)
 	}
 
-	prog := s.coll.Programs["trace_dlopen"]
-	if prog == nil {
+	s.prog = s.coll.Programs["trace_dlopen"]
+	if s.prog == nil {
 		return errors.New("BPF program 'trace_dlopen' not found")
 	}
 
@@ -87,7 +88,7 @@ func (s *DlopenMonitorSensor) Start() error {
 	// (dlopen@@GLIBC_2.34) which some cilium/ebpf versions can't resolve.
 	// If all names fail, resolve the address manually from the ELF.
 	for _, sym := range []string{"dlopen", "__libc_dlopen_mode", "__dlopen"} {
-		s.uprobe, err = ex.Uprobe(sym, prog, nil)
+		s.uprobe, err = ex.Uprobe(sym, s.prog, nil)
 		if err == nil {
 			break
 		}
@@ -98,7 +99,7 @@ func (s *DlopenMonitorSensor) Start() error {
 		if addrErr != nil {
 			return fmt.Errorf("attach uprobe (all methods failed): %w", err)
 		}
-		s.uprobe, err = ex.Uprobe("", prog, &link.UprobeOptions{Address: addr})
+		s.uprobe, err = ex.Uprobe("", s.prog, &link.UprobeOptions{Address: addr})
 		if err != nil {
 			return fmt.Errorf("attach uprobe at offset 0x%x: %w", addr, err)
 		}
@@ -133,6 +134,14 @@ func (s *DlopenMonitorSensor) Stop() error {
 }
 
 func (s *DlopenMonitorSensor) Events() <-chan *event.HookEvent { return s.eventCh }
+
+// HeartbeatNs implements BPFHealth.
+func (s *DlopenMonitorSensor) HeartbeatNs() (uint64, error) {
+	return readHeartbeat(s.coll, "hookmon_heartbeat_dlopen_monitor")
+}
+
+// CheckAttached implements BPFHealth.
+func (s *DlopenMonitorSensor) CheckAttached() error { return checkAttached(s.prog, s.uprobe) }
 
 func (s *DlopenMonitorSensor) readLoop() {
 	for {

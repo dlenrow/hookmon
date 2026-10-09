@@ -36,3 +36,63 @@ groups:
             One or more hosts have sensors that are no longer alive. This means
             some classes of code injection are no longer being monitored on those
             hosts. Check the fleet status table for details.
+
+      # Pushgateway keeps serving the last values it received. If the
+      # collector stops pushing, the fleet metrics above freeze at their last
+      # state (often "all alive") and the alerts above can never fire.
+      # absent() covers a Pushgateway restart or outage, which drops the
+      # series. 90 s is three missed pushes at the default 30 s poll
+      # interval; raise it if you raise poll_interval.
+      - alert: HookMonCollectorSilent
+        expr: |
+          time() - push_time_seconds{job="hookmon-collector"} > 90
+          or
+          absent(push_time_seconds{job="hookmon-collector"})
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "hookmon-collector has not pushed fleet health for over 90 seconds"
+          description: >
+            Pushgateway has no fresh push from hookmon-collector. Fleet health
+            metrics are stale, so HookMonHostUnreachable, HookMonSensorDead and
+            HookMonFleetDegraded cannot fire. Check that hookmon-collector is
+            running and can reach Pushgateway, and that Pushgateway is up.
+
+  # Event flow check. Uses the bus's own /metrics (job hookmon-bus in
+  # prometheus.yml).
+  - name: hookmon-event-flow
+    interval: 1m
+    rules:
+      # Total events per bus. Records 0 while the bus is scraped but has no
+      # events yet. Without that, the first event after a bus start (a new
+      # series at 1) would not count as an increase.
+      - record: instance:hookmon_events_total:sum
+        expr: |
+          sum by (instance) (hookmon_events_total{job="hookmon-bus"})
+          or
+          sum by (instance) (0 * (up{job="hookmon-bus"} == 1))
+
+      # All sensors report alive, but the bus recorded no events in 24 h.
+      # Heartbeats prove the sensors run; they do not prove events reach the
+      # pipeline. Needs 24 h of history before it can fire.
+      - alert: HookMonNoEvents24h
+        expr: |
+          (
+            min by (instance) (hookmon_sensor_alive{job="hookmon-bus"}) == 1
+            and on (instance)
+            instance:hookmon_events_total:sum offset 24h
+          )
+          unless on (instance)
+          increase(instance:hookmon_events_total:sum[24h]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No HookMon events from {{ $labels.instance }} in 24 hours"
+          description: >
+            Every sensor on {{ $labels.instance }} reports alive, but the bus
+            has recorded no events for 24 hours. Events may be suppressed
+            between the sensors and the bus. A quiet host (a dormant standby,
+            for example) can also cause this. Check the host's role before
+            escalating.

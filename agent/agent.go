@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,7 +20,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// allSensorNames returns the list of all sensor names matching the config.
+// allSensorNames returns the names of the enabled sensors, which are the ones
+// the registry tracks. elf_rpath is an analysis run on exec events, not a
+// started sensor, so it has no liveness to report.
 func allSensorNames(cfg *config.AgentConfig) []string {
 	var names []string
 	if cfg.Sensors.BPFSyscall {
@@ -43,10 +46,36 @@ func allSensorNames(cfg *config.AgentConfig) []string {
 	if cfg.Sensors.LibIntegrity {
 		names = append(names, "lib_integrity")
 	}
-	if cfg.Sensors.ElfRpath {
-		names = append(names, "elf_rpath")
-	}
 	return names
+}
+
+// sensorInterval returns how often sensors are checked.
+func sensorInterval(cfg *config.AgentConfig) time.Duration {
+	if cfg.HeartbeatSensorInterval > 0 {
+		return cfg.HeartbeatSensorInterval
+	}
+	return 10 * time.Second
+}
+
+// deadThreshold returns the configured threshold, or 1.5 check intervals.
+func deadThreshold(cfg *config.AgentConfig) time.Duration {
+	if cfg.DeadThreshold > 0 {
+		return cfg.DeadThreshold
+	}
+	return sensorInterval(cfg) * 3 / 2
+}
+
+// dlopenProbePath returns the configured dlopen helper, or
+// hookmon-dlopen-probe next to the running binary.
+func dlopenProbePath(cfg *config.AgentConfig) string {
+	if cfg.DlopenProbePath != "" {
+		return cfg.DlopenProbePath
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "hookmon-dlopen-probe"
+	}
+	return filepath.Join(filepath.Dir(exe), "hookmon-dlopen-probe")
 }
 
 // Agent is the hookmon sensor bus daemon that loads sensors and streams events.
@@ -61,6 +90,9 @@ type Agent struct {
 
 	rpathCache *sensors.RpathCache
 	registry   *registry.Registry
+	health     *healthChecker
+	filter     probeFilter
+	healthDone chan struct{}
 
 	loki    *observability.LokiPusher
 	metrics *observability.Metrics
@@ -78,7 +110,11 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 	}
 
 	sensorNames := allSensorNames(cfg)
-	reg := registry.New(sensorNames)
+	reg := registry.NewWithThreshold(sensorNames, deadThreshold(cfg))
+	if reg.Threshold() <= sensorInterval(cfg) {
+		logger.Warn("dead_threshold is not above heartbeat_sensor_interval; healthy sensors will flap",
+			zap.Duration("dead_threshold", reg.Threshold()), zap.Duration("interval", sensorInterval(cfg)))
+	}
 
 	// Determine the HTTP port: StatusPort takes precedence, fall back to PrometheusPort.
 	httpPort := cfg.StatusPort
@@ -93,7 +129,11 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 		hostname:   hostname,
 		rpathCache: sensors.NewRpathCache(10000),
 		registry:   reg,
+		filter:     probeFilter{self: uint32(os.Getpid())},
+		healthDone: make(chan struct{}),
 	}
+	prober := newHookProber(dlopenProbePath(cfg), logger)
+	a.health = newHealthChecker(reg, prober.probe, monotonicNow, logger)
 
 	if cfg.LokiURL != "" {
 		a.loki = observability.NewLokiPusher(cfg.LokiURL, logger)
@@ -101,7 +141,7 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 	}
 
 	if httpPort > 0 {
-		m, err := observability.NewMetrics(httpPort, logger)
+		m, err := observability.NewMetricsOn(cfg.StatusAddr, httpPort, logger)
 		if err != nil {
 			logger.Error("failed to start HTTP server", zap.Error(err))
 		} else {
@@ -138,6 +178,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	for _, s := range a.sensors {
 		if err := s.Start(); err != nil {
 			a.logger.Warn("sensor failed to start", zap.String("sensor", s.Name()), zap.Error(err))
+			a.registry.Fail(s.Name(), err.Error())
 			if a.metrics != nil {
 				a.metrics.RecordSensorError(s.Name())
 			}
@@ -146,8 +187,17 @@ func (a *Agent) Run(ctx context.Context) error {
 		activeSensors++
 		a.logger.Info("sensor started", zap.String("sensor", s.Name()))
 
-		// Mark the sensor as alive in the registry
-		a.registry.Beat(s.Name())
+		// eBPF sensors stay "unknown" until the first probe cycle confirms
+		// their hook runs. Go-side sensors are alive once started.
+		if s.Type() == sensors.SensorTypeBPF {
+			if hb, ok := s.(sensors.BPFHealth); ok {
+				a.health.add(s.Name(), hb)
+			} else {
+				a.registry.Unverifiable(s.Name(), "sensor exposes no heartbeat map")
+			}
+		} else {
+			a.registry.Beat(s.Name())
+		}
 
 		// Fan events from each sensor into the transport
 		a.wg.Add(1)
@@ -163,9 +213,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.metrics.SetSensorsActive(activeSensors)
 	}
 
-	// Registry evaluator + metrics updater
-	a.wg.Add(1)
-	go a.registryLoop(ctx)
+	// Probe hooks, read heartbeats, evaluate and update metrics.
+	go a.healthLoop(ctx)
 
 	// Heartbeat loop to server (skip in console mode)
 	if !a.cfg.ConsoleMode {
@@ -219,6 +268,9 @@ func (a *Agent) forwardEvents(ctx context.Context, s sensors.Sensor) {
 			if !ok {
 				return
 			}
+			if a.filter.drop(evt) {
+				continue
+			}
 			evt.HostID = a.cfg.HostID
 			evt.Hostname = a.hostname
 
@@ -229,10 +281,11 @@ func (a *Agent) forwardEvents(ctx context.Context, s sensors.Sensor) {
 				evt.ExeHash = enrichment.SHA256File(evt.ExePath)
 			}
 
-			// eBPF sensors: the heartbeat comes from BPF map reads (handled separately).
-			// For fanotify/audit sensors, the ticker handles it.
-			// We also beat on event receipt as a secondary signal.
-			a.registry.Beat(s.Name())
+			// eBPF sensors beat only from the heartbeat map check in the
+			// health loop. Go-side sensors also beat on event receipt.
+			if s.Type() != sensors.SensorTypeBPF {
+				a.registry.Beat(s.Name())
+			}
 
 			a.sendEvent(evt)
 
@@ -307,11 +360,7 @@ func (a *Agent) analyzeAndEmitRpath(origEvt *event.HookEvent) {
 // sensorHeartbeatTicker periodically beats the registry for Go-side sensors.
 func (a *Agent) sensorHeartbeatTicker(ctx context.Context, name string) {
 	defer a.wg.Done()
-	interval := a.cfg.HeartbeatSensorInterval
-	if interval == 0 {
-		interval = 10 * time.Second
-	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(sensorInterval(a.cfg))
 	defer ticker.Stop()
 
 	for {
@@ -324,21 +373,22 @@ func (a *Agent) sensorHeartbeatTicker(ctx context.Context, name string) {
 	}
 }
 
-// registryLoop evaluates sensor health and updates Prometheus metrics.
-func (a *Agent) registryLoop(ctx context.Context) {
-	defer a.wg.Done()
-	ticker := time.NewTicker(15 * time.Second)
+// healthLoop runs a probe/read/evaluate cycle at start and then once per
+// sensor interval, and publishes the result to Prometheus.
+func (a *Agent) healthLoop(ctx context.Context) {
+	defer close(a.healthDone)
+	ticker := time.NewTicker(sensorInterval(a.cfg))
 	defer ticker.Stop()
 
 	for {
+		a.health.cycle()
+		if a.metrics != nil {
+			a.metrics.UpdateSensorHealth(a.registry)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.registry.Evaluate()
-			if a.metrics != nil {
-				a.metrics.UpdateSensorHealth(a.registry)
-			}
 		}
 	}
 }
@@ -361,6 +411,8 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 }
 
 func (a *Agent) shutdown() error {
+	// The health loop reads sensor maps and links; let it finish first.
+	<-a.healthDone
 	for _, s := range a.sensors {
 		if err := s.Stop(); err != nil {
 			a.logger.Warn("sensor stop error", zap.String("sensor", s.Name()), zap.Error(err))

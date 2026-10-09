@@ -1,0 +1,20 @@
+# Alertmanager config for the HookMon Grafana stack.
+# Prometheus sends the rules in grafana/alerts/ here.
+#
+# Until you add a destination below, alerts show in the Alertmanager UI
+# (http://<appliance>:9093) and API, but nobody is notified.
+
+route:
+  receiver: hookmon-webhook
+  group_by: [alertname, host, instance]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: hookmon-webhook
+    # Uncomment and set your endpoint (Slack/Teams relay, PagerDuty
+    # webhook, SOAR, etc.):
+    # webhook_configs:
+    #   - url: https://alerts.example.internal/hookmon
+    #     send_resolved: true

@@ -28,3 +28,16 @@ type Sensor interface {
 	// Events returns the channel on which detected events are delivered.
 	Events() <-chan *event.HookEvent
 }
+
+// BPFHealth is implemented by the eBPF sensors. The bus uses it after firing
+// each hook itself to decide whether the hook still runs.
+type BPFHealth interface {
+	// HeartbeatNs returns key 0 of the sensor's hookmon_heartbeat_<name> map:
+	// the bpf_ktime_get_ns() (CLOCK_MONOTONIC) time the hook last ran.
+	HeartbeatNs() (uint64, error)
+
+	// CheckAttached verifies, independently of the heartbeat map, that the
+	// sensor's program and link still exist and that the kernel still has
+	// the program attached to the hook's perf event.
+	CheckAttached() error
+}

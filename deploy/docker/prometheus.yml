@@ -2,17 +2,24 @@ global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["localhost:9093"]
+
 rule_files:
   - /etc/prometheus/alerts/*.yaml
 
 scrape_configs:
+  # Pushgateway. The collector pushes fleet health here.
   - job_name: hookmon-collector
     honor_labels: true
     static_configs:
       - targets: ["localhost:9091"]
 
+  # Sensor buses: /metrics on each bus's status port (default 2112).
+  # Add one target per monitored host, for example:
+  #   - targets: ["bus-host-01.example.internal:2112"]
   - job_name: hookmon-bus
     static_configs:
-      - targets: ["infinichat-1:2112"]
-        labels:
-          instance: infinichat-1
+      - targets: []

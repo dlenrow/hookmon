@@ -45,6 +45,7 @@ type PtraceMonitorSensor struct {
 	tp      link.Link
 	reader  *ringbuf.Reader
 	coll    *ebpf.Collection
+	prog    *ebpf.Program
 	done    chan struct{}
 }
 
@@ -69,12 +70,12 @@ func (s *PtraceMonitorSensor) Start() error {
 		return fmt.Errorf("create BPF collection: %w", err)
 	}
 
-	prog := s.coll.Programs["trace_ptrace_enter"]
-	if prog == nil {
+	s.prog = s.coll.Programs["trace_ptrace_enter"]
+	if s.prog == nil {
 		return errors.New("BPF program 'trace_ptrace_enter' not found")
 	}
 
-	s.tp, err = link.Tracepoint("syscalls", "sys_enter_ptrace", prog, nil)
+	s.tp, err = link.Tracepoint("syscalls", "sys_enter_ptrace", s.prog, nil)
 	if err != nil {
 		return fmt.Errorf("attach tracepoint: %w", err)
 	}
@@ -108,6 +109,14 @@ func (s *PtraceMonitorSensor) Stop() error {
 }
 
 func (s *PtraceMonitorSensor) Events() <-chan *event.HookEvent { return s.eventCh }
+
+// HeartbeatNs implements BPFHealth.
+func (s *PtraceMonitorSensor) HeartbeatNs() (uint64, error) {
+	return readHeartbeat(s.coll, "hookmon_heartbeat_ptrace_monitor")
+}
+
+// CheckAttached implements BPFHealth.
+func (s *PtraceMonitorSensor) CheckAttached() error { return checkAttached(s.prog, s.tp) }
 
 func (s *PtraceMonitorSensor) readLoop() {
 	for {

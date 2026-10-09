@@ -174,3 +174,41 @@ func TestLoad_InvalidYAML(t *testing.T) {
 		t.Error("expected error for invalid YAML")
 	}
 }
+
+func TestHeartbeatAndStatusConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.HeartbeatSensorInterval != 10*time.Second {
+		t.Errorf("HeartbeatSensorInterval = %v, want 10s", cfg.HeartbeatSensorInterval)
+	}
+	if cfg.DeadThreshold != 15*time.Second {
+		t.Errorf("DeadThreshold = %v, want 15s", cfg.DeadThreshold)
+	}
+	if cfg.StatusAddr != "" || cfg.DlopenProbePath != "" {
+		t.Errorf("StatusAddr = %q, DlopenProbePath = %q, want both empty", cfg.StatusAddr, cfg.DlopenProbePath)
+	}
+
+	yaml := `
+status_addr: 127.0.0.1
+status_port: 2199
+dead_threshold: 25s
+heartbeat_sensor_interval: 5s
+dlopen_probe_path: /usr/lib/hookmon/hookmon-dlopen-probe
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.StatusAddr != "127.0.0.1" || cfg.StatusPort != 2199 {
+		t.Errorf("status = %s:%d, want 127.0.0.1:2199", cfg.StatusAddr, cfg.StatusPort)
+	}
+	if cfg.DeadThreshold != 25*time.Second || cfg.HeartbeatSensorInterval != 5*time.Second {
+		t.Errorf("DeadThreshold = %v, HeartbeatSensorInterval = %v", cfg.DeadThreshold, cfg.HeartbeatSensorInterval)
+	}
+	if cfg.DlopenProbePath != "/usr/lib/hookmon/hookmon-dlopen-probe" {
+		t.Errorf("DlopenProbePath = %q", cfg.DlopenProbePath)
+	}
+}

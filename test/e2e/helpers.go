@@ -36,13 +36,20 @@ func statusPort() string {
 
 // StartBus launches hookmon-bus --console and captures its JSON output.
 func StartBus(busBin string) (*BusProcess, error) {
+	var args []string
+	if p := statusPort(); p != "" {
+		args = append(args, "--status-port", p)
+	}
+	return StartBusArgs(busBin, args...)
+}
+
+// StartBusArgs is StartBus with extra command-line flags for the bus.
+func StartBusArgs(busBin string, extra ...string) (*BusProcess, error) {
 	args := []string{"--console"}
 	if u := lokiURL(); u != "" {
 		args = append(args, "--loki-url", u)
 	}
-	if p := statusPort(); p != "" {
-		args = append(args, "--status-port", p)
-	}
+	args = append(args, extra...)
 	cmd := exec.Command(busBin, args...)
 	cmd.Stderr = os.Stderr
 
@@ -103,6 +110,9 @@ func StartBus(busBin string) (*BusProcess, error) {
 	time.Sleep(2 * time.Second)
 	return bp, nil
 }
+
+// PID returns the bus's process ID.
+func (bp *BusProcess) PID() int { return bp.cmd.Process.Pid }
 
 // Stop terminates the bus process.
 func (bp *BusProcess) Stop() error {

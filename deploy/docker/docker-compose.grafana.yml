@@ -19,8 +19,21 @@ services:
     restart: unless-stopped
 
   pushgateway:
-    image: prom/pushgateway:latest
+    image: prom/pushgateway:v1.11.2
     network_mode: host
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.31.1
+    network_mode: host
+    # Single node. An empty cluster address keeps port 9094 closed.
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
     restart: unless-stopped
 
   grafana:
@@ -42,4 +55,5 @@ services:
 volumes:
   loki-data:
   prometheus-data:
+  alertmanager-data:
   grafana-data:

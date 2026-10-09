@@ -37,7 +37,9 @@ struct {
     __uint(max_entries, 256 * 1024);
 } events SEC(".maps");
 
-// Heartbeat map — written every HOOKMON_HEARTBEAT_INTERVAL_NS nanoseconds.
+// Heartbeat map — written at most every HOOKMON_HEARTBEAT_INTERVAL_NS (1 s)
+// whenever the hook fires. The bus fires every hook itself every 10 s and
+// checks that this value moved, so the throttle must stay well under 10 s.
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -45,7 +47,7 @@ struct {
     __type(value, __u64);
 } hookmon_heartbeat_ptrace_monitor SEC(".maps");
 
-#define HOOKMON_HEARTBEAT_INTERVAL_NS (10ULL * 1000000000ULL)
+#define HOOKMON_HEARTBEAT_INTERVAL_NS (1ULL * 1000000000ULL)
 
 static __always_inline void hookmon_heartbeat(void *map) {
     __u32 key = 0;

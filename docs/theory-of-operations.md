@@ -304,8 +304,13 @@ The combination of heartbeats, polling, and event rate analysis produces a layer
 | Poll endpoint unreachable | Sensor bus process killed or host network severed | CRITICAL |
 | Poll succeeds, but specific sensors report dead heartbeats | Targeted sensor unload (e.g., `bpftool prog detach`) | ALERT |
 | Poll succeeds, all sensors alive, but event rate zero for 24h | Events being suppressed in the pipeline | WARN |
+| Collector stops pushing to Pushgateway for 90 s | Collector killed, or Pushgateway restarted and lost its data | CRITICAL |
 
 The third signal — sensors alive but no events — requires combining heartbeat liveness with event rate. A host that genuinely has zero events for 24 hours is unusual but possible (a dormant standby, for example). Context from the host inventory (role, expected activity level) disambiguates. The key point is that heartbeats alone confirm the sensor is running; they cannot confirm events are flowing end-to-end.
+
+These signals map to Prometheus rules in `deploy/docker/grafana/alerts/hookmon-alerts.yaml`: `HookMonHostUnreachable`, `HookMonSensorDead`, `HookMonNoEvents24h` and `HookMonCollectorSilent`. `HookMonNoEvents24h` uses the bus's own `/metrics` (`hookmon_sensor_alive` and `hookmon_events_total`), so it needs each bus listed as a scrape target in `prometheus.yml`. Prometheus sends firing alerts to Alertmanager.
+
+The last row matters because Pushgateway keeps serving the last values it received. Without that rule, a dead collector would leave the fleet showing "all alive" forever.
 
 ### Limitations of Polling
 

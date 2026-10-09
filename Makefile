@@ -30,14 +30,14 @@ ifeq ($(TARGET_OS),linux)
 BPF_DEPS := bpf
 endif
 
-.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dashboard build-canaries build-canaries-noebpf
+.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dlopen-probe build-dashboard build-canaries build-canaries-noebpf
 .PHONY: bpf generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
 .PHONY: appliance-ova appliance-qcow2 appliance-iso
 
 ## Build targets
 
-build-all: build-bus build-agent build-server build-cli build-collector
+build-all: build-bus build-agent build-server build-cli build-collector build-dlopen-probe
 
 build-bus: $(BPF_DEPS)
 	@mkdir -p $(BIN_DIR)
@@ -46,6 +46,12 @@ build-bus: $(BPF_DEPS)
 build-collector:
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-collector ./cmd/hookmon-collector
+
+# C helper the bus runs to fire the dlopen uprobe (the bus itself is static Go).
+# The bus looks for it next to its own binary unless dlopen_probe_path is set.
+build-dlopen-probe:
+	@mkdir -p $(BIN_DIR)
+	$(CC) -O2 -Wall -o $(BIN_DIR)/hookmon-dlopen-probe agent/probe/dlopen_probe.c -ldl
 
 build-agent: $(BPF_DEPS)
 	@mkdir -p $(BIN_DIR)
@@ -84,7 +90,7 @@ test: $(BPF_DEPS)
 	go test ./...
 
 test-unit: $(BPF_DEPS)
-	go test -race -count=1 ./pkg/... ./server/policy/... ./server/connectors/... ./server/ingestion/... ./agent/config/... ./agent/sensors/... ./agent/transport/... ./agent/registry/... ./agent/observability/...
+	go test -race -count=1 ./agent/ ./pkg/... ./server/policy/... ./server/connectors/... ./server/ingestion/... ./agent/config/... ./agent/sensors/... ./agent/transport/... ./agent/registry/... ./agent/observability/...
 
 test-registry:
 	go test -race -count=1 ./agent/registry/...
@@ -104,10 +110,11 @@ build-canaries:
 build-canaries-noebpf:
 	$(MAKE) -C test/canary canaries-noebpf
 
-test-e2e: build-bus build-canaries
+test-e2e: build-bus build-dlopen-probe build-canaries
 	@echo "==> Deploying canaries and bus to /tmp for e2e..."
 	@mkdir -p /tmp/canary/bin
 	cp $(BIN_DIR)/hookmon-bus /tmp/hookmon-bus
+	cp $(BIN_DIR)/hookmon-dlopen-probe /tmp/hookmon-dlopen-probe
 	cp test/canary/bin/* /tmp/canary/bin/ 2>/dev/null || true
 	cp test/canary/*.o /tmp/canary/ 2>/dev/null || true
 	cp test/canary/*.sh /tmp/canary/

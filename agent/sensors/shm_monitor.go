@@ -37,6 +37,7 @@ type SHMMonitorSensor struct {
 	tp      link.Link
 	reader  *ringbuf.Reader
 	coll    *ebpf.Collection
+	prog    *ebpf.Program
 	done    chan struct{}
 }
 
@@ -61,12 +62,12 @@ func (s *SHMMonitorSensor) Start() error {
 		return fmt.Errorf("create BPF collection: %w", err)
 	}
 
-	prog := s.coll.Programs["trace_shm_open"]
-	if prog == nil {
+	s.prog = s.coll.Programs["trace_shm_open"]
+	if s.prog == nil {
 		return errors.New("BPF program 'trace_shm_open' not found")
 	}
 
-	s.tp, err = link.Tracepoint("syscalls", "sys_enter_openat", prog, nil)
+	s.tp, err = link.Tracepoint("syscalls", "sys_enter_openat", s.prog, nil)
 	if err != nil {
 		return fmt.Errorf("attach tracepoint: %w", err)
 	}
@@ -100,6 +101,14 @@ func (s *SHMMonitorSensor) Stop() error {
 }
 
 func (s *SHMMonitorSensor) Events() <-chan *event.HookEvent { return s.eventCh }
+
+// HeartbeatNs implements BPFHealth.
+func (s *SHMMonitorSensor) HeartbeatNs() (uint64, error) {
+	return readHeartbeat(s.coll, "hookmon_heartbeat_shm_monitor")
+}
+
+// CheckAttached implements BPFHealth.
+func (s *SHMMonitorSensor) CheckAttached() error { return checkAttached(s.prog, s.tp) }
 
 func (s *SHMMonitorSensor) readLoop() {
 	for {

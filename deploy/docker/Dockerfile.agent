@@ -9,7 +9,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN make bpf && CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /hookmon-bus ./cmd/hookmon-bus
+RUN make bpf build-dlopen-probe && CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /hookmon-bus ./cmd/hookmon-bus
 
 FROM debian:bookworm-slim
 
@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /hookmon-bus /usr/bin/hookmon-bus
+# dlopen_monitor liveness probe; the bus looks for it next to its own binary.
+COPY --from=builder /build/bin/hookmon-dlopen-probe /usr/bin/hookmon-dlopen-probe
 
 RUN mkdir -p /etc/hookmon /var/log/hookmon
 

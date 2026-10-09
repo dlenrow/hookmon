@@ -140,9 +140,17 @@ func TestBusStatusWithSensorHealthMetrics(t *testing.T) {
 	if !containsStr(text, `hookmon_sensor_alive{sensor="exec_injection"} 0`) {
 		t.Error("expected hookmon_sensor_alive{sensor=\"exec_injection\"} 0")
 	}
-	// overall should be alive (no dead sensors, unknown doesn't count as dead)
-	if !containsStr(text, `hookmon_bus_overall{status="alive"} 1`) {
-		t.Error("expected hookmon_bus_overall{status=\"alive\"} 1")
+	// overall is alive only when every registered sensor is alive. An unknown
+	// sensor has not confirmed its hook runs, so one alive + one unknown is
+	// degraded, never alive.
+	if !containsStr(text, `hookmon_bus_overall{status="degraded"} 1`) {
+		t.Error("expected hookmon_bus_overall{status=\"degraded\"} 1")
+	}
+	if !containsStr(text, `hookmon_bus_overall{status="alive"} 0`) {
+		t.Error("expected hookmon_bus_overall{status=\"alive\"} 0")
+	}
+	if !containsStr(text, `hookmon_sensor_status{sensor="exec_injection",status="unknown"} 1`) {
+		t.Error("expected hookmon_sensor_status{sensor=\"exec_injection\",status=\"unknown\"} 1")
 	}
 
 	t.Logf("sensor health metrics verified")

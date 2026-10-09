@@ -1,0 +1,73 @@
+rule_files:
+  - ../hookmon-alerts.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      # Collector healthy throughout, so HookMonCollectorSilent stays quiet.
+      - series: 'push_time_seconds{job="hookmon-collector"}'
+        values: '0+60x1600'
+      # h1: quiet host, no events ever -> fires
+      - series: 'up{job="hookmon-bus",instance="h1"}'
+        values: '1x1600'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h1",sensor="bpf_syscall"}'
+        values: '1x1600'
+      # h2: one event from a new comm at 20h (new series at 1) -> no fire
+      - series: 'up{job="hookmon-bus",instance="h2"}'
+        values: '1x1600'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h2",sensor="bpf_syscall"}'
+        values: '1x1600'
+      - series: 'hookmon_events_total{job="hookmon-bus",instance="h2",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
+        values: '_x1200 1x400'
+      # h3: one event at 2h, none since -> fires once it leaves the window
+      - series: 'up{job="hookmon-bus",instance="h3"}'
+        values: '1x1600'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h3",sensor="bpf_syscall"}'
+        values: '1x1600'
+      - series: 'hookmon_events_total{job="hookmon-bus",instance="h3",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
+        values: '_x120 1x1480'
+      # h4: only 12h of history -> no fire
+      - series: 'up{job="hookmon-bus",instance="h4"}'
+        values: '_x870 1x730'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h4",sensor="bpf_syscall"}'
+        values: '_x870 1x730'
+      # h5: scrape gap at 20h, counter unchanged -> fires
+      - series: 'up{job="hookmon-bus",instance="h5"}'
+        values: '1x1199 0x10 1x390'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h5",sensor="bpf_syscall"}'
+        values: '1x1199 _x10 1x390'
+      - series: 'hookmon_events_total{job="hookmon-bus",instance="h5",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
+        values: '5x1199 _x10 5x390'
+      # h6: bus restart at 20h (counter reset), one event after -> no fire
+      - series: 'up{job="hookmon-bus",instance="h6"}'
+        values: '1x1199 0x5 1x395'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h6",sensor="bpf_syscall"}'
+        values: '1x1199 _x5 1x395'
+      - series: 'hookmon_events_total{job="hookmon-bus",instance="h6",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
+        values: '1x1199 _x60 1x340'
+      # h7: one sensor dead, no events -> no fire (HookMonSensorDead covers it)
+      - series: 'up{job="hookmon-bus",instance="h7"}'
+        values: '1x1600'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h7",sensor="bpf_syscall"}'
+        values: '1x1600'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h7",sensor="ptrace_monitor"}'
+        values: '0x1600'
+    alert_rule_test:
+      - eval_time: 23h50m
+        alertname: HookMonNoEvents24h
+        exp_alerts: []
+      - eval_time: 26h30m
+        alertname: HookMonNoEvents24h
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: h1}
+            exp_annotations:
+              summary: "No HookMon events from h1 in 24 hours"
+              description: "Every sensor on h1 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
+          - exp_labels: {severity: warning, instance: h3}
+            exp_annotations:
+              summary: "No HookMon events from h3 in 24 hours"
+              description: "Every sensor on h3 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
+          - exp_labels: {severity: warning, instance: h5}
+            exp_annotations:
+              summary: "No HookMon events from h5 in 24 hours"
+              description: "Every sensor on h5 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"

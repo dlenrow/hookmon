@@ -1,0 +1,49 @@
+rule_files:
+  - ../hookmon-alerts.yaml
+evaluation_interval: 15s
+tests:
+  # Collector pushes every 30s until t=600s, then dies. Pushgateway keeps
+  # serving the frozen push_time_seconds=600.
+  - interval: 30s
+    input_series:
+      - series: 'push_time_seconds{job="hookmon-collector"}'
+        values: '0+30x20 600x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HookMonCollectorSilent
+        exp_alerts: []
+      - eval_time: 11m30s
+        alertname: HookMonCollectorSilent
+        exp_alerts: []
+      - eval_time: 12m30s
+        alertname: HookMonCollectorSilent
+        exp_alerts:
+          - exp_labels: {severity: critical, job: hookmon-collector}
+            exp_annotations:
+              summary: "hookmon-collector has not pushed fleet health for over 90 seconds"
+              description: "Pushgateway has no fresh push from hookmon-collector. Fleet health metrics are stale, so HookMonHostUnreachable, HookMonSensorDead and HookMonFleetDegraded cannot fire. Check that hookmon-collector is running and can reach Pushgateway, and that Pushgateway is up.\n"
+  # Pushgateway restarted (series gone) while the collector is dead.
+  - interval: 30s
+    input_series:
+      - series: 'push_time_seconds{job="hookmon-collector"}'
+        values: '0+30x10 stale'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HookMonCollectorSilent
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: HookMonCollectorSilent
+        exp_alerts:
+          - exp_labels: {severity: critical, job: hookmon-collector}
+            exp_annotations:
+              summary: "hookmon-collector has not pushed fleet health for over 90 seconds"
+              description: "Pushgateway has no fresh push from hookmon-collector. Fleet health metrics are stale, so HookMonHostUnreachable, HookMonSensorDead and HookMonFleetDegraded cannot fire. Check that hookmon-collector is running and can reach Pushgateway, and that Pushgateway is up.\n"
+  # Healthy collector never fires.
+  - interval: 30s
+    input_series:
+      - series: 'push_time_seconds{job="hookmon-collector"}'
+        values: '0+30x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HookMonCollectorSilent
+        exp_alerts: []

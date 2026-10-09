@@ -92,9 +92,9 @@ Detecting attacks is useless if the detector itself dies silently. HookMon has a
 1. **Sensor heartbeats.** Each eBPF sensor writes a timestamp to a BPF map every 10 seconds. The fanotify and audit sensors update an in-process heartbeat at the same interval.
 2. **The sensor bus aggregates.** The bus reads every sensor's heartbeat and exposes the result on its `/status` HTTP endpoint — one JSON object listing each sensor, its last heartbeat, and whether it considers itself healthy.
 3. **The collector polls.** `hookmon-collector`, running on the appliance, polls `/status` on every enrolled host every 30 seconds. It writes the results to the event store.
-4. **Grafana fires on silence.** If the collector cannot reach a bus, or if any sensor's heartbeat is stale, a Grafana alerting rule fires and the dashboard banner turns red.
+4. **Prometheus fires on silence.** If the collector cannot reach a bus, or if any sensor's heartbeat is stale, a Prometheus alerting rule fires, Alertmanager routes it, and the dashboard banner turns red. If the collector itself stops pushing, `HookMonCollectorSilent` fires.
 
-The key property: the server reaches out to the bus. The bus does not phone home. If the bus process is killed, the collector notices within 30 seconds because `/status` stops responding. If a single sensor crashes but the bus keeps running, the collector sees the stale heartbeat in the `/status` response. There is no case where silent failure goes undetected.
+The key property: the server reaches out to the bus. The bus does not phone home. If the bus process is killed, the collector notices within 30 seconds because `/status` stops responding. If a single sensor crashes but the bus keeps running, the collector sees the stale heartbeat in the `/status` response. One case is not detected: a root attacker can kill the bus and serve a fake "alive" `/status`. See [SECURITY.md](SECURITY.md).
 
 ## Why This Generates Almost No Alert Noise
 
@@ -122,7 +122,11 @@ cd hookmon
 docker compose -f deploy/docker/docker-compose.grafana.yml up -d
 ```
 
-This starts Grafana (:3000), Loki (:3100), Prometheus (:9090), and the hookmon-collector with the HookMon dashboard pre-provisioned. Default login: `admin` / `hookmon`.
+This starts Grafana (:3000), Loki (:3100), Prometheus (:9090), Pushgateway (:9091) and Alertmanager (:9093), with the HookMon dashboard pre-provisioned. All services use host networking. Default login: `admin` / `hookmon`. The collector is not part of the stack; run it on the appliance and point `push_gateway` at `http://localhost:9091`.
+
+Before use:
+- Add each sensor bus (`<host>:2112`) as a target under `hookmon-bus` in `deploy/docker/prometheus.yml`.
+- Add a webhook URL in `deploy/docker/alertmanager.yml`. Until you do, alerts show in Alertmanager but notify nobody.
 
 ### 2. Build and Run the Sensor Bus
 
