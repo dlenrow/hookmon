@@ -200,7 +200,7 @@ go build -o /tmp/hookmon-bus ./cmd/hookmon-bus/
 
 **Run all e2e tests:**
 ```bash
-sudo -E go test -v -timeout 120s ./test/e2e/
+sudo -E go test -tags e2e -v -timeout 120s ./test/e2e/
 ```
 
 **Run with Grafana observability (Loki + Prometheus):**
@@ -208,7 +208,7 @@ sudo -E go test -v -timeout 120s ./test/e2e/
 sudo -E env PATH=$PATH \
   HOOKMON_LOKI_URL=http://raspberrypi:3100 \
   HOOKMON_PROMETHEUS_PORT=2112 \
-  go test -v -timeout 120s ./test/e2e/
+  go test -tags e2e -v -timeout 120s ./test/e2e/
 ```
 
 **Run only bpftime tests:**
@@ -216,7 +216,7 @@ sudo -E env PATH=$PATH \
 sudo -E env PATH=$PATH \
   HOOKMON_BPFTIME_SIM=/tmp/bpftime_sim \
   HOOKMON_FAKE_HOOK_LIB=/tmp/libfake_hook.so \
-  go test -v -run TestDetectBpftime -timeout 120s ./test/e2e/
+  go test -tags e2e -v -run TestDetectBpftime -timeout 120s ./test/e2e/
 ```
 
 **Environment variables:**

@@ -13,13 +13,7 @@ fi
 
 echo "==> Generating eBPF code..."
 if [[ "$(uname)" == "Linux" ]]; then
-    if command -v bpf2go &>/dev/null || go tool -n bpf2go &>/dev/null 2>&1; then
-        cd "$REPO_ROOT/agent/sensors"
-        go generate ./...
-    else
-        echo "WARN: bpf2go not available, skipping eBPF generation"
-        echo "      Install: go install github.com/cilium/ebpf/cmd/bpf2go@latest"
-    fi
+    make -C "$REPO_ROOT" bpf
 else
     echo "SKIP: eBPF generation only runs on Linux"
 fi

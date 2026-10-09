@@ -1,4 +1,8 @@
-//go:build linux
+//go:build ignore
+
+// Built by naming this file explicitly (see test/canary/Makefile), which
+// bypasses build constraints. The ignore tag keeps it out of ./... so the
+// C canaries in this directory are not mistaken for cgo sources.
 
 // load_canary loads a compiled eBPF canary program (.o file), attaches it
 // to its tracepoint, sleeps briefly, then detaches and exits.

@@ -12,22 +12,8 @@ SENSORS_DIR="$PROJECT_DIR/agent/sensors"
 
 export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 
-echo "=== Generating vmlinux.h ==="
-if [ ! -f "$SENSORS_DIR/vmlinux.h" ]; then
-    bpftool btf dump file /sys/kernel/btf/vmlinux format c > "$SENSORS_DIR/vmlinux.h"
-    echo "  Generated $(wc -l < "$SENSORS_DIR/vmlinux.h") lines"
-fi
-
-ARCH=$(uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
-
 echo "=== Compiling eBPF C programs ==="
-for cfile in bpf_syscall.c exec_injection.c shm_monitor.c dlopen_monitor.c ptrace_monitor.c; do
-    ofile="${cfile%.c}.o"
-    echo "  $cfile -> $ofile"
-    clang -g -O2 -target bpf -D__TARGET_ARCH_${ARCH} \
-        -I"$SENSORS_DIR" -c "$SENSORS_DIR/$cfile" -o "$SENSORS_DIR/$ofile"
-    llvm-strip -g "$SENSORS_DIR/$ofile"
-done
+make -C "$PROJECT_DIR" bpf
 
 echo "=== Building hookmon-agent ==="
 cd "$PROJECT_DIR"
@@ -41,6 +27,7 @@ echo "=== Building canary loader ==="
 CGO_ENABLED=0 go build -o bin/load-canary ./test/canary/load_canary.go
 
 echo "=== Compiling canary eBPF programs ==="
+ARCH=$(uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 CANARY_DIR="$PROJECT_DIR/test/canary"
 if [ ! -f "$CANARY_DIR/vmlinux.h" ]; then
     cp "$SENSORS_DIR/vmlinux.h" "$CANARY_DIR/vmlinux.h"

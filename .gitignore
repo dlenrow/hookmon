@@ -17,6 +17,8 @@ vendor/
 coverage.txt
 
 # eBPF generated
+agent/sensors/*.o
+agent/sensors/vmlinux.h
 *_bpfel.go
 *_bpfeb.go
 *_bpfel.o

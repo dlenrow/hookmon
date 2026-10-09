@@ -36,7 +36,7 @@ if [ -n "$HOST" ]; then
     scp "$PROJECT_DIR/go.mod" "$PROJECT_DIR/go.sum" "$USER@$HOST:/tmp/hookmon-test/"
 
     echo "Step 3: Run tests"
-    ssh -t "$USER@$HOST" "cd /tmp/hookmon-test && sudo go test -v -timeout 120s ./test/e2e/ -count=1"
+    ssh -t "$USER@$HOST" "cd /tmp/hookmon-test && sudo go test -tags e2e -v -timeout 120s ./test/e2e/ -count=1"
 else
     echo "=== Running e2e tests locally ==="
 
@@ -46,5 +46,5 @@ else
     fi
 
     cd "$PROJECT_DIR"
-    go test -v -timeout 120s ./test/e2e/ -count=1
+    go test -tags e2e -v -timeout 120s ./test/e2e/ -count=1
 fi

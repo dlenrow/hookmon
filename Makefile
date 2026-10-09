@@ -12,8 +12,26 @@ LDFLAGS := -ldflags "-X github.com/dlenrow/hookmon/pkg/version.Version=$(VERSION
 # Output
 BIN_DIR := bin
 
-.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dashboard build-canaries
-.PHONY: generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
+# eBPF objects embedded by agent/sensors/embed.go (linux only). Built from the
+# host kernel's BTF; dlopen_monitor.c uses per-arch PT_REGS, so objects are
+# host-arch specific.
+SENSORS_DIR := agent/sensors
+BPF_SRCS    := $(wildcard $(SENSORS_DIR)/*.c)
+BPF_OBJS    := $(BPF_SRCS:.c=.o)
+BPF_ARCH    := $(shell uname -m | sed -e 's/x86_64/x86/' -e 's/aarch64/arm64/')
+CLANG       ?= clang
+LLVM_STRIP  ?= llvm-strip
+BPFTOOL     ?= bpftool
+VMLINUX_BTF ?= /sys/kernel/btf/vmlinux
+
+# Targets that compile agent/sensors for linux need the eBPF objects first.
+TARGET_OS := $(or $(GOOS),$(shell uname -s | tr '[:upper:]' '[:lower:]'))
+ifeq ($(TARGET_OS),linux)
+BPF_DEPS := bpf
+endif
+
+.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dashboard build-canaries build-canaries-noebpf
+.PHONY: bpf generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
 .PHONY: appliance-ova appliance-qcow2 appliance-iso
 
@@ -21,7 +39,7 @@ BIN_DIR := bin
 
 build-all: build-bus build-agent build-server build-cli build-collector
 
-build-bus:
+build-bus: $(BPF_DEPS)
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-bus ./cmd/hookmon-bus
 
@@ -29,7 +47,7 @@ build-collector:
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-collector ./cmd/hookmon-collector
 
-build-agent:
+build-agent: $(BPF_DEPS)
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-agent ./cmd/hookmon-agent
 
@@ -50,12 +68,22 @@ generate:
 	@echo "==> Generating eBPF and protobuf code..."
 	./scripts/generate.sh
 
+bpf: $(BPF_OBJS)
+
+$(SENSORS_DIR)/vmlinux.h:
+	$(BPFTOOL) btf dump file $(VMLINUX_BTF) format c > $@.tmp
+	mv $@.tmp $@
+
+$(SENSORS_DIR)/%.o: $(SENSORS_DIR)/%.c $(SENSORS_DIR)/vmlinux.h
+	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(BPF_ARCH) -I$(SENSORS_DIR) -c $< -o $@
+	$(LLVM_STRIP) -g $@
+
 ## Testing
 
-test:
+test: $(BPF_DEPS)
 	go test ./...
 
-test-unit:
+test-unit: $(BPF_DEPS)
 	go test -race -count=1 ./pkg/... ./server/policy/... ./server/connectors/... ./server/ingestion/... ./agent/config/... ./agent/sensors/... ./agent/transport/... ./agent/registry/... ./agent/observability/...
 
 test-registry:
@@ -64,7 +92,7 @@ test-registry:
 test-collector:
 	go test -race -count=1 ./cmd/hookmon-collector/...
 
-smoketest:
+smoketest: $(BPF_DEPS)
 	go test -v -count=1 ./test/smoketest/...
 
 test-integration:
@@ -83,7 +111,7 @@ test-e2e: build-bus build-canaries
 	cp test/canary/bin/* /tmp/canary/bin/ 2>/dev/null || true
 	cp test/canary/*.o /tmp/canary/ 2>/dev/null || true
 	cp test/canary/*.sh /tmp/canary/
-	sudo go test -tags e2e -v -count=1 -timeout 300s ./test/e2e/...
+	sudo env "PATH=$$PATH" go test -tags e2e -v -count=1 -timeout 300s ./test/e2e/...
 
 lint:
 	golangci-lint run ./...
@@ -105,7 +133,7 @@ package-rpm:
 	./scripts/build-agent.sh rpm
 
 docker-agent:
-	docker build -f deploy/docker/Dockerfile.agent -t hookmon-agent:$(VERSION) .
+	docker build -f deploy/docker/Dockerfile.agent -t hookmon-bus:$(VERSION) .
 
 docker-server:
 	docker build -f deploy/docker/Dockerfile.server -t hookmon-server:$(VERSION) .
@@ -126,5 +154,6 @@ appliance-iso:
 clean:
 	rm -rf $(BIN_DIR)
 	rm -rf dashboard/dist
+	rm -f $(BPF_OBJS)
 	$(MAKE) -C test/canary clean
 	go clean -cache -testcache

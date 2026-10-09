@@ -16,13 +16,13 @@ type sensorSpec struct {
 }
 
 var allSensors = []sensorSpec{
-	{"bpf_syscall", sensors.SensorTypeBPF, sensors.NewBPFSyscallSensor, func(c *config.SensorConfig) bool { return c.BPFSyscall }},
-	{"exec_injection", sensors.SensorTypeBPF, sensors.NewExecInjectionSensor, func(c *config.SensorConfig) bool { return c.ExecInjection }},
-	{"shm_monitor", sensors.SensorTypeBPF, sensors.NewSHMMonitorSensor, func(c *config.SensorConfig) bool { return c.SHMMonitor }},
-	{"dlopen_monitor", sensors.SensorTypeBPF, sensors.NewDlopenMonitorSensor, func(c *config.SensorConfig) bool { return c.DlopenMonitor }},
-	{"linker_config", sensors.SensorTypeFanotify, sensors.NewLinkerConfigSensor, func(c *config.SensorConfig) bool { return c.LinkerConfig }},
-	{"ptrace_monitor", sensors.SensorTypeBPF, sensors.NewPtraceMonitorSensor, func(c *config.SensorConfig) bool { return c.PtraceMonitor }},
-	{"lib_integrity", sensors.SensorTypeFanotify, sensors.NewLibIntegritySensor, func(c *config.SensorConfig) bool { return c.LibIntegrity }},
+	{"bpf_syscall", sensors.SensorTypeBPF, func() sensors.Sensor { return sensors.NewBPFSyscallSensor() }, func(c *config.SensorConfig) bool { return c.BPFSyscall }},
+	{"exec_injection", sensors.SensorTypeBPF, func() sensors.Sensor { return sensors.NewExecInjectionSensor() }, func(c *config.SensorConfig) bool { return c.ExecInjection }},
+	{"shm_monitor", sensors.SensorTypeBPF, func() sensors.Sensor { return sensors.NewSHMMonitorSensor() }, func(c *config.SensorConfig) bool { return c.SHMMonitor }},
+	{"dlopen_monitor", sensors.SensorTypeBPF, func() sensors.Sensor { return sensors.NewDlopenMonitorSensor() }, func(c *config.SensorConfig) bool { return c.DlopenMonitor }},
+	{"linker_config", sensors.SensorTypeFanotify, func() sensors.Sensor { return sensors.NewLinkerConfigSensor() }, func(c *config.SensorConfig) bool { return c.LinkerConfig }},
+	{"ptrace_monitor", sensors.SensorTypeBPF, func() sensors.Sensor { return sensors.NewPtraceMonitorSensor() }, func(c *config.SensorConfig) bool { return c.PtraceMonitor }},
+	{"lib_integrity", sensors.SensorTypeFanotify, func() sensors.Sensor { return sensors.NewLibIntegritySensor() }, func(c *config.SensorConfig) bool { return c.LibIntegrity }},
 }
 
 // TestSensorConstructors proves each of the 8 sensor constructors returns
