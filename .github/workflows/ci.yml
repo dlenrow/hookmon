@@ -21,7 +21,17 @@ jobs:
       - name: Install eBPF toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common "linux-tools-$(uname -r)"
+          sudo apt-get install -y clang llvm libbpf-dev
+          # Ubuntu's bpftool is a wrapper that needs a linux-tools build for the
+          # running kernel, and newer runner kernels ship none. Use a pinned
+          # static upstream build instead.
+          curl -sSfL -o /tmp/bpftool.tar.gz \
+            https://github.com/libbpf/bpftool/releases/download/v7.7.0/bpftool-v7.7.0-amd64.tar.gz
+          echo "09150596f09356b0ff632dd7f9856e0ea86bf96b269e9bc94278d9a9432a268c  /tmp/bpftool.tar.gz" | sha256sum -c -
+          sudo tar xzf /tmp/bpftool.tar.gz -C /usr/local/bin bpftool
+          sudo chmod +x /usr/local/bin/bpftool
+          echo "BPFTOOL=/usr/local/bin/bpftool" >> "$GITHUB_ENV"
+          /usr/local/bin/bpftool version
 
       - name: Build all binaries
         run: make build-all
