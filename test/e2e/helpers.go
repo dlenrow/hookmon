@@ -18,8 +18,12 @@ import (
 type BusProcess struct {
 	cmd    *exec.Cmd
 	events chan *event.HookEvent
-	lines  chan string
 	done   chan struct{}
+
+	// unmatched holds events WaitForEvent read but did not return, so a
+	// later wait can still find them. Sensors deliver through separate ring
+	// buffers, so events from one attack can arrive in any order.
+	unmatched []*event.HookEvent
 }
 
 func lokiURL() string {
@@ -50,7 +54,6 @@ func StartBus(busBin string) (*BusProcess, error) {
 	bp := &BusProcess{
 		cmd:    cmd,
 		events: make(chan *event.HookEvent, 10000),
-		lines:  make(chan string, 10000),
 		done:   make(chan struct{}),
 	}
 
@@ -68,7 +71,6 @@ func StartBus(busBin string) (*BusProcess, error) {
 
 		for scanner.Scan() {
 			line := scanner.Text()
-			bp.lines <- line
 
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "{" || strings.HasPrefix(trimmed, "{") {
@@ -113,7 +115,15 @@ func (bp *BusProcess) Stop() error {
 }
 
 // WaitForEvent waits for an event matching the filter within the timeout.
+// Each event is returned at most once; events that do not match are kept
+// for later calls. Call it from one goroutine only.
 func (bp *BusProcess) WaitForEvent(filter func(*event.HookEvent) bool, timeout time.Duration) (*event.HookEvent, error) {
+	for i, evt := range bp.unmatched {
+		if filter(evt) {
+			bp.unmatched = append(bp.unmatched[:i], bp.unmatched[i+1:]...)
+			return evt, nil
+		}
+	}
 	deadline := time.After(timeout)
 	for {
 		select {
@@ -121,6 +131,7 @@ func (bp *BusProcess) WaitForEvent(filter func(*event.HookEvent) bool, timeout t
 			if filter(evt) {
 				return evt, nil
 			}
+			bp.unmatched = append(bp.unmatched, evt)
 		case <-deadline:
 			return nil, fmt.Errorf("timeout waiting for matching event after %v", timeout)
 		}

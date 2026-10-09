@@ -50,3 +50,13 @@ Bugs found during verification and fixed in this step:
 - The smoketest constructor table did not compile on Linux.
 - `test/canary/load_canary.go` broke `go vet ./...` and `go test ./...` on Linux.
 - `make test-e2e` failed on hosts where root's PATH has no `go`.
+
+### e2e harness fix (2026-10-09)
+
+`WaitForEvent` threw away every event that didn't match the filter it was waiting on. A test that waits for two events from one attack failed whenever the second arrived first. This is what happened to `TestCombined_BpftimeAttackChain` in step 1, run 2. Each sensor has its own ring buffer, so arrival order isn't fixed.
+
+Unmatched events are now kept for later waits. Each event still matches at most once, and no assertion changed. The harness also had a `lines` channel that was never read and would stall the parser after 10,000 lines; it is removed.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| e2e (root), on the full working tree | `make test-e2e`, run twice | 13/13 both times. `TestSensor8` passed both times, but the exit race noted in step 1 is still in the code until step 4. | Verified |
