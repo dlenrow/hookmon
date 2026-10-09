@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	hookmonv1 "github.com/dlenrow/hookmon/gen/hookmon/v1"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
@@ -11,22 +13,22 @@ import (
 func TestProtoToEvent_CoreFields(t *testing.T) {
 	ts := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 	pe := &hookmonv1.HookEvent{
-		ID:          "evt-proto-001",
-		Timestamp:   ts,
-		HostID:      "host-1",
+		Id:          "evt-proto-001",
+		Timestamp:   timestamppb.New(ts),
+		HostId:      "host-1",
 		Hostname:    "web-01",
 		EventType:   hookmonv1.EventType_EVENT_TYPE_BPF_LOAD,
 		Severity:    hookmonv1.Severity_SEVERITY_WARN,
-		PID:         1234,
-		PPID:        1,
-		UID:         0,
-		GID:         0,
+		Pid:         1234,
+		Ppid:        1,
+		Uid:         0,
+		Gid:         0,
 		Comm:        "cilium",
 		Cmdline:     "/usr/bin/cilium",
 		ExePath:     "/usr/bin/cilium",
 		ExeHash:     "sha256:abc",
 		CgroupPath:  "/sys/fs/cgroup/system.slice",
-		ContainerID: "ctr-123",
+		ContainerId: "ctr-123",
 		Namespace:   "default",
 	}
 
@@ -34,6 +36,9 @@ func TestProtoToEvent_CoreFields(t *testing.T) {
 
 	if evt.ID != "evt-proto-001" {
 		t.Errorf("ID: got %q", evt.ID)
+	}
+	if !evt.Timestamp.Equal(ts) {
+		t.Errorf("Timestamp: got %v, want %v", evt.Timestamp, ts)
 	}
 	if evt.EventType != event.EventBPFLoad {
 		t.Errorf("EventType: got %q, want BPF_LOAD", evt.EventType)
@@ -91,12 +96,12 @@ func TestProtoToEvent_AllSeverities(t *testing.T) {
 func TestProtoToEvent_BPFDetail(t *testing.T) {
 	pe := &hookmonv1.HookEvent{
 		EventType: hookmonv1.EventType_EVENT_TYPE_BPF_LOAD,
-		BPFDetail: &hookmonv1.BPFDetail{
-			BPFCommand: 5,
+		BpfDetail: &hookmonv1.BPFDetail{
+			BpfCmd:     5,
 			ProgType:   1,
 			ProgName:   "trace_tcp",
 			AttachType: 3,
-			TargetFD:   7,
+			TargetFd:   7,
 			InsnCount:  142,
 			ProgHash:   "sha256:prog",
 		},
@@ -168,6 +173,13 @@ func TestProtoToEvent_ElfRpathDetail(t *testing.T) {
 	}
 	if !evt.ElfRpathDetail.UsesDeprecated {
 		t.Error("UsesDeprecated should be true")
+	}
+}
+
+func TestProtoToEvent_NilTimestamp(t *testing.T) {
+	evt := protoToEvent(&hookmonv1.HookEvent{Id: "evt-no-ts"})
+	if !evt.Timestamp.IsZero() {
+		t.Errorf("nil proto timestamp should map to zero time, got %v", evt.Timestamp)
 	}
 }
 

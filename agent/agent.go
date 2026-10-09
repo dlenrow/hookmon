@@ -74,7 +74,7 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 	if cfg.ConsoleMode {
 		t = transport.NewConsoleTransport()
 	} else {
-		t = transport.NewGRPCTransport(cfg, logger)
+		t = transport.NewGRPCTransport(cfg, logger, transport.DefaultRetryConfig())
 	}
 
 	sensorNames := allSensorNames(cfg)
@@ -121,13 +121,14 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.ConsoleMode {
 		a.logger.Info("running in console mode — events will print to stdout")
 	} else {
-		// Connect to server with retry
+		// Keep the stream to the server up, reconnecting with backoff after
+		// any failure, until ctx is cancelled.
 		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
-			transport.RetryLoop(ctx, transport.DefaultRetryConfig(), a.logger, func(ctx context.Context) error {
-				return a.transport.Connect(ctx)
-			})
+			if err := a.transport.Run(ctx); err != nil {
+				a.logger.Error("transport stopped", zap.Error(err))
+			}
 		}()
 	}
 

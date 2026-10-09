@@ -42,23 +42,23 @@ func TestEventToProto_CoreFields(t *testing.T) {
 	evt := sampleBPFEvent()
 	pe := eventToProto(evt)
 
-	if pe.ID != evt.ID {
-		t.Errorf("ID: got %q, want %q", pe.ID, evt.ID)
+	if pe.Id != evt.ID {
+		t.Errorf("ID: got %q, want %q", pe.Id, evt.ID)
 	}
-	if pe.HostID != evt.HostID {
-		t.Errorf("HostID: got %q, want %q", pe.HostID, evt.HostID)
+	if pe.HostId != evt.HostID {
+		t.Errorf("HostID: got %q, want %q", pe.HostId, evt.HostID)
 	}
 	if pe.Hostname != evt.Hostname {
 		t.Errorf("Hostname: got %q", pe.Hostname)
 	}
-	if pe.PID != evt.PID {
-		t.Errorf("PID: got %d", pe.PID)
+	if pe.Pid != evt.PID {
+		t.Errorf("PID: got %d", pe.Pid)
 	}
-	if pe.PPID != evt.PPID {
-		t.Errorf("PPID: got %d", pe.PPID)
+	if pe.Ppid != evt.PPID {
+		t.Errorf("PPID: got %d", pe.Ppid)
 	}
-	if pe.UID != evt.UID {
-		t.Errorf("UID: got %d", pe.UID)
+	if pe.Uid != evt.UID {
+		t.Errorf("UID: got %d", pe.Uid)
 	}
 	if pe.Comm != evt.Comm {
 		t.Errorf("Comm: got %q", pe.Comm)
@@ -69,8 +69,8 @@ func TestEventToProto_CoreFields(t *testing.T) {
 	if pe.ExeHash != evt.ExeHash {
 		t.Errorf("ExeHash: got %q", pe.ExeHash)
 	}
-	if pe.ContainerID != evt.ContainerID {
-		t.Errorf("ContainerID: got %q", pe.ContainerID)
+	if pe.ContainerId != evt.ContainerID {
+		t.Errorf("ContainerID: got %q", pe.ContainerId)
 	}
 }
 
@@ -78,20 +78,20 @@ func TestEventToProto_BPFDetail(t *testing.T) {
 	evt := sampleBPFEvent()
 	pe := eventToProto(evt)
 
-	if pe.BPFDetail == nil {
+	if pe.BpfDetail == nil {
 		t.Fatal("BPFDetail should not be nil")
 	}
-	if pe.BPFDetail.BPFCommand != 5 {
-		t.Errorf("BPFCommand: got %d", pe.BPFDetail.BPFCommand)
+	if pe.BpfDetail.BpfCmd != 5 {
+		t.Errorf("BPFCommand: got %d", pe.BpfDetail.BpfCmd)
 	}
-	if pe.BPFDetail.ProgName != "trace_tcp" {
-		t.Errorf("ProgName: got %q", pe.BPFDetail.ProgName)
+	if pe.BpfDetail.ProgName != "trace_tcp" {
+		t.Errorf("ProgName: got %q", pe.BpfDetail.ProgName)
 	}
-	if pe.BPFDetail.InsnCount != 142 {
-		t.Errorf("InsnCount: got %d", pe.BPFDetail.InsnCount)
+	if pe.BpfDetail.InsnCount != 142 {
+		t.Errorf("InsnCount: got %d", pe.BpfDetail.InsnCount)
 	}
-	if pe.BPFDetail.ProgHash != "sha256:prog" {
-		t.Errorf("ProgHash: got %q", pe.BPFDetail.ProgHash)
+	if pe.BpfDetail.ProgHash != "sha256:prog" {
+		t.Errorf("ProgHash: got %q", pe.BpfDetail.ProgHash)
 	}
 }
 
@@ -124,11 +124,11 @@ func TestEventToProto_SHMDetail(t *testing.T) {
 		SHMDetail: &event.SHMDetail{SHMName: "bpftime_shm", Size: 4096, Pattern: "bpftime"},
 	}
 	pe := eventToProto(evt)
-	if pe.SHMDetail == nil {
+	if pe.ShmDetail == nil {
 		t.Fatal("SHMDetail nil")
 	}
-	if pe.SHMDetail.SHMName != "bpftime_shm" {
-		t.Errorf("SHMName: got %q", pe.SHMDetail.SHMName)
+	if pe.ShmDetail.ShmName != "bpftime_shm" {
+		t.Errorf("SHMName: got %q", pe.ShmDetail.ShmName)
 	}
 }
 
@@ -175,8 +175,8 @@ func TestEventToProto_PtraceDetail(t *testing.T) {
 	if pe.PtraceDetail == nil {
 		t.Fatal("PtraceDetail nil")
 	}
-	if pe.PtraceDetail.TargetPID != 999 {
-		t.Errorf("TargetPID: got %d", pe.PtraceDetail.TargetPID)
+	if pe.PtraceDetail.TargetPid != 999 {
+		t.Errorf("TargetPID: got %d", pe.PtraceDetail.TargetPid)
 	}
 	if pe.PtraceDetail.Addr != 0x1234 {
 		t.Errorf("Addr: got %x", pe.PtraceDetail.Addr)
@@ -243,7 +243,7 @@ func TestEventToProto_NilDetails(t *testing.T) {
 	evt := &event.HookEvent{EventType: event.EventBPFLoad}
 	pe := eventToProto(evt)
 
-	if pe.BPFDetail != nil {
+	if pe.BpfDetail != nil {
 		t.Error("BPFDetail should be nil")
 	}
 	if pe.ExecInjectionDetail != nil {

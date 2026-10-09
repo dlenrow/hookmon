@@ -27,6 +27,11 @@ message AllowlistEntry {
   string action = 20;
   optional google.protobuf.Timestamp expires = 21;
   bool enabled = 22;
+
+  // Additional match criteria (numbered after the original fields to keep
+  // existing field numbers stable).
+  string prog_hash = 23;
+  repeated string allowed_rpaths = 24;
 }
 
 message UIDRange {

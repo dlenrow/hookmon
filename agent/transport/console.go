@@ -17,10 +17,10 @@ func NewConsoleTransport() *ConsoleTransport {
 	return &ConsoleTransport{}
 }
 
-func (t *ConsoleTransport) Connect(_ context.Context) error { return nil }
-func (t *ConsoleTransport) IsConnected() bool               { return true }
-func (t *ConsoleTransport) Close() error                    { return nil }
-func (t *ConsoleTransport) SendHeartbeat() error            { return nil }
+func (t *ConsoleTransport) Run(_ context.Context) error { return nil }
+func (t *ConsoleTransport) IsConnected() bool           { return true }
+func (t *ConsoleTransport) Close() error                { return nil }
+func (t *ConsoleTransport) SendHeartbeat() error        { return nil }
 
 func (t *ConsoleTransport) SendEvent(evt *event.HookEvent) error {
 	data, err := json.MarshalIndent(evt, "", "  ")

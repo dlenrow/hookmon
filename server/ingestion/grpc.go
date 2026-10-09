@@ -147,20 +147,20 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 		}
 
 		switch {
-		case msg.Event != nil:
-			if err := s.handleEvent(stream, msg.Event); err != nil {
+		case msg.GetEvent() != nil:
+			if err := s.handleEvent(stream, msg.GetEvent()); err != nil {
 				s.logger.Error("failed to handle event",
 					zap.String("peer", peerAddr),
 					zap.Error(err),
 				)
 				// Send a negative ack but keep the stream open.
-				if sendErr := s.sendEventAck(stream, msg.Event.ID, false); sendErr != nil {
+				if sendErr := s.sendEventAck(stream, msg.GetEvent().GetId(), false); sendErr != nil {
 					return sendErr
 				}
 			}
 
-		case msg.Heartbeat != nil:
-			s.handleHeartbeat(stream.Context(), msg.Heartbeat)
+		case msg.GetHeartbeat() != nil:
+			s.handleHeartbeat(stream.Context(), msg.GetHeartbeat())
 
 		default:
 			s.logger.Warn("received empty agent message", zap.String("peer", peerAddr))
@@ -249,19 +249,22 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 // handleHeartbeat updates the in-memory host tracker and persists the
 // heartbeat timestamp to the store.
 func (s *IngestionServer) handleHeartbeat(ctx context.Context, hb *hookmonv1.Heartbeat) {
-	if hb.HostID == "" {
+	if hb.HostId == "" {
 		s.logger.Warn("received heartbeat with empty host_id")
 		return
 	}
 
-	now := hb.Timestamp
+	var now time.Time
+	if hb.Timestamp != nil {
+		now = hb.Timestamp.AsTime()
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 
 	// Update in-memory tracker.
 	s.hostMu.Lock()
-	s.hostTracker[hb.HostID] = &hostState{
+	s.hostTracker[hb.HostId] = &hostState{
 		lastHeartbeat: now,
 		agentVersion:  hb.AgentVersion,
 	}
@@ -269,16 +272,16 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, hb *hookmonv1.Hea
 
 	// Persist heartbeat to the store.
 	if s.store != nil {
-		if err := s.store.UpdateHostHeartbeat(ctx, hb.HostID, now); err != nil {
+		if err := s.store.UpdateHostHeartbeat(ctx, hb.HostId, now); err != nil {
 			s.logger.Error("failed to update host heartbeat",
-				zap.String("host_id", hb.HostID),
+				zap.String("host_id", hb.HostId),
 				zap.Error(err),
 			)
 		}
 	}
 
 	s.logger.Debug("heartbeat received",
-		zap.String("host_id", hb.HostID),
+		zap.String("host_id", hb.HostId),
 		zap.String("agent_version", hb.AgentVersion),
 		zap.Uint64("events_sent", hb.EventsSent),
 	)
@@ -287,10 +290,10 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, hb *hookmonv1.Hea
 // sendEventAck sends an EventAck message back to the agent over the stream.
 func (s *IngestionServer) sendEventAck(stream hookmonv1.AgentService_StreamEventsServer, eventID string, accepted bool) error {
 	return stream.Send(&hookmonv1.ServerMessage{
-		Ack: &hookmonv1.EventAck{
-			EventID:  eventID,
+		Payload: &hookmonv1.ServerMessage_Ack{Ack: &hookmonv1.EventAck{
+			EventId:  eventID,
 			Accepted: accepted,
-		},
+		}},
 	})
 }
 
@@ -313,7 +316,7 @@ func (s *IngestionServer) Enroll(ctx context.Context, req *hookmonv1.EnrollReque
 	if req.Hostname == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "hostname is required")
 	}
-	if len(req.CSR) == 0 {
+	if len(req.Csr) == 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "CSR is required")
 	}
 
@@ -333,7 +336,7 @@ func (s *IngestionServer) Enroll(ctx context.Context, req *hookmonv1.EnrollReque
 		ID:            hostID,
 		Hostname:      req.Hostname,
 		AgentVersion:  req.AgentVersion,
-		OSInfo:        req.OSInfo,
+		OSInfo:        req.OsInfo,
 		Status:        event.HostOnline,
 		EnrolledAt:    now,
 		LastHeartbeat: now,
@@ -364,9 +367,9 @@ func (s *IngestionServer) Enroll(ctx context.Context, req *hookmonv1.EnrollReque
 	)
 
 	return &hookmonv1.EnrollResponse{
-		HostID:     hostID,
+		HostId:     hostID,
 		SignedCert: signedCert,
-		CACert:     s.caCert,
+		CaCert:     s.caCert,
 	}, nil
 }
 
@@ -398,10 +401,10 @@ func (s *IngestionServer) TrackedHostCount() int {
 var protoEventTypeToEventType = map[hookmonv1.EventType]event.EventType{
 	hookmonv1.EventType_EVENT_TYPE_BPF_LOAD:        event.EventBPFLoad,
 	hookmonv1.EventType_EVENT_TYPE_BPF_ATTACH:      event.EventBPFAttach,
-	hookmonv1.EventType_EVENT_TYPE_EXEC_INJECTION:   event.EventExecInjection,
+	hookmonv1.EventType_EVENT_TYPE_EXEC_INJECTION:  event.EventExecInjection,
 	hookmonv1.EventType_EVENT_TYPE_SHM_CREATE:      event.EventSHMCreate,
 	hookmonv1.EventType_EVENT_TYPE_DLOPEN:          event.EventDlopen,
-	hookmonv1.EventType_EVENT_TYPE_LINKER_CONFIG:    event.EventLinkerConfig,
+	hookmonv1.EventType_EVENT_TYPE_LINKER_CONFIG:   event.EventLinkerConfig,
 	hookmonv1.EventType_EVENT_TYPE_PTRACE_INJECT:   event.EventPtraceInject,
 	hookmonv1.EventType_EVENT_TYPE_LIB_INTEGRITY:   event.EventLibIntegrity,
 	hookmonv1.EventType_EVENT_TYPE_AGENT_OFFLINE:   event.EventAgentOffline,
@@ -417,21 +420,25 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 	}
 
 	evt := &event.HookEvent{
-		ID:          pe.ID,
-		Timestamp:   pe.Timestamp,
-		HostID:      pe.HostID,
+		ID:          pe.Id,
+		HostID:      pe.HostId,
 		Hostname:    pe.Hostname,
-		PID:         pe.PID,
-		PPID:        pe.PPID,
-		UID:         pe.UID,
-		GID:         pe.GID,
+		PID:         pe.Pid,
+		PPID:        pe.Ppid,
+		UID:         pe.Uid,
+		GID:         pe.Gid,
 		Comm:        pe.Comm,
 		Cmdline:     pe.Cmdline,
 		ExePath:     pe.ExePath,
 		ExeHash:     pe.ExeHash,
 		CgroupPath:  pe.CgroupPath,
-		ContainerID: pe.ContainerID,
+		ContainerID: pe.ContainerId,
 		Namespace:   pe.Namespace,
+	}
+
+	// A nil proto timestamp leaves evt.Timestamp zero so validation rejects it.
+	if pe.Timestamp != nil {
+		evt.Timestamp = pe.Timestamp.AsTime()
 	}
 
 	// Map proto enum to domain string type.
@@ -456,15 +463,15 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 	}
 
 	// Convert type-specific detail payloads.
-	if pe.BPFDetail != nil {
+	if pe.BpfDetail != nil {
 		evt.BPFDetail = &event.BPFDetail{
-			BPFCommand: pe.BPFDetail.BPFCommand,
-			ProgType:   pe.BPFDetail.ProgType,
-			ProgName:   pe.BPFDetail.ProgName,
-			AttachType: pe.BPFDetail.AttachType,
-			TargetFD:   pe.BPFDetail.TargetFD,
-			InsnCount:  pe.BPFDetail.InsnCount,
-			ProgHash:   pe.BPFDetail.ProgHash,
+			BPFCommand: pe.BpfDetail.BpfCmd,
+			ProgType:   pe.BpfDetail.ProgType,
+			ProgName:   pe.BpfDetail.ProgName,
+			AttachType: pe.BpfDetail.AttachType,
+			TargetFD:   pe.BpfDetail.TargetFd,
+			InsnCount:  pe.BpfDetail.InsnCount,
+			ProgHash:   pe.BpfDetail.ProgHash,
 		}
 	}
 	if pe.ExecInjectionDetail != nil {
@@ -476,11 +483,11 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 			EnvVar:       pe.ExecInjectionDetail.EnvVar,
 		}
 	}
-	if pe.SHMDetail != nil {
+	if pe.ShmDetail != nil {
 		evt.SHMDetail = &event.SHMDetail{
-			SHMName: pe.SHMDetail.SHMName,
-			Size:    pe.SHMDetail.Size,
-			Pattern: pe.SHMDetail.Pattern,
+			SHMName: pe.ShmDetail.ShmName,
+			Size:    pe.ShmDetail.Size,
+			Pattern: pe.ShmDetail.Pattern,
 		}
 	}
 	if pe.DlopenDetail != nil {
@@ -502,7 +509,7 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 		evt.PtraceDetail = &event.PtraceDetail{
 			Request:     pe.PtraceDetail.Request,
 			RequestName: pe.PtraceDetail.RequestName,
-			TargetPID:   pe.PtraceDetail.TargetPID,
+			TargetPID:   pe.PtraceDetail.TargetPid,
 			TargetComm:  pe.PtraceDetail.TargetComm,
 			Addr:        pe.PtraceDetail.Addr,
 		}
