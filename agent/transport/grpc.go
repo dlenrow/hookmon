@@ -409,13 +409,28 @@ func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
 
 	if evt.BPFDetail != nil {
 		pe.BpfDetail = &hookmonv1.BPFDetail{
-			BpfCmd:     evt.BPFDetail.BPFCommand,
-			ProgType:   evt.BPFDetail.ProgType,
-			ProgName:   evt.BPFDetail.ProgName,
-			AttachType: evt.BPFDetail.AttachType,
-			TargetFd:   evt.BPFDetail.TargetFD,
-			InsnCount:  evt.BPFDetail.InsnCount,
-			ProgHash:   evt.BPFDetail.ProgHash,
+			BpfCmd:       evt.BPFDetail.BPFCommand,
+			ProgType:     evt.BPFDetail.ProgType,
+			ProgName:     evt.BPFDetail.ProgName,
+			AttachType:   evt.BPFDetail.AttachType,
+			TargetFd:     evt.BPFDetail.TargetFD,
+			InsnCount:    evt.BPFDetail.InsnCount,
+			ProgHash:     evt.BPFDetail.ProgHash,
+			ProgId:       evt.BPFDetail.ProgID,
+			CreatedByUid: evt.BPFDetail.CreatedByUID,
+			AttachTarget: evt.BPFDetail.AttachTarget,
+		}
+		if evt.BPFDetail.LoadTime != nil {
+			pe.BpfDetail.LoadTime = timestamppb.New(*evt.BPFDetail.LoadTime)
+		}
+	}
+
+	if evt.BPFInventoryDetail != nil {
+		pe.BpfInventoryDetail = &hookmonv1.BPFInventoryDetail{
+			ScanId:    evt.BPFInventoryDetail.ScanID,
+			Summary:   evt.BPFInventoryDetail.Summary,
+			ProgCount: evt.BPFInventoryDetail.ProgCount,
+			ByType:    evt.BPFInventoryDetail.ByType,
 		}
 	}
 
@@ -525,6 +540,8 @@ func eventTypeToProto(et event.EventType) hookmonv1.EventType {
 		return hookmonv1.EventType_EVENT_TYPE_AGENT_RECOVERED
 	case event.EventElfRpath:
 		return hookmonv1.EventType_EVENT_TYPE_ELF_RPATH
+	case event.EventBPFInventory:
+		return hookmonv1.EventType_EVENT_TYPE_BPF_INVENTORY
 	default:
 		return hookmonv1.EventType_EVENT_TYPE_UNSPECIFIED
 	}

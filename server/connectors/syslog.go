@@ -118,6 +118,8 @@ func eventDescription(et event.EventType) string {
 		return "Shared Library Modified on Disk"
 	case event.EventElfRpath:
 		return "Suspicious ELF RPATH/RUNPATH Detected"
+	case event.EventBPFInventory:
+		return "BPF Program Inventory"
 	default:
 		return "Unknown Hook Event"
 	}
@@ -206,6 +208,37 @@ func formatCEF(evt *event.HookEvent) string {
 			fmt.Sprintf("cn1Label=InsnCount"),
 			fmt.Sprintf("cn1=%d", evt.BPFDetail.InsnCount),
 		)
+	}
+
+	// Kernel program identity (cs5 is free on BPF events; cs5-cs7 carry
+	// RPATH data only on ELF_RPATH events).
+	if evt.BPFDetail != nil {
+		if evt.BPFDetail.ProgHash != "" {
+			ext = append(ext,
+				"cs5Label=ProgTag",
+				fmt.Sprintf("cs5=%s", cefEscape(evt.BPFDetail.ProgHash)),
+			)
+		}
+		if evt.BPFDetail.ProgID != 0 {
+			ext = append(ext,
+				"cn2Label=ProgID",
+				fmt.Sprintf("cn2=%d", evt.BPFDetail.ProgID),
+			)
+		}
+	}
+
+	// BPF inventory scan.
+	if evt.BPFInventoryDetail != nil {
+		ext = append(ext,
+			"cs6Label=ScanID",
+			fmt.Sprintf("cs6=%s", cefEscape(evt.BPFInventoryDetail.ScanID)),
+		)
+		if evt.BPFInventoryDetail.Summary {
+			ext = append(ext,
+				"cn3Label=ProgCount",
+				fmt.Sprintf("cn3=%d", evt.BPFInventoryDetail.ProgCount),
+			)
+		}
 	}
 
 	extensions := strings.Join(ext, " ")

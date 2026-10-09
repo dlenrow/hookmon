@@ -410,6 +410,7 @@ var protoEventTypeToEventType = map[hookmonv1.EventType]event.EventType{
 	hookmonv1.EventType_EVENT_TYPE_AGENT_OFFLINE:   event.EventAgentOffline,
 	hookmonv1.EventType_EVENT_TYPE_AGENT_RECOVERED: event.EventAgentRecovered,
 	hookmonv1.EventType_EVENT_TYPE_ELF_RPATH:       event.EventElfRpath,
+	hookmonv1.EventType_EVENT_TYPE_BPF_INVENTORY:   event.EventBPFInventory,
 }
 
 // protoToEvent converts a proto HookEvent to the canonical event.HookEvent
@@ -465,13 +466,31 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 	// Convert type-specific detail payloads.
 	if pe.BpfDetail != nil {
 		evt.BPFDetail = &event.BPFDetail{
-			BPFCommand: pe.BpfDetail.BpfCmd,
-			ProgType:   pe.BpfDetail.ProgType,
-			ProgName:   pe.BpfDetail.ProgName,
-			AttachType: pe.BpfDetail.AttachType,
-			TargetFD:   pe.BpfDetail.TargetFd,
-			InsnCount:  pe.BpfDetail.InsnCount,
-			ProgHash:   pe.BpfDetail.ProgHash,
+			BPFCommand:   pe.BpfDetail.BpfCmd,
+			ProgType:     pe.BpfDetail.ProgType,
+			ProgName:     pe.BpfDetail.ProgName,
+			AttachType:   pe.BpfDetail.AttachType,
+			TargetFD:     pe.BpfDetail.TargetFd,
+			InsnCount:    pe.BpfDetail.InsnCount,
+			ProgHash:     pe.BpfDetail.ProgHash,
+			ProgID:       pe.BpfDetail.ProgId,
+			AttachTarget: pe.BpfDetail.AttachTarget,
+		}
+		if pe.BpfDetail.LoadTime != nil {
+			t := pe.BpfDetail.LoadTime.AsTime()
+			evt.BPFDetail.LoadTime = &t
+		}
+		if pe.BpfDetail.CreatedByUid != nil {
+			uid := pe.BpfDetail.GetCreatedByUid()
+			evt.BPFDetail.CreatedByUID = &uid
+		}
+	}
+	if pe.BpfInventoryDetail != nil {
+		evt.BPFInventoryDetail = &event.BPFInventoryDetail{
+			ScanID:    pe.BpfInventoryDetail.ScanId,
+			Summary:   pe.BpfInventoryDetail.Summary,
+			ProgCount: pe.BpfInventoryDetail.ProgCount,
+			ByType:    pe.BpfInventoryDetail.ByType,
 		}
 	}
 	if pe.ExecInjectionDetail != nil {

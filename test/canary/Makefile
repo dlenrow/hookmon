@@ -29,8 +29,22 @@ hello_bpf_v2.o: hello_bpf_v2.c vmlinux.h
 		-I. -c $< -o $@
 	$(STRIP) -g $@
 
+hello_bpf_mod.o: hello_bpf_mod.c vmlinux.h
+	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) \
+		-I. -c $< -o $@
+	$(STRIP) -g $@
+
+raw_tp_canary.o: raw_tp_canary.c vmlinux.h
+	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) \
+		-I. -c $< -o $@
+	$(STRIP) -g $@
+
 # Build the Go BPF loader
 $(OUT)/load_canary: load_canary.go | $(OUT)
+	CGO_ENABLED=0 go build -o $@ $<
+
+# Loads N copies of one program and prints each kernel ID and tag
+$(OUT)/bpf_tag_canary: bpf_tag_canary.go | $(OUT)
 	CGO_ENABLED=0 go build -o $@ $<
 
 # bpftime attack simulation
@@ -61,8 +75,8 @@ $(OUT):
 
 # Build everything
 .PHONY: all
-all: hello_bpf.o net_monitor.o hello_bpf_v2.o \
-     $(OUT)/load_canary $(OUT)/bpftime_sim $(OUT)/libfake_hook.so \
+all: hello_bpf.o net_monitor.o hello_bpf_v2.o hello_bpf_mod.o raw_tp_canary.o \
+     $(OUT)/load_canary $(OUT)/bpf_tag_canary $(OUT)/bpftime_sim $(OUT)/libfake_hook.so \
      $(OUT)/dlopen_canary $(OUT)/ptrace_canary $(OUT)/shm_canary \
      $(OUT)/test_rpath $(OUT)/test_rpath_origin
 

@@ -17,6 +17,7 @@ const (
 	EventAgentOffline  EventType = "AGENT_OFFLINE"
 	EventAgentRecovered EventType = "AGENT_RECOVERED"
 	EventElfRpath       EventType = "ELF_RPATH"
+	EventBPFInventory   EventType = "BPF_INVENTORY"
 )
 
 // Severity levels for events.
@@ -61,12 +62,19 @@ type HookEvent struct {
 	PtraceDetail        *PtraceDetail        `json:"ptrace_detail,omitempty"`
 	LibIntegrityDetail  *LibIntegrityDetail  `json:"lib_integrity_detail,omitempty"`
 	ElfRpathDetail      *ElfRpathDetail      `json:"elf_rpath_detail,omitempty"`
+	BPFInventoryDetail  *BPFInventoryDetail  `json:"bpf_inventory_detail,omitempty"`
 
 	// Filled by server after policy evaluation
 	PolicyResult *PolicyResult `json:"policy_result,omitempty"`
 }
 
-// BPFDetail contains details specific to bpf() syscall events.
+// BPFDetail contains details specific to bpf() syscall events and to
+// per-program BPF_INVENTORY events.
+//
+// For BPF_LOAD it describes the program the call created; for BPF_ATTACH,
+// the program being attached. ProgID, ProgHash, LoadTime and CreatedByUID
+// are the kernel's view of that program. They are empty when a load failed
+// or the program could not be read.
 type BPFDetail struct {
 	BPFCommand uint32 `json:"bpf_cmd"`
 	ProgType   uint32 `json:"prog_type"`
@@ -74,7 +82,34 @@ type BPFDetail struct {
 	AttachType uint32 `json:"attach_type"`
 	TargetFD   int32  `json:"target_fd"`
 	InsnCount  uint32 `json:"insn_count"`
-	ProgHash   string `json:"prog_hash"`
+
+	// ProgHash is the kernel's program tag in hex, as `bpftool prog show`
+	// prints it: the first 8 bytes of a SHA-1 over the instructions, with
+	// the map references in ld_imm64 instructions zeroed. It is the same for
+	// every load of the same bytecode on the same kernel, whatever map fds
+	// the loader used, and it changes when any instruction changes.
+	ProgHash string `json:"prog_hash"`
+
+	ProgID       uint32     `json:"prog_id,omitempty"`
+	LoadTime     *time.Time `json:"load_time,omitempty"`
+	CreatedByUID *uint32    `json:"created_by_uid,omitempty"`
+
+	// AttachTarget is the tracepoint name of a BPF_RAW_TRACEPOINT_OPEN.
+	AttachTarget string `json:"attach_target,omitempty"`
+}
+
+// BPFInventoryDetail describes a BPF_INVENTORY event. Each inventory scan
+// emits one event per loaded BPF program (Summary false, and BPFDetail
+// describes the program), then one host summary (Summary true). All events
+// of one scan carry the same ScanID.
+type BPFInventoryDetail struct {
+	ScanID  string `json:"scan_id"`
+	Summary bool   `json:"summary"`
+
+	// Summary only: how many programs the scan reported, in total and by
+	// program type name.
+	ProgCount uint32            `json:"prog_count,omitempty"`
+	ByType    map[string]uint32 `json:"by_type,omitempty"`
 }
 
 // ExecInjectionDetail contains details specific to exec injection events

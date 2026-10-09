@@ -269,6 +269,7 @@ func TestEventTypeToProto_AllTypes(t *testing.T) {
 		event.EventAgentOffline,
 		event.EventAgentRecovered,
 		event.EventElfRpath,
+		event.EventBPFInventory,
 	}
 	for _, et := range types {
 		proto := eventTypeToProto(et)

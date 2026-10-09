@@ -15,6 +15,9 @@ var (
 	ErrMissingHostID    = errors.New("host_id is required")
 	ErrMissingEventType = errors.New("event_type is required")
 	ErrMissingTimestamp = errors.New("timestamp must be non-zero")
+
+	ErrMissingInventoryDetail = errors.New("BPF_INVENTORY event requires bpf_inventory_detail with a scan_id")
+	ErrMissingInventoryProg   = errors.New("BPF_INVENTORY program event requires bpf_detail with a prog_id")
 )
 
 // ValidateEvent checks that a HookEvent contains all required fields.
@@ -37,6 +40,15 @@ func ValidateEvent(evt *event.HookEvent) error {
 	}
 	if evt.Timestamp.IsZero() {
 		errs = append(errs, ErrMissingTimestamp.Error())
+	}
+	if evt.EventType == event.EventBPFInventory {
+		inv := evt.BPFInventoryDetail
+		switch {
+		case inv == nil || inv.ScanID == "":
+			errs = append(errs, ErrMissingInventoryDetail.Error())
+		case !inv.Summary && (evt.BPFDetail == nil || evt.BPFDetail.ProgID == 0):
+			errs = append(errs, ErrMissingInventoryProg.Error())
+		}
 	}
 
 	if len(errs) > 0 {

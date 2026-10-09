@@ -145,6 +145,10 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal elf_rpath_detail: %w", err)
 	}
+	bpfInvJSON, err := nullableJSON(ev.BPFInventoryDetail)
+	if err != nil {
+		return fmt.Errorf("marshal bpf_inventory_detail: %w", err)
+	}
 	policyJSON, err := nullableJSON(ev.PolicyResult)
 	if err != nil {
 		return fmt.Errorf("marshal policy_result: %w", err)
@@ -159,7 +163,7 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 			cgroup_path, container_id, namespace,
 			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
 			linker_config_detail, ptrace_detail, lib_integrity_detail,
-			elf_rpath_detail,
+			elf_rpath_detail, bpf_inventory_detail,
 			policy_result
 		) VALUES (
 			$1, $2, $3, $4,
@@ -169,8 +173,8 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 			$15, $16, $17,
 			$18, $19, $20, $21,
 			$22, $23, $24,
-			$25,
-			$26
+			$25, $26,
+			$27
 		)`
 
 	_, err = s.pool.Exec(ctx, query,
@@ -181,7 +185,7 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 		ev.CgroupPath, ev.ContainerID, ev.Namespace,
 		bpfJSON, execInjJSON, shmJSON, dlopenJSON,
 		linkerJSON, ptraceJSON, libIntJSON,
-		elfRpathJSON,
+		elfRpathJSON, bpfInvJSON,
 		policyJSON,
 	)
 	if err != nil {
@@ -246,7 +250,7 @@ func (s *Store) QueryEvents(ctx context.Context, filter EventFilter) ([]*event.H
 			cgroup_path, container_id, namespace,
 			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
 			linker_config_detail, ptrace_detail, lib_integrity_detail,
-			elf_rpath_detail,
+			elf_rpath_detail, bpf_inventory_detail,
 			policy_result
 		FROM events
 		%s
@@ -282,7 +286,7 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 	var ev event.HookEvent
 	var eventType, severity string
 	var bpfJSON, execInjJSON, shmJSON, dlopenJSON []byte
-	var linkerJSON, ptraceJSON, libIntJSON, elfRpathJSON, policyJSON []byte
+	var linkerJSON, ptraceJSON, libIntJSON, elfRpathJSON, bpfInvJSON, policyJSON []byte
 
 	err := rows.Scan(
 		&ev.ID, &ev.Timestamp, &ev.HostID, &ev.Hostname,
@@ -292,7 +296,7 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 		&ev.CgroupPath, &ev.ContainerID, &ev.Namespace,
 		&bpfJSON, &execInjJSON, &shmJSON, &dlopenJSON,
 		&linkerJSON, &ptraceJSON, &libIntJSON,
-		&elfRpathJSON,
+		&elfRpathJSON, &bpfInvJSON,
 		&policyJSON,
 	)
 	if err != nil {
@@ -350,6 +354,12 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 			return nil, fmt.Errorf("unmarshal elf_rpath_detail: %w", err)
 		}
 	}
+	if len(bpfInvJSON) > 0 {
+		ev.BPFInventoryDetail = &event.BPFInventoryDetail{}
+		if err := json.Unmarshal(bpfInvJSON, ev.BPFInventoryDetail); err != nil {
+			return nil, fmt.Errorf("unmarshal bpf_inventory_detail: %w", err)
+		}
+	}
 	if len(policyJSON) > 0 {
 		ev.PolicyResult = &event.PolicyResult{}
 		if err := json.Unmarshal(policyJSON, ev.PolicyResult); err != nil {
@@ -370,7 +380,7 @@ func (s *Store) GetEvent(ctx context.Context, id string) (*event.HookEvent, erro
 			cgroup_path, container_id, namespace,
 			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
 			linker_config_detail, ptrace_detail, lib_integrity_detail,
-			elf_rpath_detail,
+			elf_rpath_detail, bpf_inventory_detail,
 			policy_result
 		FROM events WHERE id = $1`
 
@@ -748,6 +758,10 @@ func nullableJSON(v any) ([]byte, error) {
 		}
 	case *event.ElfRpathDetail:
 		if v.(*event.ElfRpathDetail) == nil {
+			return nil, nil
+		}
+	case *event.BPFInventoryDetail:
+		if v.(*event.BPFInventoryDetail) == nil {
 			return nil, nil
 		}
 	case *event.PolicyResult:

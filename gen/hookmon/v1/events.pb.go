@@ -37,6 +37,7 @@ const (
 	EventType_EVENT_TYPE_AGENT_OFFLINE   EventType = 9
 	EventType_EVENT_TYPE_AGENT_RECOVERED EventType = 10
 	EventType_EVENT_TYPE_ELF_RPATH       EventType = 11
+	EventType_EVENT_TYPE_BPF_INVENTORY   EventType = 12
 )
 
 // Enum value maps for EventType.
@@ -54,6 +55,7 @@ var (
 		9:  "EVENT_TYPE_AGENT_OFFLINE",
 		10: "EVENT_TYPE_AGENT_RECOVERED",
 		11: "EVENT_TYPE_ELF_RPATH",
+		12: "EVENT_TYPE_BPF_INVENTORY",
 	}
 	EventType_value = map[string]int32{
 		"EVENT_TYPE_UNSPECIFIED":     0,
@@ -68,6 +70,7 @@ var (
 		"EVENT_TYPE_AGENT_OFFLINE":   9,
 		"EVENT_TYPE_AGENT_RECOVERED": 10,
 		"EVENT_TYPE_ELF_RPATH":       11,
+		"EVENT_TYPE_BPF_INVENTORY":   12,
 	}
 )
 
@@ -182,6 +185,7 @@ type HookEvent struct {
 	PtraceDetail        *PtraceDetail        `protobuf:"bytes,35,opt,name=ptrace_detail,json=ptraceDetail,proto3" json:"ptrace_detail,omitempty"`
 	LibIntegrityDetail  *LibIntegrityDetail  `protobuf:"bytes,36,opt,name=lib_integrity_detail,json=libIntegrityDetail,proto3" json:"lib_integrity_detail,omitempty"`
 	ElfRpathDetail      *ElfRpathDetail      `protobuf:"bytes,37,opt,name=elf_rpath_detail,json=elfRpathDetail,proto3" json:"elf_rpath_detail,omitempty"`
+	BpfInventoryDetail  *BPFInventoryDetail  `protobuf:"bytes,38,opt,name=bpf_inventory_detail,json=bpfInventoryDetail,proto3" json:"bpf_inventory_detail,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -391,15 +395,28 @@ func (x *HookEvent) GetElfRpathDetail() *ElfRpathDetail {
 	return nil
 }
 
+func (x *HookEvent) GetBpfInventoryDetail() *BPFInventoryDetail {
+	if x != nil {
+		return x.BpfInventoryDetail
+	}
+	return nil
+}
+
 type BPFDetail struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	BpfCmd        uint32                 `protobuf:"varint,1,opt,name=bpf_cmd,json=bpfCmd,proto3" json:"bpf_cmd,omitempty"`
-	ProgType      uint32                 `protobuf:"varint,2,opt,name=prog_type,json=progType,proto3" json:"prog_type,omitempty"`
-	ProgName      string                 `protobuf:"bytes,3,opt,name=prog_name,json=progName,proto3" json:"prog_name,omitempty"`
-	AttachType    uint32                 `protobuf:"varint,4,opt,name=attach_type,json=attachType,proto3" json:"attach_type,omitempty"`
-	TargetFd      int32                  `protobuf:"varint,5,opt,name=target_fd,json=targetFd,proto3" json:"target_fd,omitempty"`
-	InsnCount     uint32                 `protobuf:"varint,6,opt,name=insn_count,json=insnCount,proto3" json:"insn_count,omitempty"`
-	ProgHash      string                 `protobuf:"bytes,7,opt,name=prog_hash,json=progHash,proto3" json:"prog_hash,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	BpfCmd     uint32                 `protobuf:"varint,1,opt,name=bpf_cmd,json=bpfCmd,proto3" json:"bpf_cmd,omitempty"`
+	ProgType   uint32                 `protobuf:"varint,2,opt,name=prog_type,json=progType,proto3" json:"prog_type,omitempty"`
+	ProgName   string                 `protobuf:"bytes,3,opt,name=prog_name,json=progName,proto3" json:"prog_name,omitempty"`
+	AttachType uint32                 `protobuf:"varint,4,opt,name=attach_type,json=attachType,proto3" json:"attach_type,omitempty"`
+	TargetFd   int32                  `protobuf:"varint,5,opt,name=target_fd,json=targetFd,proto3" json:"target_fd,omitempty"`
+	InsnCount  uint32                 `protobuf:"varint,6,opt,name=insn_count,json=insnCount,proto3" json:"insn_count,omitempty"`
+	// Kernel program tag in hex, as bpftool prints it.
+	ProgHash     string                 `protobuf:"bytes,7,opt,name=prog_hash,json=progHash,proto3" json:"prog_hash,omitempty"`
+	ProgId       uint32                 `protobuf:"varint,8,opt,name=prog_id,json=progId,proto3" json:"prog_id,omitempty"`
+	LoadTime     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=load_time,json=loadTime,proto3" json:"load_time,omitempty"`
+	CreatedByUid *uint32                `protobuf:"varint,10,opt,name=created_by_uid,json=createdByUid,proto3,oneof" json:"created_by_uid,omitempty"`
+	// Tracepoint name of a BPF_RAW_TRACEPOINT_OPEN.
+	AttachTarget  string `protobuf:"bytes,11,opt,name=attach_target,json=attachTarget,proto3" json:"attach_target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -483,6 +500,104 @@ func (x *BPFDetail) GetProgHash() string {
 	return ""
 }
 
+func (x *BPFDetail) GetProgId() uint32 {
+	if x != nil {
+		return x.ProgId
+	}
+	return 0
+}
+
+func (x *BPFDetail) GetLoadTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LoadTime
+	}
+	return nil
+}
+
+func (x *BPFDetail) GetCreatedByUid() uint32 {
+	if x != nil && x.CreatedByUid != nil {
+		return *x.CreatedByUid
+	}
+	return 0
+}
+
+func (x *BPFDetail) GetAttachTarget() string {
+	if x != nil {
+		return x.AttachTarget
+	}
+	return ""
+}
+
+// One BPF_INVENTORY event: a loaded program (summary = false) or the host
+// summary that ends a scan (summary = true).
+type BPFInventoryDetail struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ScanId        string                 `protobuf:"bytes,1,opt,name=scan_id,json=scanId,proto3" json:"scan_id,omitempty"`
+	Summary       bool                   `protobuf:"varint,2,opt,name=summary,proto3" json:"summary,omitempty"`
+	ProgCount     uint32                 `protobuf:"varint,3,opt,name=prog_count,json=progCount,proto3" json:"prog_count,omitempty"`
+	ByType        map[string]uint32      `protobuf:"bytes,4,rep,name=by_type,json=byType,proto3" json:"by_type,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BPFInventoryDetail) Reset() {
+	*x = BPFInventoryDetail{}
+	mi := &file_hookmon_v1_events_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BPFInventoryDetail) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BPFInventoryDetail) ProtoMessage() {}
+
+func (x *BPFInventoryDetail) ProtoReflect() protoreflect.Message {
+	mi := &file_hookmon_v1_events_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BPFInventoryDetail.ProtoReflect.Descriptor instead.
+func (*BPFInventoryDetail) Descriptor() ([]byte, []int) {
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *BPFInventoryDetail) GetScanId() string {
+	if x != nil {
+		return x.ScanId
+	}
+	return ""
+}
+
+func (x *BPFInventoryDetail) GetSummary() bool {
+	if x != nil {
+		return x.Summary
+	}
+	return false
+}
+
+func (x *BPFInventoryDetail) GetProgCount() uint32 {
+	if x != nil {
+		return x.ProgCount
+	}
+	return 0
+}
+
+func (x *BPFInventoryDetail) GetByType() map[string]uint32 {
+	if x != nil {
+		return x.ByType
+	}
+	return nil
+}
+
 type ExecInjectionDetail struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	LibraryPath   string                 `protobuf:"bytes,1,opt,name=library_path,json=libraryPath,proto3" json:"library_path,omitempty"`
@@ -496,7 +611,7 @@ type ExecInjectionDetail struct {
 
 func (x *ExecInjectionDetail) Reset() {
 	*x = ExecInjectionDetail{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[2]
+	mi := &file_hookmon_v1_events_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -508,7 +623,7 @@ func (x *ExecInjectionDetail) String() string {
 func (*ExecInjectionDetail) ProtoMessage() {}
 
 func (x *ExecInjectionDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[2]
+	mi := &file_hookmon_v1_events_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -521,7 +636,7 @@ func (x *ExecInjectionDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecInjectionDetail.ProtoReflect.Descriptor instead.
 func (*ExecInjectionDetail) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{2}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ExecInjectionDetail) GetLibraryPath() string {
@@ -571,7 +686,7 @@ type LinkerConfigDetail struct {
 
 func (x *LinkerConfigDetail) Reset() {
 	*x = LinkerConfigDetail{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[3]
+	mi := &file_hookmon_v1_events_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +698,7 @@ func (x *LinkerConfigDetail) String() string {
 func (*LinkerConfigDetail) ProtoMessage() {}
 
 func (x *LinkerConfigDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[3]
+	mi := &file_hookmon_v1_events_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +711,7 @@ func (x *LinkerConfigDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkerConfigDetail.ProtoReflect.Descriptor instead.
 func (*LinkerConfigDetail) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{3}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *LinkerConfigDetail) GetFilePath() string {
@@ -640,7 +755,7 @@ type PtraceDetail struct {
 
 func (x *PtraceDetail) Reset() {
 	*x = PtraceDetail{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[4]
+	mi := &file_hookmon_v1_events_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -652,7 +767,7 @@ func (x *PtraceDetail) String() string {
 func (*PtraceDetail) ProtoMessage() {}
 
 func (x *PtraceDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[4]
+	mi := &file_hookmon_v1_events_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -665,7 +780,7 @@ func (x *PtraceDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PtraceDetail.ProtoReflect.Descriptor instead.
 func (*PtraceDetail) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{4}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PtraceDetail) GetRequest() uint32 {
@@ -716,7 +831,7 @@ type LibIntegrityDetail struct {
 
 func (x *LibIntegrityDetail) Reset() {
 	*x = LibIntegrityDetail{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[5]
+	mi := &file_hookmon_v1_events_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -728,7 +843,7 @@ func (x *LibIntegrityDetail) String() string {
 func (*LibIntegrityDetail) ProtoMessage() {}
 
 func (x *LibIntegrityDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[5]
+	mi := &file_hookmon_v1_events_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -741,7 +856,7 @@ func (x *LibIntegrityDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LibIntegrityDetail.ProtoReflect.Descriptor instead.
 func (*LibIntegrityDetail) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{5}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *LibIntegrityDetail) GetLibraryPath() string {
@@ -790,7 +905,7 @@ type SHMDetail struct {
 
 func (x *SHMDetail) Reset() {
 	*x = SHMDetail{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[6]
+	mi := &file_hookmon_v1_events_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -802,7 +917,7 @@ func (x *SHMDetail) String() string {
 func (*SHMDetail) ProtoMessage() {}
 
 func (x *SHMDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[6]
+	mi := &file_hookmon_v1_events_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -815,7 +930,7 @@ func (x *SHMDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SHMDetail.ProtoReflect.Descriptor instead.
 func (*SHMDetail) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{6}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SHMDetail) GetShmName() string {
@@ -850,7 +965,7 @@ type DlopenDetail struct {
 
 func (x *DlopenDetail) Reset() {
 	*x = DlopenDetail{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[7]
+	mi := &file_hookmon_v1_events_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -862,7 +977,7 @@ func (x *DlopenDetail) String() string {
 func (*DlopenDetail) ProtoMessage() {}
 
 func (x *DlopenDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[7]
+	mi := &file_hookmon_v1_events_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -875,7 +990,7 @@ func (x *DlopenDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DlopenDetail.ProtoReflect.Descriptor instead.
 func (*DlopenDetail) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{7}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DlopenDetail) GetLibraryPath() string {
@@ -912,7 +1027,7 @@ type RpathEntry struct {
 
 func (x *RpathEntry) Reset() {
 	*x = RpathEntry{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[8]
+	mi := &file_hookmon_v1_events_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -924,7 +1039,7 @@ func (x *RpathEntry) String() string {
 func (*RpathEntry) ProtoMessage() {}
 
 func (x *RpathEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[8]
+	mi := &file_hookmon_v1_events_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -937,7 +1052,7 @@ func (x *RpathEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RpathEntry.ProtoReflect.Descriptor instead.
 func (*RpathEntry) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{8}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RpathEntry) GetPath() string {
@@ -992,7 +1107,7 @@ type ElfRpathDetail struct {
 
 func (x *ElfRpathDetail) Reset() {
 	*x = ElfRpathDetail{}
-	mi := &file_hookmon_v1_events_proto_msgTypes[9]
+	mi := &file_hookmon_v1_events_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1004,7 +1119,7 @@ func (x *ElfRpathDetail) String() string {
 func (*ElfRpathDetail) ProtoMessage() {}
 
 func (x *ElfRpathDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_events_proto_msgTypes[9]
+	mi := &file_hookmon_v1_events_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1017,7 +1132,7 @@ func (x *ElfRpathDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ElfRpathDetail.ProtoReflect.Descriptor instead.
 func (*ElfRpathDetail) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{9}
+	return file_hookmon_v1_events_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ElfRpathDetail) GetHasRpath() bool {
@@ -1088,7 +1203,7 @@ var File_hookmon_v1_events_proto protoreflect.FileDescriptor
 const file_hookmon_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"\x17hookmon/v1/events.proto\x12\n" +
-	"hookmon.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xab\b\n" +
+	"hookmon.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfd\b\n" +
 	"\tHookEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x17\n" +
@@ -1119,7 +1234,8 @@ const file_hookmon_v1_events_proto_rawDesc = "" +
 	"\x14linker_config_detail\x18\" \x01(\v2\x1e.hookmon.v1.LinkerConfigDetailR\x12linkerConfigDetail\x12=\n" +
 	"\rptrace_detail\x18# \x01(\v2\x18.hookmon.v1.PtraceDetailR\fptraceDetail\x12P\n" +
 	"\x14lib_integrity_detail\x18$ \x01(\v2\x1e.hookmon.v1.LibIntegrityDetailR\x12libIntegrityDetail\x12D\n" +
-	"\x10elf_rpath_detail\x18% \x01(\v2\x1a.hookmon.v1.ElfRpathDetailR\x0eelfRpathDetail\"\xd8\x01\n" +
+	"\x10elf_rpath_detail\x18% \x01(\v2\x1a.hookmon.v1.ElfRpathDetailR\x0eelfRpathDetail\x12P\n" +
+	"\x14bpf_inventory_detail\x18& \x01(\v2\x1e.hookmon.v1.BPFInventoryDetailR\x12bpfInventoryDetail\"\x8d\x03\n" +
 	"\tBPFDetail\x12\x17\n" +
 	"\abpf_cmd\x18\x01 \x01(\rR\x06bpfCmd\x12\x1b\n" +
 	"\tprog_type\x18\x02 \x01(\rR\bprogType\x12\x1b\n" +
@@ -1129,7 +1245,22 @@ const file_hookmon_v1_events_proto_rawDesc = "" +
 	"\ttarget_fd\x18\x05 \x01(\x05R\btargetFd\x12\x1d\n" +
 	"\n" +
 	"insn_count\x18\x06 \x01(\rR\tinsnCount\x12\x1b\n" +
-	"\tprog_hash\x18\a \x01(\tR\bprogHash\"\xb0\x01\n" +
+	"\tprog_hash\x18\a \x01(\tR\bprogHash\x12\x17\n" +
+	"\aprog_id\x18\b \x01(\rR\x06progId\x127\n" +
+	"\tload_time\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\bloadTime\x12)\n" +
+	"\x0ecreated_by_uid\x18\n" +
+	" \x01(\rH\x00R\fcreatedByUid\x88\x01\x01\x12#\n" +
+	"\rattach_target\x18\v \x01(\tR\fattachTargetB\x11\n" +
+	"\x0f_created_by_uid\"\xe6\x01\n" +
+	"\x12BPFInventoryDetail\x12\x17\n" +
+	"\ascan_id\x18\x01 \x01(\tR\x06scanId\x12\x18\n" +
+	"\asummary\x18\x02 \x01(\bR\asummary\x12\x1d\n" +
+	"\n" +
+	"prog_count\x18\x03 \x01(\rR\tprogCount\x12C\n" +
+	"\aby_type\x18\x04 \x03(\v2*.hookmon.v1.BPFInventoryDetail.ByTypeEntryR\x06byType\x1a9\n" +
+	"\vByTypeEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\rR\x05value:\x028\x01\"\xb0\x01\n" +
 	"\x13ExecInjectionDetail\x12!\n" +
 	"\flibrary_path\x18\x01 \x01(\tR\vlibraryPath\x12!\n" +
 	"\flibrary_hash\x18\x02 \x01(\tR\vlibraryHash\x12#\n" +
@@ -1182,7 +1313,7 @@ const file_hookmon_v1_events_proto_rawDesc = "" +
 	"\vuses_origin\x18\a \x01(\bR\n" +
 	"usesOrigin\x12'\n" +
 	"\x0fuses_deprecated\x18\b \x01(\bR\x0eusesDeprecated\x12\x1b\n" +
-	"\tis_setuid\x18\t \x01(\bR\bisSetuid*\xde\x02\n" +
+	"\tis_setuid\x18\t \x01(\bR\bisSetuid*\xfc\x02\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13EVENT_TYPE_BPF_LOAD\x10\x01\x12\x19\n" +
@@ -1196,7 +1327,8 @@ const file_hookmon_v1_events_proto_rawDesc = "" +
 	"\x18EVENT_TYPE_AGENT_OFFLINE\x10\t\x12\x1e\n" +
 	"\x1aEVENT_TYPE_AGENT_RECOVERED\x10\n" +
 	"\x12\x18\n" +
-	"\x14EVENT_TYPE_ELF_RPATH\x10\v*u\n" +
+	"\x14EVENT_TYPE_ELF_RPATH\x10\v\x12\x1c\n" +
+	"\x18EVENT_TYPE_BPF_INVENTORY\x10\f*u\n" +
 	"\bSeverity\x12\x18\n" +
 	"\x14SEVERITY_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rSEVERITY_INFO\x10\x01\x12\x11\n" +
@@ -1217,40 +1349,45 @@ func file_hookmon_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_hookmon_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_hookmon_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_hookmon_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_hookmon_v1_events_proto_goTypes = []any{
 	(EventType)(0),                // 0: hookmon.v1.EventType
 	(Severity)(0),                 // 1: hookmon.v1.Severity
 	(*HookEvent)(nil),             // 2: hookmon.v1.HookEvent
 	(*BPFDetail)(nil),             // 3: hookmon.v1.BPFDetail
-	(*ExecInjectionDetail)(nil),   // 4: hookmon.v1.ExecInjectionDetail
-	(*LinkerConfigDetail)(nil),    // 5: hookmon.v1.LinkerConfigDetail
-	(*PtraceDetail)(nil),          // 6: hookmon.v1.PtraceDetail
-	(*LibIntegrityDetail)(nil),    // 7: hookmon.v1.LibIntegrityDetail
-	(*SHMDetail)(nil),             // 8: hookmon.v1.SHMDetail
-	(*DlopenDetail)(nil),          // 9: hookmon.v1.DlopenDetail
-	(*RpathEntry)(nil),            // 10: hookmon.v1.RpathEntry
-	(*ElfRpathDetail)(nil),        // 11: hookmon.v1.ElfRpathDetail
-	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
+	(*BPFInventoryDetail)(nil),    // 4: hookmon.v1.BPFInventoryDetail
+	(*ExecInjectionDetail)(nil),   // 5: hookmon.v1.ExecInjectionDetail
+	(*LinkerConfigDetail)(nil),    // 6: hookmon.v1.LinkerConfigDetail
+	(*PtraceDetail)(nil),          // 7: hookmon.v1.PtraceDetail
+	(*LibIntegrityDetail)(nil),    // 8: hookmon.v1.LibIntegrityDetail
+	(*SHMDetail)(nil),             // 9: hookmon.v1.SHMDetail
+	(*DlopenDetail)(nil),          // 10: hookmon.v1.DlopenDetail
+	(*RpathEntry)(nil),            // 11: hookmon.v1.RpathEntry
+	(*ElfRpathDetail)(nil),        // 12: hookmon.v1.ElfRpathDetail
+	nil,                           // 13: hookmon.v1.BPFInventoryDetail.ByTypeEntry
+	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
 }
 var file_hookmon_v1_events_proto_depIdxs = []int32{
-	12, // 0: hookmon.v1.HookEvent.timestamp:type_name -> google.protobuf.Timestamp
+	14, // 0: hookmon.v1.HookEvent.timestamp:type_name -> google.protobuf.Timestamp
 	0,  // 1: hookmon.v1.HookEvent.event_type:type_name -> hookmon.v1.EventType
 	1,  // 2: hookmon.v1.HookEvent.severity:type_name -> hookmon.v1.Severity
 	3,  // 3: hookmon.v1.HookEvent.bpf_detail:type_name -> hookmon.v1.BPFDetail
-	4,  // 4: hookmon.v1.HookEvent.exec_injection_detail:type_name -> hookmon.v1.ExecInjectionDetail
-	8,  // 5: hookmon.v1.HookEvent.shm_detail:type_name -> hookmon.v1.SHMDetail
-	9,  // 6: hookmon.v1.HookEvent.dlopen_detail:type_name -> hookmon.v1.DlopenDetail
-	5,  // 7: hookmon.v1.HookEvent.linker_config_detail:type_name -> hookmon.v1.LinkerConfigDetail
-	6,  // 8: hookmon.v1.HookEvent.ptrace_detail:type_name -> hookmon.v1.PtraceDetail
-	7,  // 9: hookmon.v1.HookEvent.lib_integrity_detail:type_name -> hookmon.v1.LibIntegrityDetail
-	11, // 10: hookmon.v1.HookEvent.elf_rpath_detail:type_name -> hookmon.v1.ElfRpathDetail
-	10, // 11: hookmon.v1.ElfRpathDetail.entries:type_name -> hookmon.v1.RpathEntry
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	5,  // 4: hookmon.v1.HookEvent.exec_injection_detail:type_name -> hookmon.v1.ExecInjectionDetail
+	9,  // 5: hookmon.v1.HookEvent.shm_detail:type_name -> hookmon.v1.SHMDetail
+	10, // 6: hookmon.v1.HookEvent.dlopen_detail:type_name -> hookmon.v1.DlopenDetail
+	6,  // 7: hookmon.v1.HookEvent.linker_config_detail:type_name -> hookmon.v1.LinkerConfigDetail
+	7,  // 8: hookmon.v1.HookEvent.ptrace_detail:type_name -> hookmon.v1.PtraceDetail
+	8,  // 9: hookmon.v1.HookEvent.lib_integrity_detail:type_name -> hookmon.v1.LibIntegrityDetail
+	12, // 10: hookmon.v1.HookEvent.elf_rpath_detail:type_name -> hookmon.v1.ElfRpathDetail
+	4,  // 11: hookmon.v1.HookEvent.bpf_inventory_detail:type_name -> hookmon.v1.BPFInventoryDetail
+	14, // 12: hookmon.v1.BPFDetail.load_time:type_name -> google.protobuf.Timestamp
+	13, // 13: hookmon.v1.BPFInventoryDetail.by_type:type_name -> hookmon.v1.BPFInventoryDetail.ByTypeEntry
+	11, // 14: hookmon.v1.ElfRpathDetail.entries:type_name -> hookmon.v1.RpathEntry
+	15, // [15:15] is the sub-list for method output_type
+	15, // [15:15] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_hookmon_v1_events_proto_init() }
@@ -1258,13 +1395,14 @@ func file_hookmon_v1_events_proto_init() {
 	if File_hookmon_v1_events_proto != nil {
 		return
 	}
+	file_hookmon_v1_events_proto_msgTypes[1].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hookmon_v1_events_proto_rawDesc), len(file_hookmon_v1_events_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   10,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

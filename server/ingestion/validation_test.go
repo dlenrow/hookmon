@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,37 @@ func TestValidateEvent_MultipleErrors(t *testing.T) {
 	for _, want := range []string{"event ID", "host_id", "event_type", "timestamp"} {
 		if len(msg) == 0 {
 			t.Errorf("error message should mention %q", want)
+		}
+	}
+}
+
+func TestValidateEvent_BPFInventory(t *testing.T) {
+	inv := func(d *event.BPFInventoryDetail, b *event.BPFDetail) *event.HookEvent {
+		evt := validEvent()
+		evt.EventType = event.EventBPFInventory
+		evt.BPFInventoryDetail = d
+		evt.BPFDetail = b
+		return evt
+	}
+	tests := []struct {
+		name string
+		evt  *event.HookEvent
+		want error // nil: valid
+	}{
+		{"program", inv(&event.BPFInventoryDetail{ScanID: "s"}, &event.BPFDetail{ProgID: 7}), nil},
+		{"summary", inv(&event.BPFInventoryDetail{ScanID: "s", Summary: true, ProgCount: 1}, nil), nil},
+		{"no inventory detail", inv(nil, &event.BPFDetail{ProgID: 7}), ErrMissingInventoryDetail},
+		{"no scan id", inv(&event.BPFInventoryDetail{}, &event.BPFDetail{ProgID: 7}), ErrMissingInventoryDetail},
+		{"program without bpf detail", inv(&event.BPFInventoryDetail{ScanID: "s"}, nil), ErrMissingInventoryProg},
+		{"program without id", inv(&event.BPFInventoryDetail{ScanID: "s"}, &event.BPFDetail{}), ErrMissingInventoryProg},
+	}
+	for _, tt := range tests {
+		err := ValidateEvent(tt.evt)
+		switch {
+		case tt.want == nil && err != nil:
+			t.Errorf("%s: unexpected error %v", tt.name, err)
+		case tt.want != nil && (err == nil || !strings.Contains(err.Error(), tt.want.Error())):
+			t.Errorf("%s: got %v, want error containing %q", tt.name, err, tt.want)
 		}
 	}
 }

@@ -66,6 +66,7 @@ func TestEventDescription_AllTypes(t *testing.T) {
 		{event.EventPtraceInject, "Ptrace Code Injection Detected"},
 		{event.EventLibIntegrity, "Shared Library Modified on Disk"},
 		{event.EventElfRpath, "Suspicious ELF RPATH/RUNPATH Detected"},
+		{event.EventBPFInventory, "BPF Program Inventory"},
 	}
 	for _, tt := range types {
 		got := eventDescription(tt.et)
@@ -129,6 +130,37 @@ func TestFormatCEF_BPFExtensions(t *testing.T) {
 	}
 	if !strings.Contains(cef, "cn1=142") {
 		t.Error("missing cn1=142")
+	}
+}
+
+func TestFormatCEF_BPFInventory(t *testing.T) {
+	prog := formatCEF(&event.HookEvent{
+		EventType:          event.EventBPFInventory,
+		Severity:           event.SeverityInfo,
+		BPFDetail:          &event.BPFDetail{ProgType: 5, ProgName: "hello_count", ProgHash: "a04f5eef06a7f555", ProgID: 42},
+		BPFInventoryDetail: &event.BPFInventoryDetail{ScanID: "scan-1"},
+	})
+	if !strings.HasPrefix(prog, "CEF:0|HookMon|HookMon|1.0|BPF_INVENTORY|BPF Program Inventory|1|") {
+		t.Errorf("CEF header mismatch: %s", prog)
+	}
+	for _, want := range []string{"cs5Label=ProgTag", "cs5=a04f5eef06a7f555", "cn2Label=ProgID", "cn2=42", "cs6Label=ScanID", "cs6=scan-1"} {
+		if !strings.Contains(prog, want) {
+			t.Errorf("program event missing %q: %s", want, prog)
+		}
+	}
+	if strings.Contains(prog, "cn3Label") {
+		t.Errorf("program event carries the summary count: %s", prog)
+	}
+
+	sum := formatCEF(&event.HookEvent{
+		EventType:          event.EventBPFInventory,
+		Severity:           event.SeverityInfo,
+		BPFInventoryDetail: &event.BPFInventoryDetail{ScanID: "scan-1", Summary: true, ProgCount: 3},
+	})
+	for _, want := range []string{"cs6=scan-1", "cn3Label=ProgCount", "cn3=3"} {
+		if !strings.Contains(sum, want) {
+			t.Errorf("summary missing %q: %s", want, sum)
+		}
 	}
 }
 

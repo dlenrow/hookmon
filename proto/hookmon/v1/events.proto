@@ -19,6 +19,7 @@ enum EventType {
   EVENT_TYPE_AGENT_OFFLINE = 9;
   EVENT_TYPE_AGENT_RECOVERED = 10;
   EVENT_TYPE_ELF_RPATH = 11;
+  EVENT_TYPE_BPF_INVENTORY = 12;
 }
 
 enum Severity {
@@ -59,6 +60,7 @@ message HookEvent {
   PtraceDetail ptrace_detail = 35;
   LibIntegrityDetail lib_integrity_detail = 36;
   ElfRpathDetail elf_rpath_detail = 37;
+  BPFInventoryDetail bpf_inventory_detail = 38;
 }
 
 message BPFDetail {
@@ -68,7 +70,22 @@ message BPFDetail {
   uint32 attach_type = 4;
   int32 target_fd = 5;
   uint32 insn_count = 6;
+  // Kernel program tag in hex, as bpftool prints it.
   string prog_hash = 7;
+  uint32 prog_id = 8;
+  google.protobuf.Timestamp load_time = 9;
+  optional uint32 created_by_uid = 10;
+  // Tracepoint name of a BPF_RAW_TRACEPOINT_OPEN.
+  string attach_target = 11;
+}
+
+// One BPF_INVENTORY event: a loaded program (summary = false) or the host
+// summary that ends a scan (summary = true).
+message BPFInventoryDetail {
+  string scan_id = 1;
+  bool summary = 2;
+  uint32 prog_count = 3;
+  map<string, uint32> by_type = 4;
 }
 
 message ExecInjectionDetail {

@@ -45,6 +45,18 @@ func (e *Engine) Evaluate(evt *event.HookEvent) *event.PolicyResult {
 		return result
 	}
 
+	// BPF inventory events are a census the sensor bus repeats every few
+	// minutes, not an action by a process, so they are always INFO. The
+	// allowlist is still consulted: the result records whether each loaded
+	// program is known (matched entry) or not (ALERT, meaning "not on the
+	// allowlist"), so unknown programs can be found by query.
+	if evt.EventType == event.EventBPFInventory {
+		result := e.inventoryResult(evt)
+		evt.Severity = event.SeverityInfo
+		evt.PolicyResult = result
+		return result
+	}
+
 	// Check built-in rules first. If a rule fires, it may elevate severity
 	// but we still check the allowlist — a matching allowlist entry can
 	// override the rule.
@@ -97,6 +109,41 @@ func (e *Engine) Evaluate(evt *event.HookEvent) *event.PolicyResult {
 		zap.String("hostname", evt.Hostname),
 	)
 	return result
+}
+
+// inventoryResult evaluates a BPF_INVENTORY event against the allowlist.
+// Built-in rules do not apply: an inventory event has no process context.
+func (e *Engine) inventoryResult(evt *event.HookEvent) *event.PolicyResult {
+	if evt.BPFInventoryDetail != nil && evt.BPFInventoryDetail.Summary {
+		return &event.PolicyResult{
+			Action: event.ActionAllow,
+			Reason: fmt.Sprintf("BPF inventory summary: %d programs loaded on %s",
+				evt.BPFInventoryDetail.ProgCount, evt.Hostname),
+		}
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, entry := range e.allowlist {
+		if Matches(entry, evt) {
+			return &event.PolicyResult{
+				Action:         entry.Action,
+				MatchedEntryID: entry.ID,
+				Reason:         fmt.Sprintf("matched allowlist entry: %s", entry.Description),
+			}
+		}
+	}
+
+	var name, tag string
+	var id uint32
+	if evt.BPFDetail != nil {
+		name, tag, id = evt.BPFDetail.ProgName, evt.BPFDetail.ProgHash, evt.BPFDetail.ProgID
+	}
+	return &event.PolicyResult{
+		Action: event.ActionAlert,
+		Reason: fmt.Sprintf("BPF inventory: loaded program %q (id=%d, tag=%s) on %s has no allowlist match",
+			name, id, tag, evt.Hostname),
+	}
 }
 
 // classifySeverity determines the severity based on the policy result and

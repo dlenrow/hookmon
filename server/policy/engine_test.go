@@ -258,3 +258,70 @@ func TestEvaluate_DenyEntryReturnsDeny(t *testing.T) {
 		t.Errorf("expected DENY, got %s", result.Action)
 	}
 }
+
+// --- BPF_INVENTORY ---
+
+// inventoryEvent is a per-program inventory event as the bus sends it: no
+// process context, so UID 0 and no exe hash.
+func inventoryEvent(tag string) *event.HookEvent {
+	return &event.HookEvent{
+		ID:                 "inv-001",
+		Timestamp:          time.Now(),
+		HostID:             "host-1",
+		Hostname:           "web-01",
+		EventType:          event.EventBPFInventory,
+		BPFDetail:          &event.BPFDetail{ProgID: 42, ProgName: "hello_count", ProgHash: tag},
+		BPFInventoryDetail: &event.BPFInventoryDetail{ScanID: "scan-1"},
+	}
+}
+
+func TestEvaluate_InventoryUnknownProgramIsInfo(t *testing.T) {
+	// UID 0 and no exe hash make any other event ALERT or CRITICAL;
+	// inventory events are INFO regardless.
+	evt := inventoryEvent("a04f5eef06a7f555")
+	result := newTestEngine().Evaluate(evt)
+	if evt.Severity != event.SeverityInfo {
+		t.Errorf("severity: got %q, want INFO", evt.Severity)
+	}
+	if result.Action != event.ActionAlert || result.MatchedEntryID != "" {
+		t.Errorf("unknown program: got action %q entry %q, want ALERT (not on allowlist) and no entry",
+			result.Action, result.MatchedEntryID)
+	}
+	if evt.PolicyResult != result {
+		t.Error("PolicyResult not set on the event")
+	}
+}
+
+func TestEvaluate_InventoryAllowlistedProgramRecordsMatch(t *testing.T) {
+	entry := &event.AllowlistEntry{
+		ID:         "allow-hello",
+		EventTypes: []event.EventType{event.EventBPFLoad, event.EventBPFInventory},
+		ProgHash:   "a04f5eef06a7f555",
+		Action:     event.ActionAllow,
+		Enabled:    true,
+	}
+	evt := inventoryEvent("a04f5eef06a7f555")
+	result := newTestEngine(entry).Evaluate(evt)
+	if result.Action != event.ActionAllow || result.MatchedEntryID != "allow-hello" {
+		t.Errorf("got action %q entry %q, want ALLOW allow-hello", result.Action, result.MatchedEntryID)
+	}
+	if evt.Severity != event.SeverityInfo {
+		t.Errorf("severity: got %q, want INFO", evt.Severity)
+	}
+}
+
+func TestEvaluate_InventorySummaryIsInfo(t *testing.T) {
+	evt := &event.HookEvent{
+		ID:        "inv-sum",
+		Timestamp: time.Now(),
+		HostID:    "host-1",
+		EventType: event.EventBPFInventory,
+		BPFInventoryDetail: &event.BPFInventoryDetail{
+			ScanID: "scan-1", Summary: true, ProgCount: 3,
+		},
+	}
+	result := newTestEngine().Evaluate(evt)
+	if evt.Severity != event.SeverityInfo || result.Action != event.ActionAllow {
+		t.Errorf("summary: got severity %q action %q, want INFO ALLOW", evt.Severity, result.Action)
+	}
+}
