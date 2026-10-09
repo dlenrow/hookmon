@@ -45,6 +45,7 @@ Host: drl-nuc8i3bek, Ubuntu 22.10, kernel 5.19.0-46 x86_64, Go 1.24.4, `CC=clang
 | Smoketests | `make smoketest` | Pass. One test skips by design (`TestStatusEndpointUnreachableSimulation`). | Verified |
 | e2e (root) | `make test-e2e` | Each run: 12/13 pass, but a different test fails each time. Run 1: `TestSensor8_ElfRpath_SuspiciousPath` timed out; it passes alone. Likely cause: the canary exits before the bus reads `/proc/<pid>/exe`, so no RPATH analysis runs. This is a product race, fixed by the step 4 `sched_process_exec` hook. Run 2: `TestCombined_BpftimeAttackChain` missed EXEC_INJECTION. Cause: the harness's `WaitForEvent` discards events that don't match, so the result depends on order. Fixed in a separate commit. | Verified |
 | `Dockerfile.agent` builds hookmon-bus | `make docker-agent` | Not run: the test host's disk is full (3 GB free). | Code reading |
+| CI Go job passes | GitHub Actions run 37999808472 at `95e2108` | Go Build & Test and Dashboard both pass. The first run, at `fa1150f`, failed because Ubuntu's kernel-matched bpftool wrapper has no binary for the runner's 6.17 kernel. `95e2108` switched CI to a pinned static upstream bpftool, v7.7.0 with its sha256 checked. | Verified |
 
 Bugs found during verification and fixed in this step:
 - The smoketest constructor table did not compile on Linux.
