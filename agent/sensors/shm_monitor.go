@@ -7,7 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"strings"
+	"os"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -29,16 +29,22 @@ type shmEvent struct {
 	SHMName   [128]byte
 	Oflag     uint32
 	Mode      uint32
+	EnvLen    uint32 // bytes of Env the BPF program copied
+	EnvTotal  uint32 // size of the creator's whole environment
+	Env       [4096]byte
 }
 
-// SHMMonitorSensor monitors /dev/shm openat() calls for bpftime-style patterns.
+// SHMMonitorSensor monitors /dev/shm segment creation through openat() and
+// openat2() for bpftime-style patterns.
 type SHMMonitorSensor struct {
-	eventCh chan *event.HookEvent
-	tp      link.Link
-	reader  *ringbuf.Reader
-	coll    *ebpf.Collection
-	prog    *ebpf.Program
-	done    chan struct{}
+	eventCh   chan *event.HookEvent
+	tp        link.Link
+	tpOpenat2 link.Link
+	reader    *ringbuf.Reader
+	coll      *ebpf.Collection
+	prog      *ebpf.Program
+	progOat2  *ebpf.Program
+	done      chan struct{}
 }
 
 func NewSHMMonitorSensor() *SHMMonitorSensor {
@@ -48,8 +54,8 @@ func NewSHMMonitorSensor() *SHMMonitorSensor {
 	}
 }
 
-func (s *SHMMonitorSensor) Name() string       { return "shm_monitor" }
-func (s *SHMMonitorSensor) Type() SensorType   { return SensorTypeBPF }
+func (s *SHMMonitorSensor) Name() string     { return "shm_monitor" }
+func (s *SHMMonitorSensor) Type() SensorType { return SensorTypeBPF }
 
 func (s *SHMMonitorSensor) Start() error {
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(shmMonitorBPF))
@@ -66,10 +72,21 @@ func (s *SHMMonitorSensor) Start() error {
 	if s.prog == nil {
 		return errors.New("BPF program 'trace_shm_open' not found")
 	}
+	s.progOat2 = s.coll.Programs["trace_shm_openat2"]
+	if s.progOat2 == nil {
+		return errors.New("BPF program 'trace_shm_openat2' not found")
+	}
 
 	s.tp, err = link.Tracepoint("syscalls", "sys_enter_openat", s.prog, nil)
 	if err != nil {
 		return fmt.Errorf("attach tracepoint: %w", err)
+	}
+
+	// openat2 exists from kernel 5.6, and the ring buffer this sensor needs
+	// from 5.8, so every kernel that can run the sensor has it.
+	s.tpOpenat2, err = link.Tracepoint("syscalls", "sys_enter_openat2", s.progOat2, nil)
+	if err != nil {
+		return fmt.Errorf("attach sys_enter_openat2: %w", err)
 	}
 
 	eventsMap := s.coll.Maps["events"]
@@ -94,6 +111,9 @@ func (s *SHMMonitorSensor) Stop() error {
 	if s.tp != nil {
 		s.tp.Close()
 	}
+	if s.tpOpenat2 != nil {
+		s.tpOpenat2.Close()
+	}
 	if s.coll != nil {
 		s.coll.Close()
 	}
@@ -102,13 +122,31 @@ func (s *SHMMonitorSensor) Stop() error {
 
 func (s *SHMMonitorSensor) Events() <-chan *event.HookEvent { return s.eventCh }
 
-// HeartbeatNs implements BPFHealth.
+// HeartbeatNs implements BPFHealth. The openat and openat2 hooks each have a
+// heartbeat map and the bus probes both; this returns the older of the two,
+// so a sensor that lost either hook stops advancing.
 func (s *SHMMonitorSensor) HeartbeatNs() (uint64, error) {
-	return readHeartbeat(s.coll, "hookmon_heartbeat_shm_monitor")
+	openat, err := readHeartbeat(s.coll, "hookmon_heartbeat_shm_monitor")
+	if err != nil {
+		return 0, err
+	}
+	openat2, err := readHeartbeat(s.coll, "hookmon_heartbeat_shm_monitor_openat2")
+	if err != nil {
+		return 0, err
+	}
+	return min(openat, openat2), nil
 }
 
-// CheckAttached implements BPFHealth.
-func (s *SHMMonitorSensor) CheckAttached() error { return checkAttached(s.prog, s.tp) }
+// CheckAttached implements BPFHealth for both hooks.
+func (s *SHMMonitorSensor) CheckAttached() error {
+	if err := checkAttached(s.prog, s.tp); err != nil {
+		return fmt.Errorf("sys_enter_openat: %w", err)
+	}
+	if err := checkAttached(s.progOat2, s.tpOpenat2); err != nil {
+		return fmt.Errorf("sys_enter_openat2: %w", err)
+	}
+	return nil
+}
 
 func (s *SHMMonitorSensor) readLoop() {
 	for {
@@ -128,13 +166,13 @@ func (s *SHMMonitorSensor) readLoop() {
 		}
 
 		shmName := nullTermStr(raw.SHMName[:])
-		pattern := classifySHMPattern(shmName)
+		pattern, severity := classifySHM(shmName, shmCreatorEnv(&raw))
 
 		hookEvt := &event.HookEvent{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now(),
 			EventType: event.EventSHMCreate,
-			Severity:  event.SeverityCritical,
+			Severity:  severity,
 			PID:       raw.PID,
 			PPID:      raw.PPID,
 			UID:       raw.UID,
@@ -153,18 +191,20 @@ func (s *SHMMonitorSensor) readLoop() {
 	}
 }
 
-// classifySHMPattern identifies if a shared memory segment name matches
-// known bpftime patterns.
-func classifySHMPattern(name string) string {
-	lower := strings.ToLower(name)
-	switch {
-	case strings.Contains(lower, "bpftime"):
-		return "bpftime"
-	case strings.Contains(lower, "bpf"):
-		return "bpf_related"
-	default:
-		return "unknown"
+// shmCreatorEnv returns the creating process's environment as NUL-terminated
+// strings. The BPF program copies up to len(raw.Env) bytes while the creator
+// runs. A longer environment is read from /proc/<pid>/environ, which works
+// only while the creator is still alive; if it has exited, the partial copy
+// is used.
+func shmCreatorEnv(raw *shmEvent) []byte {
+	n := min(int(raw.EnvLen), len(raw.Env))
+	if n > 0 && raw.EnvLen >= raw.EnvTotal {
+		return raw.Env[:n]
 	}
+	if env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", raw.PID)); err == nil {
+		return env
+	}
+	return raw.Env[:n]
 }
 
 // shmMonitorBPF is provided via go:embed in embed.go

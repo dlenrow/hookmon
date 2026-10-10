@@ -5,13 +5,15 @@
  * the shm_monitor eBPF sensor independently of the full bpftime simulator.
  *
  * Usage: ./shm_canary [shm-name]
- *   Default shm-name: /bpftime_canary_test
+ *   Without shm-name, the name comes from BPFTIME_GLOBAL_SHM_NAME, as in
+ *   bpftime's get_global_shm_name(), and otherwise is /bpftime_canary_test.
  *
  * Build: cc -o shm_canary shm_canary.c -lrt
  */
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -20,7 +22,9 @@
 #define SHM_SIZE 4096
 
 int main(int argc, char *argv[]) {
-    const char *shm_name = (argc > 1) ? argv[1] : DEFAULT_SHM_NAME;
+    const char *shm_name = (argc > 1) ? argv[1] : getenv("BPFTIME_GLOBAL_SHM_NAME");
+    if (shm_name == NULL || shm_name[0] == '\0')
+        shm_name = DEFAULT_SHM_NAME;
 
     printf("[shm_canary] creating shared memory: %s\n", shm_name);
 

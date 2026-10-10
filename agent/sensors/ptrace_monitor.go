@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -21,7 +23,10 @@ import (
 var ptraceRequestNames = map[uint32]string{
 	4:      "PTRACE_POKETEXT",
 	5:      "PTRACE_POKEDATA",
+	6:      "PTRACE_POKEUSER",
+	13:     "PTRACE_SETREGS",
 	16:     "PTRACE_ATTACH",
+	0x4205: "PTRACE_SETREGSET",
 	0x4206: "PTRACE_SEIZE",
 }
 
@@ -35,11 +40,14 @@ type ptraceMonitorEvent struct {
 	Comm          [16]byte
 	PtraceRequest uint32
 	TargetPID     uint32
+	PidNSInum     uint32 // the caller's PID namespace
 	Addr          uint64
 }
 
-// PtraceMonitorSensor monitors ptrace() syscalls for dangerous requests
-// (PTRACE_ATTACH, PTRACE_SEIZE, PTRACE_POKETEXT, PTRACE_POKEDATA).
+// PtraceMonitorSensor monitors ptrace() syscalls for dangerous requests:
+// attaching (PTRACE_ATTACH, PTRACE_SEIZE) and writing a tracee's memory or
+// registers (PTRACE_POKETEXT, PTRACE_POKEDATA, PTRACE_POKEUSER,
+// PTRACE_SETREGS, PTRACE_SETREGSET).
 type PtraceMonitorSensor struct {
 	eventCh chan *event.HookEvent
 	tp      link.Link
@@ -47,6 +55,7 @@ type PtraceMonitorSensor struct {
 	coll    *ebpf.Collection
 	prog    *ebpf.Program
 	done    chan struct{}
+	selfNS  uint64 // the bus's PID namespace inode; 0 if unknown
 }
 
 func NewPtraceMonitorSensor() *PtraceMonitorSensor {
@@ -56,10 +65,17 @@ func NewPtraceMonitorSensor() *PtraceMonitorSensor {
 	}
 }
 
-func (s *PtraceMonitorSensor) Name() string       { return "ptrace_monitor" }
-func (s *PtraceMonitorSensor) Type() SensorType   { return SensorTypeBPF }
+func (s *PtraceMonitorSensor) Name() string     { return "ptrace_monitor" }
+func (s *PtraceMonitorSensor) Type() SensorType { return SensorTypeBPF }
 
 func (s *PtraceMonitorSensor) Start() error {
+	// Targets of callers in this namespace are looked up directly in /proc.
+	if fi, err := os.Stat("/proc/self/ns/pid"); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			s.selfNS = st.Ino
+		}
+	}
+
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(ptraceMonitorBPF))
 	if err != nil {
 		return fmt.Errorf("load BPF spec: %w", err)
@@ -154,6 +170,7 @@ func (s *PtraceMonitorSensor) readLoop() {
 				Request:     raw.PtraceRequest,
 				RequestName: reqName,
 				TargetPID:   raw.TargetPID,
+				TargetComm:  ptraceTargetComm("/proc", s.selfNS, uint64(raw.PidNSInum), raw.TargetPID),
 				Addr:        raw.Addr,
 			},
 		}

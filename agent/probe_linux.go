@@ -18,7 +18,7 @@ const probeTimeout = 5 * time.Second
 
 // ptraceProbeRequest is not a valid ptrace request. sys_enter_ptrace fires
 // before the kernel looks at it, and the ptrace sensor only reports
-// ATTACH, SEIZE, POKETEXT and POKEDATA.
+// ATTACH, SEIZE, POKETEXT, POKEDATA, POKEUSER, SETREGS and SETREGSET.
 const ptraceProbeRequest = ^uintptr(0)
 
 // hookProber fires each eBPF sensor's hook with a call that does nothing and
@@ -42,11 +42,18 @@ func (p *hookProber) probe(names []string) map[string]string {
 			// probes is a bpf() call, and sys_enter_bpf fires before the
 			// lookup runs.
 		case "shm_monitor":
-			// sys_enter_openat fires for any path. /dev/null is not under
-			// /dev/shm and is opened without O_CREAT.
+			// sys_enter_openat and sys_enter_openat2 fire for any path; the
+			// sensor hooks both and checks both heartbeats. /dev/null is not
+			// under /dev/shm and is opened without O_CREAT.
 			fd, err := unix.Openat(unix.AT_FDCWD, "/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 			if err != nil {
 				p.logger.Warn("shm_monitor probe: openat failed", zap.Error(err))
+			} else {
+				unix.Close(fd)
+			}
+			fd, err = unix.Openat2(unix.AT_FDCWD, "/dev/null", &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC})
+			if err != nil {
+				p.logger.Warn("shm_monitor probe: openat2 failed", zap.Error(err))
 			} else {
 				unix.Close(fd)
 			}

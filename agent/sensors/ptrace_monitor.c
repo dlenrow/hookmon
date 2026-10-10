@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // eBPF program: monitor ptrace() for dangerous requests
 //
-// Attaches to tracepoint/syscalls/sys_enter_ptrace and filters for
-// PTRACE_ATTACH, PTRACE_SEIZE, PTRACE_POKETEXT, PTRACE_POKEDATA.
+// Attaches to tracepoint/syscalls/sys_enter_ptrace and filters for the
+// requests that attach to a process or write its memory or registers:
+// PTRACE_ATTACH, PTRACE_SEIZE, PTRACE_POKETEXT, PTRACE_POKEDATA,
+// PTRACE_POKEUSER, PTRACE_SETREGS and PTRACE_SETREGSET.
+//
+// The target is a PID in the caller's PID namespace, which BPF on this
+// kernel cannot look up. The event carries the caller's PID namespace, and
+// Go resolves the target's comm in that namespace.
 
 //go:build ignore
 
@@ -14,12 +20,19 @@
 #define TASK_COMM_LEN 16
 #define EVENT_PTRACE_INJECT 8
 
-// ptrace request constants
-#define PTRACE_ATTACH    16
-#define PTRACE_SEIZE     0x4206
-#define PTRACE_POKETEXT  4
-#define PTRACE_POKEDATA  5
+// ptrace request constants (include/uapi/linux/ptrace.h;
+// PTRACE_SETREGS is 13 on x86 and arm, and absent on arm64)
+#define PTRACE_POKETEXT   4
+#define PTRACE_POKEDATA   5
+#define PTRACE_POKEUSER   6
+#define PTRACE_SETREGS    13
+#define PTRACE_ATTACH     16
+#define PTRACE_SETREGSET  0x4205
+#define PTRACE_SEIZE      0x4206
 
+// Mirrored by ptraceMonitorEvent in ptrace_monitor.go, which reads it with
+// binary.Read. binary.Read does not pad, so every field must be naturally
+// aligned: addr sits at offset 48.
 struct ptrace_event {
     u32 event_type;
     u32 pid;
@@ -29,8 +42,12 @@ struct ptrace_event {
     char comm[TASK_COMM_LEN];
     u32 ptrace_request;
     u32 target_pid;
+    u32 pidns_inum;   // inode number of the caller's PID namespace
     u64 addr;
 };
+
+_Static_assert(sizeof(struct ptrace_event) == 56, "ptrace_event layout changed; update ptrace_monitor.go");
+_Static_assert(__builtin_offsetof(struct ptrace_event, addr) == 48, "addr must not follow padding");
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -58,6 +75,21 @@ static __always_inline void hookmon_heartbeat(void *map) {
     }
 }
 
+// pidns_inum returns the inode number of task's active PID namespace, the
+// namespace its ptrace() target PID is resolved in (the kernel's
+// task_active_pid_ns()).
+static __always_inline u32 pidns_inum(struct task_struct *task)
+{
+    struct pid *pid = BPF_CORE_READ(task, thread_pid);
+    if (!pid)
+        return 0;
+    unsigned int level = BPF_CORE_READ(pid, level);
+    struct upid upid = {};
+    if (bpf_core_read(&upid, sizeof(upid), &pid->numbers[level]) != 0 || !upid.ns)
+        return 0;
+    return BPF_CORE_READ(upid.ns, ns.inum);
+}
+
 SEC("tracepoint/syscalls/sys_enter_ptrace")
 int trace_ptrace_enter(struct trace_event_raw_sys_enter *ctx)
 {
@@ -68,7 +100,10 @@ int trace_ptrace_enter(struct trace_event_raw_sys_enter *ctx)
     if (request != PTRACE_ATTACH &&
         request != PTRACE_SEIZE &&
         request != PTRACE_POKETEXT &&
-        request != PTRACE_POKEDATA)
+        request != PTRACE_POKEDATA &&
+        request != PTRACE_POKEUSER &&
+        request != PTRACE_SETREGS &&
+        request != PTRACE_SETREGSET)
         return 0;
 
     struct ptrace_event *e;
@@ -90,6 +125,7 @@ int trace_ptrace_enter(struct trace_event_raw_sys_enter *ctx)
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     e->ppid = BPF_CORE_READ(task, real_parent, tgid);
+    e->pidns_inum = pidns_inum(task);
 
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
