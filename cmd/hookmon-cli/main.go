@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,8 +15,9 @@ import (
 )
 
 func main() {
-	serverURL := flag.String("server", "http://localhost:8443", "hookmon-server URL")
+	serverURL := flag.String("server", "https://localhost:8443", "hookmon-server URL")
 	token := flag.String("token", "", "API authentication token")
+	caFile := flag.String("ca-file", os.Getenv("HOOKMON_CA_FILE"), "CA certificate that signed the server's certificate (default $HOOKMON_CA_FILE; system roots if empty)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -29,13 +32,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	client, err := newHTTPClient(*caFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 	cli := &CLI{
 		baseURL: strings.TrimRight(*serverURL, "/"),
 		token:   *token,
-		client:  &http.Client{},
+		client:  client,
 	}
 
-	var err error
 	switch args[0] {
 	case "events":
 		err = cli.listEvents(args[1:])
@@ -65,6 +72,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// newHTTPClient trusts caFile for the server's certificate when it is set,
+// since the API is served over TLS with the HookMon CA (step 7b).
+func newHTTPClient(caFile string) (*http.Client, error) {
+	if caFile == "" {
+		return &http.Client{}, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA file: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificates found in %s", caFile)
+	}
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}}, nil
 }
 
 func printUsage() {

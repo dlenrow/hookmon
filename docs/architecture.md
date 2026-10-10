@@ -262,7 +262,7 @@ and exits with status 1, before it connects to the database.
 
 Insecure mode runs gRPC and REST in plaintext and takes each host ID from the message, so any host can report as any other. Enrollment needs TLS, so insecure mode with enrollment tokens configured is a config error. It is for development only.
 
-`hookmon-cli` is a REST client: `events`, `hosts`, `policies` (list, `create` from JSON on stdin, `delete <id>`) and `health`. Its `--server` default is `http://localhost:8443`, and it has no option for a CA certificate. Against the HTTPS API, pass `--server https://<host>:8443` and add the CA to the system trust store.
+`hookmon-cli` is a REST client: `events`, `hosts`, `policies` (list, `create` from JSON on stdin, `delete <id>`) and `health`. Its `--server` default is `https://localhost:8443`; `--ca-file` (or `HOOKMON_CA_FILE`) names the CA that signed the server certificate.
 
 Not working yet:
 

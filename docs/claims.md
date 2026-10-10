@@ -27,10 +27,10 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | Enforcement mode available | Audit of the whole repo | No enforcement code exists. | Not true |
 | Learning mode auto-populates candidates | Audit of `server/` | No learning mode, PENDING state or candidates exist anywhere. | Not true |
 | Every way code enters a Linux process | `docs/threat-model.md` | Since step 5, the threat model lists each way code enters a process and rates its coverage. Tested: `bpf()` load and the LINK_CREATE and RAW_TRACEPOINT_OPEN attach paths, BPF inventory, LD_PRELOAD/LD_AUDIT/LD_DEBUG, ld.so.preload and ld.so.conf.d, executable RPATH, `.so` files in the four library directories, glibc dlopen (including in containers), ptrace register writes, and /dev/shm via openat and openat2. Not covered: attaches outside `bpf()`, BPF_LINK_UPDATE, dlmopen, musl and static binaries, libraries' own RUNPATH, other library directories, process_vm_writev, writes to /proc/<pid>/mem, reflective and JIT loaders, SysV shm, io_uring opens, kernel modules, binfmt_misc, and GCONV_PATH and interpreter variables. | Not true |
-| mTLS enrollment | `server/ingestion` Postgres integration tests; real `hookmon-bus` and `hookmon-server` on drl-nuc8i3bek | Since step 7a: the bus enrolls on a separate port (9444) that authenticates the server only, using a token from the server config (constant-time compare, expiry, optional single-use). The server signs the CSR and assigns the HostID as the certificate CN. Every other RPC (port 9443) requires a CA-signed client certificate, and the HostID comes from that certificate, never from the message. TLS is still opt-in until 7b. | Verified |
+| mTLS enrollment | `server/ingestion` Postgres integration tests; real `hookmon-bus` and `hookmon-server` on drl-nuc8i3bek | Since step 7a: the bus enrolls on a separate port (9444) that authenticates the server only, using a token from the server config (constant-time compare, expiry, optional single-use). The server signs the CSR and assigns the HostID as the certificate CN. Every other RPC (port 9443) requires a CA-signed client certificate, and the HostID comes from that certificate, never from the message. Since 7b, TLS is the default: the server and the bus refuse plaintext unless `--insecure` is given. | Verified |
 | SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | Audit of `server/connectors`, `cmd/hookmon-server` | The connectors exist, but `hookmon-server` cannot enable any of them, so nothing reaches a SIEM. Fixed in 7d. | Not true |
 | Allowlist scopes and learning mode on the server | Audit of `server/policy` | There is no learning mode and no PENDING state, and the allowlist is read only at startup. Fixed in 7c. | Not true |
-| Dashboard pages (event feed, policies, hosts, investigation, settings) | Audit of `dashboard/` | The pages call the real API. The WebSocket feed accepts any token and splits events across tabs, Settings is static, and nothing serves the built dashboard. Fixed in 7b and 7e. | Not true |
+| Dashboard pages (event feed, policies, hosts, investigation, settings) | Audit of `dashboard/`; `curl` against the server on drl-nuc8i3bek | Since 7b the server serves the built dashboard over TLS, with client-side routes falling back to `index.html`. The pages call the real API. Still open until 7e: the WebSocket feed accepts any token and splits events across tabs, and Settings is static. | Not true |
 | Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | Audit of `appliance/`, `deploy/` | Only the compose monitoring stack runs. Packer targets QEMU only and would fail, the ISO builder is a stub, the RPM spec and Ansible roles are broken, and the DEB ships the old binary. Fixed in 7g. | Not true |
 
 ## Step log
@@ -228,3 +228,21 @@ Known gaps:
 - `events.uid` is a 32-bit INTEGER, so events carrying UID 4294967295 ("unknown", since step 4) can't be stored. This is pulled forward from 7f into 7b.
 - `--enroll-token` is visible in the process list during the first start.
 - No AGENT_RECOVERED event is sent when a host comes back.
+
+### Step 7b: Secure by default (2026-10-10)
+
+Ran on drl-nuc8i3bek with a real Postgres (`postgres:16-alpine`, pinned by digest, removed afterwards).
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| The server refuses to start without TLS | `./bin/hookmon-server` with no certificates, plus `server/secure_test.go` | Exits 1 with "refusing to start without TLS: no TLS certificate configured: set tls.cert_file, tls.key_file and tls.ca_file (or --tls-cert, --tls-key and --tls-ca), or pass --insecure to run gRPC and REST in plaintext (development only)". | Verified |
+| The bus refuses plaintext | `hookmon-bus` with no certificate and no token, plus `agent/transport/secure_test.go` | Exits 1 with "no client certificate and no enrollment token: refusing to connect to the server without TLS; enroll with --enroll-token and --ca-file, set tls.cert_file, or pass --insecure …". `--console` is unaffected. | Verified |
+| REST over TLS | `curl --cacert` on port 8443 | `/api/v1/health` returns 200 over TLS 1.3. Without the CA the request fails; plain HTTP gets a 400. | Verified |
+| The server serves the dashboard | `curl --cacert` for `/`, `/hosts`, `/events/abc`, the assets, and `/api/v1/no-such-endpoint` | Each page path returns `dist/index.html` byte for byte. The assets return 200. An unknown API path returns a JSON 404, not the page. | Verified |
+| UID 4294967295 is stored (migration 005, BIGINT) | `server/store/postgres_test.go`; a synthetic event sent to the real server | Stored and read back with uid 4294967295 over REST and in Postgres. | Verified |
+| Real end to end | Root `hookmon-bus` enrolls with `hookmon-server` (TLS, Postgres) | Host ONLINE with 8 sensors. 148 events stored. The host went UNRESPONSIVE after the bus stopped. | Verified |
+| `hookmon-cli` works against the TLS API | `cmd/hookmon-cli/main_test.go` | The default URL is now `https://localhost:8443`, with `--ca-file` / `HOOKMON_CA_FILE`. The test passes with the CA and fails without it. | Verified |
+| No regressions | `make build-all`, `go vet ./...`, `go test -race ./...`, root `go test -race ./agent/...`, `make test-e2e` | Pass. e2e: 38 pass, 2 skip, 0 fail. | Verified |
+| `Dockerfile.server` serves the dashboard | Read the Dockerfile | Not built; the test host's disk is full. | Code reading |
+
+Still open: the appliance's nginx proxies to plain HTTP and starts the server without TLS, so it will now refuse to start (7g). The dashboard shows an enrollment command that doesn't exist (7e).

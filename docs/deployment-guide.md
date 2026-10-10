@@ -389,7 +389,7 @@ curl --cacert /etc/hookmon/tls/ca.crt -H "Authorization: Bearer <api-token>" \
 
 The host shows `ONLINE` with its sensors' health. If its heartbeats stop for `watchdog.heartbeat_timeout` (default 60 s), the server marks it `UNRESPONSIVE` and stores an AGENT_OFFLINE event.
 
-`hookmon-cli` defaults to `http://localhost:8443` and has no option for a CA certificate. Pass `--server https://hookmon.internal:8443 --token <api-token>`, and add `ca.crt` to the system trust store.
+`hookmon-cli` defaults to `https://localhost:8443`. Pass `--server https://hookmon.internal:8443 --token <api-token> --ca-file ca.crt`, or set `HOOKMON_CA_FILE`.
 
 ### Open the Dashboard
 

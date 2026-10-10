@@ -35,7 +35,7 @@ Events leave the sensor bus (`hookmon-bus`) on two paths.
 - The allowlist loads once, at startup. A policy added through the API takes effect after a restart. (step 7c)
 - The server replaces the bus's severity with its own. (step 7c)
 - The WebSocket feed accepts any non-empty token and splits events across open browser tabs. The dashboard's Settings page shows an enrollment command that does not exist. (step 7e)
-- `hookmon-cli` defaults to `http://localhost:8443` and has no option for a CA certificate. Against the HTTPS API, pass `--server https://<host>:8443` and add the CA to the system trust store.
+- `hookmon-cli` defaults to `https://localhost:8443`. Pass `--ca-file` (or set `HOOKMON_CA_FILE`) with the HookMon CA.
 - No automated end-to-end test covers the server path. Every e2e test runs the bus with `--console`. (step 7h)
 
 ## Why This Exists
