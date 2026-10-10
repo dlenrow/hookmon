@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -100,19 +102,34 @@ type Agent struct {
 	enricher *enrichment.Enricher
 }
 
+// sensorHealth returns the registry snapshot, sorted by sensor name, in the
+// form the heartbeat carries.
+func sensorHealth(reg *registry.Registry) []event.SensorHealth {
+	snap := reg.Snapshot()
+	sort.Slice(snap, func(i, j int) bool { return snap[i].Name < snap[j].Name })
+	out := make([]event.SensorHealth, len(snap))
+	for i, s := range snap {
+		out[i] = event.SensorHealth{Name: s.Name, Status: s.Status, Reason: s.Reason}
+	}
+	return out
+}
+
 // New creates a new Agent with the given configuration.
 func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 	hostname, _ := os.Hostname()
+
+	sensorNames := allSensorNames(cfg)
+	reg := registry.NewWithThreshold(sensorNames, deadThreshold(cfg))
 
 	var t transport.Transport
 	if cfg.ConsoleMode {
 		t = transport.NewConsoleTransport()
 	} else {
-		t = transport.NewGRPCTransport(cfg, logger, transport.DefaultRetryConfig())
+		gt := transport.NewGRPCTransport(cfg, logger, transport.DefaultRetryConfig())
+		gt.SetSensorSource(func() []event.SensorHealth { return sensorHealth(reg) })
+		t = gt
 	}
 
-	sensorNames := allSensorNames(cfg)
-	reg := registry.NewWithThreshold(sensorNames, deadThreshold(cfg))
 	if reg.Threshold() <= sensorInterval(cfg) {
 		logger.Warn("dead_threshold is not above heartbeat_sensor_interval; healthy sensors will flap",
 			zap.Duration("dead_threshold", reg.Threshold()), zap.Duration("interval", sensorInterval(cfg)))
@@ -163,6 +180,18 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.ConsoleMode {
 		a.logger.Info("running in console mode — events will print to stdout")
 	} else {
+		// Get a client certificate first if the bus has none: on first
+		// start with --enroll-token this enrolls with the server. It must
+		// finish before anything reads cfg.TLS or cfg.HostID.
+		if err := transport.EnsureIdentity(ctx, a.cfg, a.logger, transport.DefaultRetryConfig()); err != nil {
+			a.closeObservability()
+			if ctx.Err() != nil {
+				a.logger.Info("shut down while enrolling", zap.Error(err))
+				return nil
+			}
+			return fmt.Errorf("enrollment: %w", err)
+		}
+
 		// Keep the stream to the server up, reconnecting with backoff after
 		// any failure, until ctx is cancelled.
 		a.wg.Add(1)
@@ -371,12 +400,18 @@ func (a *Agent) shutdown() error {
 	}
 	a.wg.Wait()
 
+	a.closeObservability()
+
+	return a.transport.Close()
+}
+
+// closeObservability stops the Loki pusher and the /status and /metrics
+// server.
+func (a *Agent) closeObservability() {
 	if a.loki != nil {
 		a.loki.Close()
 	}
 	if a.metrics != nil {
 		a.metrics.Close()
 	}
-
-	return a.transport.Close()
 }

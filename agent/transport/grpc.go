@@ -77,6 +77,10 @@ type GRPCTransport struct {
 
 	eventsSent uint64 // owned by the Run goroutine
 	startTime  time.Time
+
+	// sensors returns the sensor-registry snapshot each heartbeat carries.
+	// Set before Run; nil sends heartbeats without one.
+	sensors func() []event.SensorHealth
 }
 
 // session is one ClientConn and the event stream opened on it.
@@ -101,6 +105,13 @@ func NewGRPCTransport(cfg *config.AgentConfig, logger *zap.Logger, retry RetryCo
 		inflight:  make(map[string]*event.HookEvent),
 		startTime: time.Now(),
 	}
+}
+
+// SetSensorSource sets the function that supplies the sensor-registry
+// snapshot sent with every heartbeat. It is called from Run's goroutine at
+// send time, so it must be safe for concurrent use. Call it before Run.
+func (t *GRPCTransport) SetSensorSource(fn func() []event.SensorHealth) {
+	t.sensors = fn
 }
 
 // Run connects to the server and keeps an event stream open until ctx is
@@ -233,14 +244,18 @@ func (t *GRPCTransport) sendLoop(ctx context.Context, s *session) error {
 
 func (t *GRPCTransport) send(stream hookmonv1.AgentService_StreamEventsClient, m outbound) error {
 	if m.evt == nil {
+		hb := &hookmonv1.Heartbeat{
+			HostId:        t.cfg.HostID,
+			Timestamp:     timestamppb.Now(),
+			AgentVersion:  version.Version,
+			EventsSent:    t.eventsSent,
+			UptimeSeconds: uint64(time.Since(t.startTime).Seconds()),
+		}
+		if t.sensors != nil {
+			hb.Sensors = sensorsToProto(t.sensors())
+		}
 		return stream.Send(&hookmonv1.AgentMessage{
-			Payload: &hookmonv1.AgentMessage_Heartbeat{Heartbeat: &hookmonv1.Heartbeat{
-				HostId:        t.cfg.HostID,
-				Timestamp:     timestamppb.Now(),
-				AgentVersion:  version.Version,
-				EventsSent:    t.eventsSent,
-				UptimeSeconds: uint64(time.Since(t.startTime).Seconds()),
-			}},
+			Payload: &hookmonv1.AgentMessage_Heartbeat{Heartbeat: hb},
 		})
 	}
 
@@ -516,6 +531,18 @@ func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
 	}
 
 	return pe
+}
+
+// sensorsToProto converts a sensor-registry snapshot for a heartbeat.
+func sensorsToProto(in []event.SensorHealth) []*hookmonv1.SensorHealth {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*hookmonv1.SensorHealth, len(in))
+	for i, s := range in {
+		out[i] = &hookmonv1.SensorHealth{Name: s.Name, Status: s.Status, Reason: s.Reason}
+	}
+	return out
 }
 
 func eventTypeToProto(et event.EventType) hookmonv1.EventType {

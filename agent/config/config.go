@@ -10,13 +10,29 @@ import (
 
 // AgentConfig holds the hookmon-agent configuration.
 type AgentConfig struct {
-	// HostID is the unique identifier for this agent (assigned during enrollment).
+	// HostID is the unique identifier for this agent. After enrollment it is
+	// the CN of the bus certificate, which replaces any value set here. The
+	// server takes the host ID from the certificate, not from this field.
 	HostID string `yaml:"host_id"`
 
 	// ServerAddr is the hookmon-server gRPC endpoint (host:port).
 	ServerAddr string `yaml:"server_addr"`
 
-	// TLS configuration for mTLS.
+	// EnrollAddr is the server's enrollment endpoint (host:port). Empty
+	// means the host of ServerAddr on port 9444.
+	EnrollAddr string `yaml:"enroll_addr"`
+
+	// StateDir holds the identity the bus gets at enrollment: bus.key,
+	// bus.crt and ca.crt, each mode 0600.
+	StateDir string `yaml:"state_dir"`
+
+	// EnrollToken is the enrollment secret from --enroll-token. With no
+	// certificate configured or in StateDir, the bus enrolls with it on
+	// start. Never read from the config file.
+	EnrollToken string `yaml:"-"`
+
+	// TLS configuration for mTLS. When CertFile is empty, the bus uses the
+	// certificate in StateDir.
 	TLS TLSConfig `yaml:"tls"`
 
 	// HeartbeatInterval is how often the agent sends heartbeats.
@@ -91,6 +107,7 @@ type SensorConfig struct {
 func DefaultConfig() *AgentConfig {
 	return &AgentConfig{
 		ServerAddr:              "localhost:9443",
+		StateDir:                "/var/lib/hookmon",
 		HeartbeatInterval:       30 * time.Second,
 		FallbackLogPath:         "/var/log/hookmon/fallback.jsonl",
 		LogLevel:                "info",
@@ -107,6 +124,26 @@ func DefaultConfig() *AgentConfig {
 			LibIntegrity:  true,
 			ElfRpath:      true,
 		},
+	}
+}
+
+// ApplyEnrollFlags applies the enrollment command-line flags. An empty value
+// leaves the config's setting unchanged.
+func (c *AgentConfig) ApplyEnrollFlags(token, serverAddr, enrollAddr, caFile, stateDir string) {
+	if token != "" {
+		c.EnrollToken = token
+	}
+	if serverAddr != "" {
+		c.ServerAddr = serverAddr
+	}
+	if enrollAddr != "" {
+		c.EnrollAddr = enrollAddr
+	}
+	if caFile != "" {
+		c.TLS.CAFile = caFile
+	}
+	if stateDir != "" {
+		c.StateDir = stateDir
 	}
 }
 

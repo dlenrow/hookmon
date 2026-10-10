@@ -21,24 +21,9 @@ import (
 	"github.com/dlenrow/hookmon/server/store"
 )
 
-// Config holds the hookmon-server configuration.
-type Config struct {
-	GRPCAddr     string
-	HTTPAddr     string
-	DatabaseURL  string
-	APITokens    []string
-	TLS          TLSConfig
-	Watchdog     WatchdogConfig
-	Connectors   ConnectorConfigs
-}
-
-// TLSConfig holds server TLS settings.
-type TLSConfig struct {
-	CertFile string
-	KeyFile  string
-	CAFile   string
-	Insecure bool
-}
+// stopGrace bounds how long shutdown waits for open gRPC streams. Bus
+// streams never end on their own, so GracefulStop alone would wait forever.
+const stopGrace = 5 * time.Second
 
 // ConnectorConfigs holds SIEM connector configurations.
 type ConnectorConfigs struct {
@@ -88,6 +73,13 @@ type Server struct {
 	watchdog   *Watchdog
 	connList   []connectors.Connector
 	eventCh    chan *event.HookEvent
+
+	// ready is closed once every listener is bound; the addresses below are
+	// set by then.
+	ready      chan struct{}
+	grpcAddr   string
+	enrollAddr string
+	httpAddr   string
 }
 
 // New creates a new hookmon server.
@@ -96,14 +88,44 @@ func New(cfg Config, logger *zap.Logger) *Server {
 		cfg:     cfg,
 		logger:  logger,
 		eventCh: make(chan *event.HookEvent, 1024),
+		ready:   make(chan struct{}),
 	}
 }
 
-// Run starts all server subsystems. Blocks until ctx is cancelled.
+// Ready is closed once Run has bound every listener.
+func (s *Server) Ready() <-chan struct{} { return s.ready }
+
+// GRPCAddr is the bound mutual-TLS gRPC address. Valid after Ready.
+func (s *Server) GRPCAddr() string { return s.grpcAddr }
+
+// EnrollAddr is the bound enrollment address, or "" if enrollment is off.
+// Valid after Ready.
+func (s *Server) EnrollAddr() string { return s.enrollAddr }
+
+// HTTPAddr is the bound REST API address. Valid after Ready.
+func (s *Server) HTTPAddr() string { return s.httpAddr }
+
+// Run starts all server subsystems. Blocks until ctx is cancelled. It
+// returns an error if the configuration is invalid or a listener cannot be
+// bound.
 func (s *Server) Run(ctx context.Context) error {
+	if err := s.cfg.Validate(); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	tokens, err := hcrypto.NewTokenSet(s.cfg.Enrollment.Tokens)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	var ca *hcrypto.CA
+	if tokens.Len() > 0 {
+		ca, err = hcrypto.LoadCA(s.cfg.TLS.CAFile, s.cfg.TLS.CAKeyFile)
+		if err != nil {
+			return fmt.Errorf("load enrollment CA: %w", err)
+		}
+	}
+
 	// Initialize store
-	var err error
-	s.store, err = store.NewStore(ctx, s.cfg.DatabaseURL, s.logger)
+	s.store, err = store.NewStore(ctx, s.cfg.Database.URL, s.logger)
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
 	}
@@ -128,6 +150,11 @@ func (s *Server) Run(ctx context.Context) error {
 		s.policy.LoadAllowlist(entries)
 	}
 
+	useTLS := s.cfg.UseTLS()
+	if !useTLS {
+		s.logger.Warn("gRPC is running without TLS: host IDs are taken from each message, so any host can report as any other")
+	}
+
 	// Initialize ingestion server
 	var ingestConnectors []ingestion.Connector
 	for _, c := range s.connList {
@@ -139,25 +166,99 @@ func (s *Server) Run(ctx context.Context) error {
 		Logger:       s.logger,
 		Connectors:   ingestConnectors,
 		RateLimiter:  ingestion.NewRateLimiter(100, 200),
+		Insecure:     !useTLS,
 	})
+
+	// gRPC servers. The event stream needs a verified client certificate at
+	// the TLS handshake. Enrollment has its own listener, where the server
+	// authenticates itself but the bus, which has no certificate yet, does
+	// not; only the Enroll RPC is registered there.
+	var grpcOpts []grpc.ServerOption
+	if useTLS {
+		creds, err := hcrypto.LoadServerTLS(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile, s.cfg.TLS.CAFile)
+		if err != nil {
+			return fmt.Errorf("load TLS: %w", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+	}
+	s.grpcServer = grpc.NewServer(grpcOpts...)
+	hookmonv1.RegisterAgentServiceServer(s.grpcServer, s.ingestion)
+
+	var enrollServer *grpc.Server
+	if ca != nil {
+		creds, err := hcrypto.LoadEnrollServerTLS(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("load enrollment TLS: %w", err)
+		}
+		enrollServer = grpc.NewServer(grpc.Creds(creds))
+		hookmonv1.RegisterAgentServiceServer(enrollServer, ingestion.NewEnroller(ingestion.EnrollerConfig{
+			Store:        s.store,
+			Tokens:       tokens,
+			CA:           ca,
+			CertValidity: s.cfg.Enrollment.CertValidity,
+			Logger:       s.logger,
+		}))
+	} else {
+		s.logger.Info("no enrollment tokens configured; enrollment listener disabled")
+	}
+
+	// Bind every listener before starting anything, so a bad address fails
+	// Run instead of leaving a server running without one of them.
+	grpcLis, err := net.Listen("tcp", s.cfg.GRPCAddr)
+	if err != nil {
+		return fmt.Errorf("listen gRPC: %w", err)
+	}
+	listeners := []net.Listener{grpcLis}
+	closeAll := func() {
+		for _, l := range listeners {
+			l.Close()
+		}
+	}
+	var enrollLis net.Listener
+	if enrollServer != nil {
+		enrollLis, err = net.Listen("tcp", s.cfg.EnrollAddr)
+		if err != nil {
+			closeAll()
+			return fmt.Errorf("listen enrollment: %w", err)
+		}
+		listeners = append(listeners, enrollLis)
+		s.enrollAddr = enrollLis.Addr().String()
+	}
+	httpLis, err := net.Listen("tcp", s.cfg.HTTPAddr)
+	if err != nil {
+		closeAll()
+		return fmt.Errorf("listen HTTP: %w", err)
+	}
+	s.grpcAddr = grpcLis.Addr().String()
+	s.httpAddr = httpLis.Addr().String()
+	close(s.ready)
 
 	// Start subsystems
 	var wg sync.WaitGroup
 
-	// gRPC server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runGRPC(ctx); err != nil {
+		if err := serveGRPC(ctx, s.grpcServer, grpcLis); err != nil {
 			s.logger.Error("gRPC server error", zap.Error(err))
 		}
 	}()
+
+	if enrollServer != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := serveGRPC(ctx, enrollServer, enrollLis); err != nil {
+				s.logger.Error("enrollment server error", zap.Error(err))
+			}
+		}()
+	}
 
 	// HTTP API server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runHTTP(ctx); err != nil {
+		if err := s.runHTTP(ctx, httpLis); err != nil {
 			s.logger.Error("HTTP server error", zap.Error(err))
 		}
 	}()
@@ -171,8 +272,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 
 	s.logger.Info("hookmon server started",
-		zap.String("grpc", s.cfg.GRPCAddr),
-		zap.String("http", s.cfg.HTTPAddr),
+		zap.String("grpc", s.grpcAddr),
+		zap.String("enroll", s.enrollAddr),
+		zap.String("http", s.httpAddr),
+		zap.Bool("tls", useTLS),
 	)
 
 	<-ctx.Done()
@@ -181,39 +284,34 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) runGRPC(ctx context.Context) error {
-	var opts []grpc.ServerOption
-
-	if !s.cfg.TLS.Insecure && s.cfg.TLS.CertFile != "" {
-		creds, err := hcrypto.LoadServerTLS(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile, s.cfg.TLS.CAFile)
-		if err != nil {
-			return fmt.Errorf("load TLS: %w", err)
-		}
-		opts = append(opts, grpc.Creds(creds))
-	}
-
-	s.grpcServer = grpc.NewServer(opts...)
-	hookmonv1.RegisterAgentServiceServer(s.grpcServer, s.ingestion)
-
-	lis, err := net.Listen("tcp", s.cfg.GRPCAddr)
-	if err != nil {
-		return fmt.Errorf("listen gRPC: %w", err)
-	}
-
+// serveGRPC serves srv on lis until ctx is cancelled, then stops it,
+// waiting at most stopGrace for open streams.
+func serveGRPC(ctx context.Context, srv *grpc.Server, lis net.Listener) error {
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
-		s.grpcServer.GracefulStop()
+		done := make(chan struct{})
+		go func() {
+			srv.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(stopGrace):
+			srv.Stop()
+		}
 	}()
-
-	return s.grpcServer.Serve(lis)
+	err := srv.Serve(lis)
+	<-stopped
+	return err
 }
 
-func (s *Server) runHTTP(ctx context.Context) error {
+func (s *Server) runHTTP(ctx context.Context, lis net.Listener) error {
 	apiSrv := api.NewServer(s.store, s.logger, s.ingestion.GetEventChannel())
-	router := apiSrv.Router(s.cfg.APITokens)
+	router := apiSrv.Router(s.cfg.API.Tokens)
 
 	s.httpServer = &http.Server{
-		Addr:    s.cfg.HTTPAddr,
 		Handler: router,
 	}
 
@@ -224,7 +322,7 @@ func (s *Server) runHTTP(ctx context.Context) error {
 		s.httpServer.Shutdown(shutdownCtx)
 	}()
 
-	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+	if err := s.httpServer.Serve(lis); err != http.ErrServerClosed {
 		return err
 	}
 	return nil

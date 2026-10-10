@@ -47,12 +47,10 @@ func (m *memStore) InsertEvent(_ context.Context, evt *event.HookEvent) error {
 	return nil
 }
 
-func (m *memStore) UpsertHost(context.Context, *event.Host) error { return nil }
-
-func (m *memStore) UpdateHostHeartbeat(_ context.Context, id string, ts time.Time) error {
+func (m *memStore) UpdateHostHeartbeat(_ context.Context, hb *event.HostHeartbeat) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.heartbeats[id] = ts
+	m.heartbeats[hb.HostID] = hb.ReceivedAt
 	return nil
 }
 
@@ -93,8 +91,11 @@ func startServer(t *testing.T, addr string, store *memStore) (*grpc.Server, stri
 	if err != nil {
 		t.Fatalf("listen %s: %v", addr, err)
 	}
+	// These tests exercise reconnection over plaintext gRPC, so the server
+	// runs in its insecure development mode, where the host ID comes from
+	// each message. enroll_test.go covers mutual TLS.
 	srv := grpc.NewServer()
-	hookmonv1.RegisterAgentServiceServer(srv, ingestion.NewIngestionServer(ingestion.IngestionConfig{Store: store}))
+	hookmonv1.RegisterAgentServiceServer(srv, ingestion.NewIngestionServer(ingestion.IngestionConfig{Store: store, Insecure: true}))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	return srv, lis.Addr().String()

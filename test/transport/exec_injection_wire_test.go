@@ -26,7 +26,8 @@ func TestExecInjWireRoundTrip(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	srv := grpc.NewServer()
-	hookmonv1.RegisterAgentServiceServer(srv, ingestion.NewIngestionServer(ingestion.IngestionConfig{Store: store}))
+	// Plaintext, so the insecure development mode (see startServer).
+	hookmonv1.RegisterAgentServiceServer(srv, ingestion.NewIngestionServer(ingestion.IngestionConfig{Store: store, Insecure: true}))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 

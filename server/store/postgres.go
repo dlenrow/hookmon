@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -402,22 +403,20 @@ func (s *Store) GetEvent(ctx context.Context, id string) (*event.HookEvent, erro
 
 // GetHost retrieves a single host by ID.
 func (s *Store) GetHost(ctx context.Context, id string) (*event.Host, error) {
-	const query = `
-		SELECT id, hostname, ip_address, agent_version, os_info,
-			status, enrolled_at, last_heartbeat, last_event_at
-		FROM hosts WHERE id = $1`
+	query := `SELECT ` + hostColumns + ` FROM hosts WHERE id = $1`
 
-	var h event.Host
-	var statusStr string
-	err := s.pool.QueryRow(ctx, query, id).Scan(
-		&h.ID, &h.Hostname, &h.IPAddress, &h.AgentVersion, &h.OSInfo,
-		&statusStr, &h.EnrolledAt, &h.LastHeartbeat, &h.LastEventAt,
-	)
+	rows, err := s.pool.Query(ctx, query, id)
 	if err != nil {
 		return nil, fmt.Errorf("query host: %w", err)
 	}
-	h.Status = event.HostStatus(statusStr)
-	return &h, nil
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("query host: %w", err)
+		}
+		return nil, fmt.Errorf("host not found: %s", id)
+	}
+	return scanHost(rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +578,14 @@ func scanAllowlistEntry(rows pgx.Rows) (*event.AllowlistEntry, error) {
 // Hosts
 // ---------------------------------------------------------------------------
 
-// UpsertHost inserts a host or updates it if it already exists.
+// hostColumns is the column list scanHost reads, in order.
+const hostColumns = `
+	id, hostname, ip_address, agent_version,
+	os_info, status, enrolled_at,
+	last_heartbeat, last_event_at, sensors`
+
+// UpsertHost inserts a host or updates it if it already exists. It does not
+// touch the sensor snapshot.
 func (s *Store) UpsertHost(ctx context.Context, h *event.Host) error {
 	const query = `
 		INSERT INTO hosts (
@@ -612,15 +618,56 @@ func (s *Store) UpsertHost(ctx context.Context, h *event.Host) error {
 	return nil
 }
 
-// GetHosts retrieves all registered hosts ordered by hostname.
-func (s *Store) GetHosts(ctx context.Context) ([]*event.Host, error) {
-	const query = `
-		SELECT
+// EnrollHost adds a newly enrolled host. When consumeFingerprint is not
+// empty, the enrollment token is single-use: its fingerprint is recorded in
+// enrollment_token_uses in the same transaction, and if it is already there
+// EnrollHost returns crypto.ErrTokenUsed and adds nothing. The primary key
+// makes this safe against concurrent enrollments and server restarts.
+func (s *Store) EnrollHost(ctx context.Context, h *event.Host, tokenName, consumeFingerprint string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin enrollment: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	if consumeFingerprint != "" {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO enrollment_token_uses (token_fingerprint, token_name, host_id, used_at)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (token_fingerprint) DO NOTHING`,
+			consumeFingerprint, tokenName, h.ID, h.EnrolledAt,
+		)
+		if err != nil {
+			return fmt.Errorf("record token use: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return hcrypto.ErrTokenUsed
+		}
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO hosts (
 			id, hostname, ip_address, agent_version,
 			os_info, status, enrolled_at,
 			last_heartbeat, last_event_at
-		FROM hosts
-		ORDER BY hostname`
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		h.ID, h.Hostname, h.IPAddress, h.AgentVersion,
+		h.OSInfo, string(h.Status), h.EnrolledAt,
+		h.LastHeartbeat, h.LastEventAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert host %s: %w", h.ID, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit enrollment: %w", err)
+	}
+	return nil
+}
+
+// GetHosts retrieves all registered hosts ordered by hostname.
+func (s *Store) GetHosts(ctx context.Context) ([]*event.Host, error) {
+	query := `SELECT ` + hostColumns + ` FROM hosts ORDER BY hostname`
 
 	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
@@ -643,23 +690,53 @@ func (s *Store) GetHosts(ctx context.Context) ([]*event.Host, error) {
 	return hosts, nil
 }
 
-// UpdateHostHeartbeat updates only the last_heartbeat timestamp and sets status to ONLINE.
-func (s *Store) UpdateHostHeartbeat(ctx context.Context, hostID string, timestamp time.Time) error {
+// UpdateHostHeartbeat records a heartbeat: the receive time, the bus
+// version and the sensor snapshot, and sets the host ONLINE. It returns an
+// error if the host is not enrolled.
+func (s *Store) UpdateHostHeartbeat(ctx context.Context, hb *event.HostHeartbeat) error {
+	sensorsJSON, err := json.Marshal(hb.Sensors)
+	if err != nil {
+		return fmt.Errorf("marshal sensors: %w", err)
+	}
+	if hb.Sensors == nil {
+		sensorsJSON = nil
+	}
+
 	const query = `
 		UPDATE hosts
-		SET last_heartbeat = $1, status = $2
-		WHERE id = $3`
+		SET last_heartbeat = $1,
+			status = $2,
+			agent_version = CASE WHEN $3 = '' THEN agent_version ELSE $3 END,
+			sensors = $4
+		WHERE id = $5`
 
-	tag, err := s.pool.Exec(ctx, query, timestamp, string(event.HostOnline), hostID)
+	tag, err := s.pool.Exec(ctx, query,
+		hb.ReceivedAt, string(event.HostOnline), hb.AgentVersion, sensorsJSON, hb.HostID)
 	if err != nil {
-		return fmt.Errorf("update heartbeat for host %s: %w", hostID, err)
+		return fmt.Errorf("update heartbeat for host %s: %w", hb.HostID, err)
 	}
 
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("host %s not found", hostID)
+		return fmt.Errorf("host %s not found", hb.HostID)
 	}
 
 	return nil
+}
+
+// MarkHostUnresponsive sets an ONLINE host UNRESPONSIVE if its last
+// heartbeat is still older than staleBefore. It reports whether it changed
+// the host, so a heartbeat that lands between the watchdog's query and this
+// update keeps the host online and raises no alert.
+func (s *Store) MarkHostUnresponsive(ctx context.Context, hostID string, staleBefore time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE hosts SET status = $1
+		WHERE id = $2 AND status = $3 AND last_heartbeat < $4`,
+		string(event.HostUnresponsive), hostID, string(event.HostOnline), staleBefore,
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark host %s unresponsive: %w", hostID, err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // GetStaleHosts returns hosts whose last heartbeat is older than the given threshold
@@ -667,11 +744,7 @@ func (s *Store) UpdateHostHeartbeat(ctx context.Context, hostID string, timestam
 func (s *Store) GetStaleHosts(ctx context.Context, threshold time.Duration) ([]*event.Host, error) {
 	cutoff := time.Now().UTC().Add(-threshold)
 
-	const query = `
-		SELECT
-			id, hostname, ip_address, agent_version,
-			os_info, status, enrolled_at,
-			last_heartbeat, last_event_at
+	query := `SELECT ` + hostColumns + `
 		FROM hosts
 		WHERE last_heartbeat < $1
 		ORDER BY last_heartbeat ASC`
@@ -697,21 +770,28 @@ func (s *Store) GetStaleHosts(ctx context.Context, threshold time.Duration) ([]*
 	return hosts, nil
 }
 
-// scanHost reads a single host row from the current row cursor.
+// scanHost reads a single host row, selected with hostColumns, from the
+// current row cursor.
 func scanHost(rows pgx.Rows) (*event.Host, error) {
 	var h event.Host
 	var status string
+	var sensorsJSON []byte
 
 	err := rows.Scan(
 		&h.ID, &h.Hostname, &h.IPAddress, &h.AgentVersion,
 		&h.OSInfo, &status, &h.EnrolledAt,
-		&h.LastHeartbeat, &h.LastEventAt,
+		&h.LastHeartbeat, &h.LastEventAt, &sensorsJSON,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	h.Status = event.HostStatus(status)
+	if len(sensorsJSON) > 0 {
+		if err := json.Unmarshal(sensorsJSON, &h.Sensors); err != nil {
+			return nil, fmt.Errorf("unmarshal sensors: %w", err)
+		}
+	}
 	return &h, nil
 }
 

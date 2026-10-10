@@ -15,16 +15,17 @@ import (
 	"google.golang.org/grpc/status"
 
 	hookmonv1 "github.com/dlenrow/hookmon/gen/hookmon/v1"
+	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
 	"github.com/dlenrow/hookmon/pkg/event"
-	"github.com/google/uuid"
 )
 
 // Store is the interface that the ingestion layer requires for persistence.
 // Implementations are provided by the server/store package.
 type Store interface {
 	InsertEvent(ctx context.Context, evt *event.HookEvent) error
-	UpsertHost(ctx context.Context, host *event.Host) error
-	UpdateHostHeartbeat(ctx context.Context, hostID string, ts time.Time) error
+	// UpdateHostHeartbeat records a heartbeat from an enrolled host and marks
+	// it online. It returns an error if the host is not enrolled.
+	UpdateHostHeartbeat(ctx context.Context, hb *event.HostHeartbeat) error
 }
 
 // PolicyEngine evaluates events against the allowlist and returns a policy result.
@@ -43,8 +44,13 @@ type hostState struct {
 	agentVersion  string
 }
 
-// IngestionServer implements the hookmonv1.AgentServiceServer interface,
-// handling bidirectional event streams and agent enrollment.
+// IngestionServer implements the event stream of hookmonv1.AgentService on
+// the mutual-TLS listener. Enrollment is served separately, by Enroller.
+//
+// The host ID of every event and heartbeat is the CN of the bus's verified
+// client certificate. A host ID inside a message is ignored, so one host
+// cannot send as another. A stream without a verified host certificate is
+// refused, unless Insecure is set.
 type IngestionServer struct {
 	hookmonv1.UnimplementedAgentServiceServer
 
@@ -53,6 +59,7 @@ type IngestionServer struct {
 	logger       *zap.Logger
 	connectors   []Connector
 	rateLimiter  *RateLimiter
+	insecure     bool
 
 	// eventCh broadcasts processed events for WebSocket consumers.
 	// Sent events have already been validated, enriched with policy results,
@@ -63,27 +70,20 @@ type IngestionServer struct {
 	// Protected by hostMu.
 	hostMu      sync.RWMutex
 	hostTracker map[string]*hostState
-
-	// enrollmentToken is the shared secret agents must present during enrollment.
-	enrollmentToken string
-
-	// caCert and caKey are used to sign agent CSRs during enrollment.
-	// In production these would be backed by a proper CA; here we store the
-	// raw PEM bytes for the signing operation.
-	caCert []byte
-	caKey  []byte
 }
 
 // IngestionConfig holds the parameters needed to construct an IngestionServer.
 type IngestionConfig struct {
-	Store           Store
-	PolicyEngine    PolicyEngine
-	Logger          *zap.Logger
-	Connectors      []Connector
-	RateLimiter     *RateLimiter
-	EnrollmentToken string
-	CACert          []byte
-	CAKey           []byte
+	Store        Store
+	PolicyEngine PolicyEngine
+	Logger       *zap.Logger
+	Connectors   []Connector
+	RateLimiter  *RateLimiter
+
+	// Insecure accepts streams that carry no verified client certificate and
+	// takes the host ID from each message instead. Any host can then report
+	// as any other. Only for a server running without TLS, in development.
+	Insecure bool
 
 	// EventChannelSize controls the buffer size of the event broadcast channel.
 	// Defaults to 256 if zero.
@@ -101,16 +101,14 @@ func NewIngestionServer(cfg IngestionConfig) *IngestionServer {
 		chanSize = 256
 	}
 	return &IngestionServer{
-		store:           cfg.Store,
-		policyEngine:    cfg.PolicyEngine,
-		logger:          cfg.Logger,
-		connectors:      cfg.Connectors,
-		rateLimiter:     cfg.RateLimiter,
-		eventCh:         make(chan *event.HookEvent, chanSize),
-		hostTracker:     make(map[string]*hostState),
-		enrollmentToken: cfg.EnrollmentToken,
-		caCert:          cfg.CACert,
-		caKey:           cfg.CAKey,
+		store:        cfg.Store,
+		policyEngine: cfg.PolicyEngine,
+		logger:       cfg.Logger,
+		connectors:   cfg.Connectors,
+		rateLimiter:  cfg.RateLimiter,
+		insecure:     cfg.Insecure,
+		eventCh:      make(chan *event.HookEvent, chanSize),
+		hostTracker:  make(map[string]*hostState),
 	}
 }
 
@@ -130,7 +128,13 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 	if p, ok := peer.FromContext(stream.Context()); ok {
 		peerAddr = p.Addr.String()
 	}
-	s.logger.Info("agent stream connected", zap.String("peer", peerAddr))
+
+	id, err := s.identify(stream.Context())
+	if err != nil {
+		s.logger.Warn("agent stream refused", zap.String("peer", peerAddr), zap.Error(err))
+		return status.Errorf(codes.Unauthenticated, "%v", err)
+	}
+	s.logger.Info("agent stream connected", zap.String("peer", peerAddr), zap.String("host_id", id.hostID))
 
 	for {
 		msg, err := stream.Recv()
@@ -148,7 +152,7 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 
 		switch {
 		case msg.GetEvent() != nil:
-			if err := s.handleEvent(stream, msg.GetEvent()); err != nil {
+			if err := s.handleEvent(stream, id, msg.GetEvent()); err != nil {
 				s.logger.Error("failed to handle event",
 					zap.String("peer", peerAddr),
 					zap.Error(err),
@@ -160,7 +164,7 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 			}
 
 		case msg.GetHeartbeat() != nil:
-			s.handleHeartbeat(stream.Context(), msg.GetHeartbeat())
+			s.handleHeartbeat(stream.Context(), id, msg.GetHeartbeat())
 
 		default:
 			s.logger.Warn("received empty agent message", zap.String("peer", peerAddr))
@@ -168,13 +172,55 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 	}
 }
 
+// streamIdentity is who is on the other end of one stream.
+type streamIdentity struct {
+	// hostID is the CN of the verified client certificate. It is empty only
+	// on an Insecure server for a peer without one; the host ID in each
+	// message is then used as sent.
+	hostID string
+	// mismatchLogged limits the "message names another host" warning to
+	// once per stream.
+	mismatchLogged bool
+}
+
+// identify returns the host ID from the stream's verified client
+// certificate. Without one, the stream is refused unless the server is
+// Insecure.
+func (s *IngestionServer) identify(ctx context.Context) (*streamIdentity, error) {
+	hostID, err := hcrypto.HostIDFromPeer(ctx)
+	if err == nil {
+		return &streamIdentity{hostID: hostID}, nil
+	}
+	if s.insecure {
+		return &streamIdentity{}, nil
+	}
+	return nil, err
+}
+
+// resolve returns the host ID to record for a message that names claimed.
+func (s *IngestionServer) resolve(id *streamIdentity, claimed, what string) string {
+	if id.hostID == "" {
+		return claimed
+	}
+	if claimed != "" && claimed != id.hostID && !id.mismatchLogged {
+		id.mismatchLogged = true
+		s.logger.Warn("message names a different host than its certificate; using the certificate's",
+			zap.String("host_id", id.hostID),
+			zap.String("claimed_host_id", claimed),
+			zap.String("message", what),
+		)
+	}
+	return id.hostID
+}
+
 // handleEvent processes a single event from the agent stream. It validates
 // the event, checks rate limits, evaluates policy, persists the event, fans
 // out to connectors and the WebSocket channel, and sends an ack back to
 // the agent.
-func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEventsServer, protoEvt *hookmonv1.HookEvent) error {
+func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEventsServer, id *streamIdentity, protoEvt *hookmonv1.HookEvent) error {
 	// Convert from proto representation to canonical event model.
 	evt := protoToEvent(protoEvt)
+	evt.HostID = s.resolve(id, evt.HostID, "event")
 
 	// Validate required fields.
 	if err := ValidateEvent(evt); err != nil {
@@ -246,25 +292,22 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 	return nil
 }
 
-// handleHeartbeat updates the in-memory host tracker and persists the
-// heartbeat timestamp to the store.
-func (s *IngestionServer) handleHeartbeat(ctx context.Context, hb *hookmonv1.Heartbeat) {
-	if hb.HostId == "" {
+// handleHeartbeat updates the in-memory host tracker and records the
+// heartbeat and its sensor snapshot in the store. The time recorded is the
+// server's receive time: the bus's own timestamp could hold a host "online"
+// past the watchdog timeout if its clock ran ahead.
+func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentity, hb *hookmonv1.Heartbeat) {
+	hostID := s.resolve(id, hb.HostId, "heartbeat")
+	if hostID == "" {
 		s.logger.Warn("received heartbeat with empty host_id")
 		return
 	}
 
-	var now time.Time
-	if hb.Timestamp != nil {
-		now = hb.Timestamp.AsTime()
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
+	now := time.Now().UTC()
 
 	// Update in-memory tracker.
 	s.hostMu.Lock()
-	s.hostTracker[hb.HostId] = &hostState{
+	s.hostTracker[hostID] = &hostState{
 		lastHeartbeat: now,
 		agentVersion:  hb.AgentVersion,
 	}
@@ -272,19 +315,42 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, hb *hookmonv1.Hea
 
 	// Persist heartbeat to the store.
 	if s.store != nil {
-		if err := s.store.UpdateHostHeartbeat(ctx, hb.HostId, now); err != nil {
+		rec := &event.HostHeartbeat{
+			HostID:       hostID,
+			ReceivedAt:   now,
+			AgentVersion: hb.AgentVersion,
+			Sensors:      protoToSensors(hb.Sensors),
+		}
+		if err := s.store.UpdateHostHeartbeat(ctx, rec); err != nil {
 			s.logger.Error("failed to update host heartbeat",
-				zap.String("host_id", hb.HostId),
+				zap.String("host_id", hostID),
 				zap.Error(err),
 			)
 		}
 	}
 
 	s.logger.Debug("heartbeat received",
-		zap.String("host_id", hb.HostId),
+		zap.String("host_id", hostID),
 		zap.String("agent_version", hb.AgentVersion),
 		zap.Uint64("events_sent", hb.EventsSent),
+		zap.Int("sensors", len(hb.Sensors)),
 	)
+}
+
+// protoToSensors converts a heartbeat's sensor snapshot. Nil entries are
+// skipped.
+func protoToSensors(in []*hookmonv1.SensorHealth) []event.SensorHealth {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]event.SensorHealth, 0, len(in))
+	for _, s := range in {
+		if s == nil {
+			continue
+		}
+		out = append(out, event.SensorHealth{Name: s.Name, Status: s.Status, Reason: s.Reason})
+	}
+	return out
 }
 
 // sendEventAck sends an EventAck message back to the agent over the stream.
@@ -297,80 +363,10 @@ func (s *IngestionServer) sendEventAck(stream hookmonv1.AgentService_StreamEvent
 	})
 }
 
-// Enroll handles agent enrollment. It validates the enrollment token, signs
-// the agent's CSR, registers the host in the store, and returns the signed
-// certificate along with the CA certificate so the agent can establish mTLS.
-func (s *IngestionServer) Enroll(ctx context.Context, req *hookmonv1.EnrollRequest) (*hookmonv1.EnrollResponse, error) {
-	// Validate the enrollment token.
-	if req.EnrollmentToken == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "enrollment token is required")
-	}
-	if req.EnrollmentToken != s.enrollmentToken {
-		s.logger.Warn("enrollment rejected: invalid token",
-			zap.String("hostname", req.Hostname),
-		)
-		return nil, status.Errorf(codes.PermissionDenied, "invalid enrollment token")
-	}
-
-	// Validate request fields.
-	if req.Hostname == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "hostname is required")
-	}
-	if len(req.Csr) == 0 {
-		return nil, status.Errorf(codes.InvalidArgument, "CSR is required")
-	}
-
-	// Generate a unique host ID for this agent.
-	hostID := uuid.New().String()
-
-	// Sign the CSR.
-	// In a production implementation this would parse the CSR, validate it,
-	// and sign it with the CA private key. For now we return the CA cert
-	// as a placeholder for the signed cert — the real signing logic belongs
-	// in pkg/crypto and will be wired in when that package is implemented.
-	signedCert := s.caCert // placeholder: replace with real CSR signing
-
-	// Register the host in the store.
-	now := time.Now().UTC()
-	host := &event.Host{
-		ID:            hostID,
-		Hostname:      req.Hostname,
-		AgentVersion:  req.AgentVersion,
-		OSInfo:        req.OsInfo,
-		Status:        event.HostOnline,
-		EnrolledAt:    now,
-		LastHeartbeat: now,
-	}
-
-	if s.store != nil {
-		if err := s.store.UpsertHost(ctx, host); err != nil {
-			s.logger.Error("failed to register host during enrollment",
-				zap.String("hostname", req.Hostname),
-				zap.Error(err),
-			)
-			return nil, status.Errorf(codes.Internal, "failed to register host: %v", err)
-		}
-	}
-
-	// Track the new host in memory.
-	s.hostMu.Lock()
-	s.hostTracker[hostID] = &hostState{
-		lastHeartbeat: now,
-		agentVersion:  req.AgentVersion,
-	}
-	s.hostMu.Unlock()
-
-	s.logger.Info("agent enrolled",
-		zap.String("host_id", hostID),
-		zap.String("hostname", req.Hostname),
-		zap.String("agent_version", req.AgentVersion),
-	)
-
-	return &hookmonv1.EnrollResponse{
-		HostId:     hostID,
-		SignedCert: signedCert,
-		CaCert:     s.caCert,
-	}, nil
+// Enroll is not served on the mutual-TLS listener: a bus that needs to
+// enroll has no client certificate to reach it with. See Enroller.
+func (s *IngestionServer) Enroll(context.Context, *hookmonv1.EnrollRequest) (*hookmonv1.EnrollResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "Enroll is served on the enrollment listener, not here")
 }
 
 // GetHostLastHeartbeat returns the last heartbeat time for a host.

@@ -10,9 +10,12 @@ import "google/protobuf/timestamp.proto";
 service AgentService {
   // StreamEvents is a bidirectional stream for event delivery.
   // Agent sends events; server sends acknowledgements.
+  // Served on the mutual-TLS listener. The server takes the host ID from the
+  // client certificate's CN and ignores host_id in every message.
   rpc StreamEvents(stream AgentMessage) returns (stream ServerMessage);
 
-  // Enroll registers a new agent with the server.
+  // Enroll registers a new agent with the server. Served only on the
+  // enrollment listener, which uses TLS with server authentication only.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
 }
 
@@ -31,11 +34,23 @@ message ServerMessage {
 }
 
 message Heartbeat {
+  // host_id is informational. Over mutual TLS the server uses the host ID in
+  // the client certificate instead.
   string host_id = 1;
   google.protobuf.Timestamp timestamp = 2;
   string agent_version = 3;
   uint64 events_sent = 4;
   uint64 uptime_seconds = 5;
+  // sensors is the bus's sensor-registry snapshot, one entry per sensor.
+  repeated SensorHealth sensors = 6;
+}
+
+// SensorHealth is one sensor's state in the bus's sensor registry.
+message SensorHealth {
+  string name = 1;
+  // status is alive, dead, failed, unverifiable or unknown.
+  string status = 2;
+  string reason = 3;
 }
 
 message EventAck {
@@ -59,13 +74,18 @@ message PolicyRule {
 message EnrollRequest {
   string enrollment_token = 1;
   string hostname = 2;
+  // csr is a PEM-encoded certificate request. The server signs only its
+  // public key; it ignores the requested subject and names.
   bytes csr = 3;
   string os_info = 4;
   string agent_version = 5;
 }
 
 message EnrollResponse {
+  // host_id is assigned by the server and is the signed certificate's CN.
   string host_id = 1;
+  // signed_cert is the PEM-encoded client certificate.
   bytes signed_cert = 2;
+  // ca_cert is the PEM-encoded CA certificate that signed it.
   bytes ca_cert = 3;
 }

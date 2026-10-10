@@ -29,8 +29,11 @@ const (
 type AgentServiceClient interface {
 	// StreamEvents is a bidirectional stream for event delivery.
 	// Agent sends events; server sends acknowledgements.
+	// Served on the mutual-TLS listener. The server takes the host ID from the
+	// client certificate's CN and ignores host_id in every message.
 	StreamEvents(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, ServerMessage], error)
-	// Enroll registers a new agent with the server.
+	// Enroll registers a new agent with the server. Served only on the
+	// enrollment listener, which uses TLS with server authentication only.
 	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
 }
 
@@ -71,8 +74,11 @@ func (c *agentServiceClient) Enroll(ctx context.Context, in *EnrollRequest, opts
 type AgentServiceServer interface {
 	// StreamEvents is a bidirectional stream for event delivery.
 	// Agent sends events; server sends acknowledgements.
+	// Served on the mutual-TLS listener. The server takes the host ID from the
+	// client certificate's CN and ignores host_id in every message.
 	StreamEvents(grpc.BidiStreamingServer[AgentMessage, ServerMessage]) error
-	// Enroll registers a new agent with the server.
+	// Enroll registers a new agent with the server. Served only on the
+	// enrollment listener, which uses TLS with server authentication only.
 	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }

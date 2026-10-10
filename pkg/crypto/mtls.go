@@ -36,6 +36,37 @@ func LoadServerTLS(certFile, keyFile, caFile string) (credentials.TransportCrede
 	return credentials.NewTLS(tlsCfg), nil
 }
 
+// LoadEnrollServerTLS loads TLS credentials for the enrollment listener.
+// The server authenticates itself with its certificate; clients present no
+// certificate, since a bus enrolls to get one. Only the Enroll RPC is served
+// there, and it requires an enrollment token.
+func LoadEnrollServerTLS(certFile, keyFile string) (credentials.TransportCredentials, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server keypair: %w", err)
+	}
+	return credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.NoClientCert,
+		MinVersion:   tls.VersionTLS13,
+	}), nil
+}
+
+// EnrollClientTLS returns TLS credentials for a bus enrolling: it verifies
+// the server against caPEM and presents no client certificate. An empty
+// serverName means the host in the dial address.
+func EnrollClientTLS(caPEM []byte, serverName string) (credentials.TransportCredentials, error) {
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+	return credentials.NewTLS(&tls.Config{
+		RootCAs:    caPool,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS13,
+	}), nil
+}
+
 // LoadClientTLS loads TLS credentials for the gRPC agent client with mutual TLS.
 func LoadClientTLS(certFile, keyFile, caFile, serverName string) (credentials.TransportCredentials, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)

@@ -187,12 +187,16 @@ func (*ServerMessage_Ack) isServerMessage_Payload() {}
 func (*ServerMessage_PolicyUpdate) isServerMessage_Payload() {}
 
 type Heartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// host_id is informational. Over mutual TLS the server uses the host ID in
+	// the client certificate instead.
 	HostId        string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	AgentVersion  string                 `protobuf:"bytes,3,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
 	EventsSent    uint64                 `protobuf:"varint,4,opt,name=events_sent,json=eventsSent,proto3" json:"events_sent,omitempty"`
 	UptimeSeconds uint64                 `protobuf:"varint,5,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
+	// sensors is the bus's sensor-registry snapshot, one entry per sensor.
+	Sensors       []*SensorHealth `protobuf:"bytes,6,rep,name=sensors,proto3" json:"sensors,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -262,6 +266,75 @@ func (x *Heartbeat) GetUptimeSeconds() uint64 {
 	return 0
 }
 
+func (x *Heartbeat) GetSensors() []*SensorHealth {
+	if x != nil {
+		return x.Sensors
+	}
+	return nil
+}
+
+// SensorHealth is one sensor's state in the bus's sensor registry.
+type SensorHealth struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// status is alive, dead, failed, unverifiable or unknown.
+	Status        string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SensorHealth) Reset() {
+	*x = SensorHealth{}
+	mi := &file_hookmon_v1_agent_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SensorHealth) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SensorHealth) ProtoMessage() {}
+
+func (x *SensorHealth) ProtoReflect() protoreflect.Message {
+	mi := &file_hookmon_v1_agent_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SensorHealth.ProtoReflect.Descriptor instead.
+func (*SensorHealth) Descriptor() ([]byte, []int) {
+	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SensorHealth) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SensorHealth) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *SensorHealth) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 type EventAck struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
@@ -272,7 +345,7 @@ type EventAck struct {
 
 func (x *EventAck) Reset() {
 	*x = EventAck{}
-	mi := &file_hookmon_v1_agent_proto_msgTypes[3]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -284,7 +357,7 @@ func (x *EventAck) String() string {
 func (*EventAck) ProtoMessage() {}
 
 func (x *EventAck) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_agent_proto_msgTypes[3]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -297,7 +370,7 @@ func (x *EventAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventAck.ProtoReflect.Descriptor instead.
 func (*EventAck) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{3}
+	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *EventAck) GetEventId() string {
@@ -323,7 +396,7 @@ type PolicyUpdate struct {
 
 func (x *PolicyUpdate) Reset() {
 	*x = PolicyUpdate{}
-	mi := &file_hookmon_v1_agent_proto_msgTypes[4]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -335,7 +408,7 @@ func (x *PolicyUpdate) String() string {
 func (*PolicyUpdate) ProtoMessage() {}
 
 func (x *PolicyUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_agent_proto_msgTypes[4]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -348,7 +421,7 @@ func (x *PolicyUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyUpdate.ProtoReflect.Descriptor instead.
 func (*PolicyUpdate) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PolicyUpdate) GetRules() []*PolicyRule {
@@ -372,7 +445,7 @@ type PolicyRule struct {
 
 func (x *PolicyRule) Reset() {
 	*x = PolicyRule{}
-	mi := &file_hookmon_v1_agent_proto_msgTypes[5]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -384,7 +457,7 @@ func (x *PolicyRule) String() string {
 func (*PolicyRule) ProtoMessage() {}
 
 func (x *PolicyRule) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_agent_proto_msgTypes[5]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -397,7 +470,7 @@ func (x *PolicyRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyRule.ProtoReflect.Descriptor instead.
 func (*PolicyRule) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PolicyRule) GetId() string {
@@ -446,16 +519,18 @@ type EnrollRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	EnrollmentToken string                 `protobuf:"bytes,1,opt,name=enrollment_token,json=enrollmentToken,proto3" json:"enrollment_token,omitempty"`
 	Hostname        string                 `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Csr             []byte                 `protobuf:"bytes,3,opt,name=csr,proto3" json:"csr,omitempty"`
-	OsInfo          string                 `protobuf:"bytes,4,opt,name=os_info,json=osInfo,proto3" json:"os_info,omitempty"`
-	AgentVersion    string                 `protobuf:"bytes,5,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// csr is a PEM-encoded certificate request. The server signs only its
+	// public key; it ignores the requested subject and names.
+	Csr           []byte `protobuf:"bytes,3,opt,name=csr,proto3" json:"csr,omitempty"`
+	OsInfo        string `protobuf:"bytes,4,opt,name=os_info,json=osInfo,proto3" json:"os_info,omitempty"`
+	AgentVersion  string `protobuf:"bytes,5,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnrollRequest) Reset() {
 	*x = EnrollRequest{}
-	mi := &file_hookmon_v1_agent_proto_msgTypes[6]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -467,7 +542,7 @@ func (x *EnrollRequest) String() string {
 func (*EnrollRequest) ProtoMessage() {}
 
 func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_agent_proto_msgTypes[6]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -480,7 +555,7 @@ func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollRequest.ProtoReflect.Descriptor instead.
 func (*EnrollRequest) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *EnrollRequest) GetEnrollmentToken() string {
@@ -519,17 +594,20 @@ func (x *EnrollRequest) GetAgentVersion() string {
 }
 
 type EnrollResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	HostId        string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	SignedCert    []byte                 `protobuf:"bytes,2,opt,name=signed_cert,json=signedCert,proto3" json:"signed_cert,omitempty"`
-	CaCert        []byte                 `protobuf:"bytes,3,opt,name=ca_cert,json=caCert,proto3" json:"ca_cert,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// host_id is assigned by the server and is the signed certificate's CN.
+	HostId string `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	// signed_cert is the PEM-encoded client certificate.
+	SignedCert []byte `protobuf:"bytes,2,opt,name=signed_cert,json=signedCert,proto3" json:"signed_cert,omitempty"`
+	// ca_cert is the PEM-encoded CA certificate that signed it.
+	CaCert        []byte `protobuf:"bytes,3,opt,name=ca_cert,json=caCert,proto3" json:"ca_cert,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnrollResponse) Reset() {
 	*x = EnrollResponse{}
-	mi := &file_hookmon_v1_agent_proto_msgTypes[7]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -541,7 +619,7 @@ func (x *EnrollResponse) String() string {
 func (*EnrollResponse) ProtoMessage() {}
 
 func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_hookmon_v1_agent_proto_msgTypes[7]
+	mi := &file_hookmon_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -554,7 +632,7 @@ func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResponse.ProtoReflect.Descriptor instead.
 func (*EnrollResponse) Descriptor() ([]byte, []int) {
-	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_hookmon_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *EnrollResponse) GetHostId() string {
@@ -591,14 +669,19 @@ const file_hookmon_v1_agent_proto_rawDesc = "" +
 	"\rServerMessage\x12(\n" +
 	"\x03ack\x18\x01 \x01(\v2\x14.hookmon.v1.EventAckH\x00R\x03ack\x12?\n" +
 	"\rpolicy_update\x18\x02 \x01(\v2\x18.hookmon.v1.PolicyUpdateH\x00R\fpolicyUpdateB\t\n" +
-	"\apayload\"\xcb\x01\n" +
+	"\apayload\"\xff\x01\n" +
 	"\tHeartbeat\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12#\n" +
 	"\ragent_version\x18\x03 \x01(\tR\fagentVersion\x12\x1f\n" +
 	"\vevents_sent\x18\x04 \x01(\x04R\n" +
 	"eventsSent\x12%\n" +
-	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\"A\n" +
+	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\x122\n" +
+	"\asensors\x18\x06 \x03(\v2\x18.hookmon.v1.SensorHealthR\asensors\"R\n" +
+	"\fSensorHealth\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"A\n" +
 	"\bEventAck\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1a\n" +
 	"\baccepted\x18\x02 \x01(\bR\baccepted\"<\n" +
@@ -639,35 +722,37 @@ func file_hookmon_v1_agent_proto_rawDescGZIP() []byte {
 	return file_hookmon_v1_agent_proto_rawDescData
 }
 
-var file_hookmon_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_hookmon_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_hookmon_v1_agent_proto_goTypes = []any{
 	(*AgentMessage)(nil),          // 0: hookmon.v1.AgentMessage
 	(*ServerMessage)(nil),         // 1: hookmon.v1.ServerMessage
 	(*Heartbeat)(nil),             // 2: hookmon.v1.Heartbeat
-	(*EventAck)(nil),              // 3: hookmon.v1.EventAck
-	(*PolicyUpdate)(nil),          // 4: hookmon.v1.PolicyUpdate
-	(*PolicyRule)(nil),            // 5: hookmon.v1.PolicyRule
-	(*EnrollRequest)(nil),         // 6: hookmon.v1.EnrollRequest
-	(*EnrollResponse)(nil),        // 7: hookmon.v1.EnrollResponse
-	(*HookEvent)(nil),             // 8: hookmon.v1.HookEvent
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(*SensorHealth)(nil),          // 3: hookmon.v1.SensorHealth
+	(*EventAck)(nil),              // 4: hookmon.v1.EventAck
+	(*PolicyUpdate)(nil),          // 5: hookmon.v1.PolicyUpdate
+	(*PolicyRule)(nil),            // 6: hookmon.v1.PolicyRule
+	(*EnrollRequest)(nil),         // 7: hookmon.v1.EnrollRequest
+	(*EnrollResponse)(nil),        // 8: hookmon.v1.EnrollResponse
+	(*HookEvent)(nil),             // 9: hookmon.v1.HookEvent
+	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
 }
 var file_hookmon_v1_agent_proto_depIdxs = []int32{
-	8, // 0: hookmon.v1.AgentMessage.event:type_name -> hookmon.v1.HookEvent
-	2, // 1: hookmon.v1.AgentMessage.heartbeat:type_name -> hookmon.v1.Heartbeat
-	3, // 2: hookmon.v1.ServerMessage.ack:type_name -> hookmon.v1.EventAck
-	4, // 3: hookmon.v1.ServerMessage.policy_update:type_name -> hookmon.v1.PolicyUpdate
-	9, // 4: hookmon.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
-	5, // 5: hookmon.v1.PolicyUpdate.rules:type_name -> hookmon.v1.PolicyRule
-	0, // 6: hookmon.v1.AgentService.StreamEvents:input_type -> hookmon.v1.AgentMessage
-	6, // 7: hookmon.v1.AgentService.Enroll:input_type -> hookmon.v1.EnrollRequest
-	1, // 8: hookmon.v1.AgentService.StreamEvents:output_type -> hookmon.v1.ServerMessage
-	7, // 9: hookmon.v1.AgentService.Enroll:output_type -> hookmon.v1.EnrollResponse
-	8, // [8:10] is the sub-list for method output_type
-	6, // [6:8] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	9,  // 0: hookmon.v1.AgentMessage.event:type_name -> hookmon.v1.HookEvent
+	2,  // 1: hookmon.v1.AgentMessage.heartbeat:type_name -> hookmon.v1.Heartbeat
+	4,  // 2: hookmon.v1.ServerMessage.ack:type_name -> hookmon.v1.EventAck
+	5,  // 3: hookmon.v1.ServerMessage.policy_update:type_name -> hookmon.v1.PolicyUpdate
+	10, // 4: hookmon.v1.Heartbeat.timestamp:type_name -> google.protobuf.Timestamp
+	3,  // 5: hookmon.v1.Heartbeat.sensors:type_name -> hookmon.v1.SensorHealth
+	6,  // 6: hookmon.v1.PolicyUpdate.rules:type_name -> hookmon.v1.PolicyRule
+	0,  // 7: hookmon.v1.AgentService.StreamEvents:input_type -> hookmon.v1.AgentMessage
+	7,  // 8: hookmon.v1.AgentService.Enroll:input_type -> hookmon.v1.EnrollRequest
+	1,  // 9: hookmon.v1.AgentService.StreamEvents:output_type -> hookmon.v1.ServerMessage
+	8,  // 10: hookmon.v1.AgentService.Enroll:output_type -> hookmon.v1.EnrollResponse
+	9,  // [9:11] is the sub-list for method output_type
+	7,  // [7:9] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_hookmon_v1_agent_proto_init() }
@@ -690,7 +775,7 @@ func file_hookmon_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hookmon_v1_agent_proto_rawDesc), len(file_hookmon_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

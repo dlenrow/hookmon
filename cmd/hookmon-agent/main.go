@@ -28,6 +28,11 @@ func main() {
 	statusAddr := flag.String("status-addr", "", "bind address for /status and /metrics (e.g. 127.0.0.1); overrides config")
 	dlopenProbe := flag.String("dlopen-probe", "", "path to the hookmon-dlopen-probe helper; overrides config")
 	scanRpath := flag.String("scan-rpath", "", "scan a directory for ELF RPATH issues and exit (e.g. /usr/bin)")
+	enrollToken := flag.String("enroll-token", "", "enrollment token: with no certificate yet, enroll with the server on start")
+	serverAddr := flag.String("server-addr", "", "hookmon-server gRPC address (host:port); overrides config")
+	enrollAddr := flag.String("enroll-addr", "", "hookmon-server enrollment address (host:port); default: the server-addr host on port 9444")
+	caFile := flag.String("ca-file", "", "CA certificate that signed the server's certificate; overrides config")
+	stateDir := flag.String("state-dir", "", "directory for the enrolled key and certificates (default /var/lib/hookmon); overrides config")
 	flag.Parse()
 
 	if *showVersion {
@@ -73,6 +78,7 @@ func main() {
 	if *dlopenProbe != "" {
 		cfg.DlopenProbePath = *dlopenProbe
 	}
+	cfg.ApplyEnrollFlags(*enrollToken, *serverAddr, *enrollAddr, *caFile, *stateDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 

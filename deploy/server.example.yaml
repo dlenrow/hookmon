@@ -1,0 +1,74 @@
+# hookmon-server configuration (example).
+#
+# Install as /etc/hookmon/server.yaml, owned by root, mode 0600: it holds the
+# database password and the enrollment secrets. Command-line flags override
+# the values here. Unknown keys are an error.
+
+# Mutual-TLS gRPC listener. Buses stream events and heartbeats here; the TLS
+# handshake requires a client certificate signed by tls.ca_file, and the
+# server takes each bus's host ID from that certificate.
+grpc_addr: ":9443"
+
+# Enrollment listener. TLS authenticates the server only, because a bus that
+# is enrolling has no certificate yet. Only the Enroll RPC is served here,
+# and it needs an enrollment token. Runs only when enrollment.tokens is set.
+enroll_addr: ":9444"
+
+# REST API and WebSocket.
+http_addr: ":8443"
+
+tls:
+  # The server's certificate and key, used on both gRPC listeners. The
+  # certificate must name the address buses dial (DNS or IP SAN).
+  cert_file: /etc/hookmon/tls/server.crt
+  key_file: /etc/hookmon/tls/server.key
+  # The CA that signs bus certificates and verifies them on grpc_addr.
+  ca_file: /etc/hookmon/tls/ca.crt
+  # That CA's private key. Only enrollment uses it, to sign bus
+  # certificates. Keep it root-only.
+  ca_key_file: /etc/hookmon/tls/ca.key
+  # true runs gRPC without TLS. Host IDs are then whatever each bus claims.
+  # Development only.
+  insecure: false
+
+  # One way to make these files:
+  #   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  #     -keyout ca.key -out ca.crt -days 3650 -subj "/CN=hookmon CA"
+  #   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  #     -keyout server.key -out server.csr -subj "/CN=hookmon.internal"
+  #   openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  #     -days 825 -out server.crt \
+  #     -extfile <(printf "subjectAltName=DNS:hookmon.internal\nextendedKeyUsage=serverAuth")
+
+database:
+  url: "postgres://hookmon:CHANGE-ME@localhost:5432/hookmon?sslmode=disable"
+
+api:
+  # Bearer tokens for the REST API.
+  tokens: []
+
+enrollment:
+  # Lifetime of the client certificates the server issues.
+  cert_validity: 8760h
+  # Enrollment secrets. A bus enrolls once, on first start:
+  #   hookmon-bus --enroll-token <secret> --server-addr hookmon.internal:9443 \
+  #     --ca-file /path/to/ca.crt
+  # It stores its key and certificate under /var/lib/hookmon and needs no
+  # token after that. Each token needs a unique name, a secret of at least
+  # 32 characters (openssl rand -hex 32) and an expiry. A single_use token
+  # enrolls one host; the server records its use in the database, so it
+  # stays used across restarts.
+  tokens:
+    - name: initial-rollout
+      secret: "REPLACE-WITH-openssl-rand-hex-32-OUTPUT-0000000000000000"
+      expires: 2026-12-31T00:00:00Z
+      single_use: false
+
+watchdog:
+  # A host with no heartbeat for heartbeat_timeout is marked UNRESPONSIVE and
+  # an AGENT_OFFLINE event is raised. Keep it at least twice the bus's
+  # heartbeat_interval (30s by default).
+  check_interval: 15s
+  heartbeat_timeout: 60s
+
+# connectors: SIEM connector settings arrive with fix plan step 7d.

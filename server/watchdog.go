@@ -13,11 +13,11 @@ import (
 // WatchdogConfig controls the anti-tampering heartbeat watchdog.
 type WatchdogConfig struct {
 	// CheckInterval is how often the watchdog scans for stale hosts.
-	CheckInterval time.Duration
+	CheckInterval time.Duration `yaml:"check_interval"`
 
 	// HeartbeatTimeout is how long since last heartbeat before a host
 	// is considered unresponsive. Should be >= 2x agent heartbeat interval.
-	HeartbeatTimeout time.Duration
+	HeartbeatTimeout time.Duration `yaml:"heartbeat_timeout"`
 }
 
 // DefaultWatchdogConfig returns sensible defaults.
@@ -40,7 +40,9 @@ type Watchdog struct {
 // WatchdogStore is the storage interface the watchdog requires.
 type WatchdogStore interface {
 	GetStaleHosts(ctx context.Context, threshold time.Duration) ([]*event.Host, error)
-	UpsertHost(ctx context.Context, host *event.Host) error
+	// MarkHostUnresponsive sets an ONLINE host UNRESPONSIVE if its last
+	// heartbeat is still before staleBefore, and reports whether it did.
+	MarkHostUnresponsive(ctx context.Context, hostID string, staleBefore time.Time) (bool, error)
 	InsertEvent(ctx context.Context, evt *event.HookEvent) error
 }
 
@@ -81,6 +83,7 @@ func (w *Watchdog) Run(ctx context.Context) {
 }
 
 func (w *Watchdog) check(ctx context.Context) {
+	staleBefore := time.Now().UTC().Add(-w.cfg.HeartbeatTimeout)
 	staleHosts, err := w.store.GetStaleHosts(ctx, w.cfg.HeartbeatTimeout)
 	if err != nil {
 		w.logger.Error("watchdog: failed to query stale hosts", zap.Error(err))
@@ -92,17 +95,22 @@ func (w *Watchdog) check(ctx context.Context) {
 			continue // Already marked
 		}
 
+		// Mark the host unresponsive only if no heartbeat arrived since the
+		// query; otherwise it is back online and there is nothing to raise.
+		marked, err := w.store.MarkHostUnresponsive(ctx, host.ID, staleBefore)
+		if err != nil {
+			w.logger.Error("watchdog: failed to update host status", zap.Error(err))
+			continue
+		}
+		if !marked {
+			continue
+		}
+
 		w.logger.Warn("host heartbeat timeout — generating AGENT_OFFLINE alert",
 			zap.String("host_id", host.ID),
 			zap.String("hostname", host.Hostname),
 			zap.Time("last_heartbeat", host.LastHeartbeat),
 		)
-
-		// Mark host as unresponsive
-		host.Status = event.HostUnresponsive
-		if err := w.store.UpsertHost(ctx, host); err != nil {
-			w.logger.Error("watchdog: failed to update host status", zap.Error(err))
-		}
 
 		// Generate AGENT_OFFLINE event (CRITICAL / SEV-1)
 		alertEvt := &event.HookEvent{

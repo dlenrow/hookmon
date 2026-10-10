@@ -275,4 +275,27 @@ type Host struct {
 	EnrolledAt    time.Time  `json:"enrolled_at"`
 	LastHeartbeat time.Time  `json:"last_heartbeat"`
 	LastEventAt   *time.Time `json:"last_event_at,omitempty"`
+
+	// Sensors is the sensor-registry snapshot from the host's latest
+	// heartbeat.
+	Sensors []SensorHealth `json:"sensors,omitempty"`
+}
+
+// SensorHealth is one sensor's state as the bus's sensor registry reports it.
+type SensorHealth struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // alive, dead, failed, unverifiable or unknown
+	Reason string `json:"reason,omitempty"`
+}
+
+// HostHeartbeat is a heartbeat as the server records it.
+type HostHeartbeat struct {
+	// HostID is the authenticated host: the CN of the bus's client
+	// certificate.
+	HostID string
+	// ReceivedAt is the server's clock when the heartbeat arrived. The bus's
+	// own timestamp is not used, so a host's clock cannot hold it online.
+	ReceivedAt   time.Time
+	AgentVersion string
+	Sensors      []SensorHealth
 }

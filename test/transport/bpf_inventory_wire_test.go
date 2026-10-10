@@ -30,9 +30,7 @@ func (m *bpfEventStore) InsertEvent(_ context.Context, evt *event.HookEvent) err
 	return nil
 }
 
-func (m *bpfEventStore) UpsertHost(context.Context, *event.Host) error { return nil }
-
-func (m *bpfEventStore) UpdateHostHeartbeat(context.Context, string, time.Time) error { return nil }
+func (m *bpfEventStore) UpdateHostHeartbeat(context.Context, *event.HostHeartbeat) error { return nil }
 
 func (m *bpfEventStore) get(id string) *event.HookEvent {
 	m.mu.Lock()
@@ -50,7 +48,8 @@ func TestWire_BPFInventoryAndDetail(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	srv := grpc.NewServer()
-	hookmonv1.RegisterAgentServiceServer(srv, ingestion.NewIngestionServer(ingestion.IngestionConfig{Store: store}))
+	// Plaintext, so the insecure development mode (see startServer).
+	hookmonv1.RegisterAgentServiceServer(srv, ingestion.NewIngestionServer(ingestion.IngestionConfig{Store: store, Insecure: true}))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
