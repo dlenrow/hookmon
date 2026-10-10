@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/dlenrow/hookmon/agent/enrichment"
+	"github.com/dlenrow/hookmon/agent/proccache"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -46,6 +47,10 @@ type rpathExecEvent struct {
 // the loaded binary; Go analyzes each binary version once, through an LRU
 // cache keyed by that identity, and emits one ELF_RPATH event per binary
 // version whose highest risk is MEDIUM or above, on its first exec.
+//
+// Every exec record also goes into the process cache (proccache.Default),
+// which the file sensors read when a writer has exited before they could
+// read /proc.
 type ElfRpathSensor struct {
 	eventCh chan *event.HookEvent
 	tp      link.Link
@@ -54,6 +59,8 @@ type ElfRpathSensor struct {
 	prog    *ebpf.Program
 	done    chan struct{}
 	cache   *RpathCache
+	procs   *proccache.Cache
+	feeding bool
 }
 
 func NewElfRpathSensor() *ElfRpathSensor {
@@ -61,6 +68,7 @@ func NewElfRpathSensor() *ElfRpathSensor {
 		eventCh: make(chan *event.HookEvent, 256),
 		done:    make(chan struct{}),
 		cache:   NewRpathCache(rpathCacheCap),
+		procs:   proccache.Default,
 	}
 }
 
@@ -98,12 +106,17 @@ func (s *ElfRpathSensor) Start() error {
 		return fmt.Errorf("create ringbuf reader: %w", err)
 	}
 
+	s.procs.AddFeeder()
+	s.feeding = true
 	go s.readLoop()
 	return nil
 }
 
 func (s *ElfRpathSensor) Stop() error {
 	close(s.done)
+	if s.feeding {
+		s.procs.RemoveFeeder()
+	}
 	if s.reader != nil {
 		s.reader.Close()
 	}
@@ -143,6 +156,10 @@ func (s *ElfRpathSensor) readLoop() {
 			continue
 		}
 
+		// Before the analysis, which may open and hash the binary, so a file
+		// sensor waiting for this process is not kept waiting.
+		s.procs.Put(execEntry(&raw))
+
 		hookEvt := s.handleExec(&raw)
 		if hookEvt == nil {
 			continue
@@ -153,6 +170,24 @@ func (s *ElfRpathSensor) readLoop() {
 			// Dropped: let the next exec of this binary report it.
 			s.cache.unclaimEmit(execFileID(&raw))
 		}
+	}
+}
+
+// execEntry is the process cache's record of one exec. It is made for every
+// exec, including those whose binary the RPATH analysis skips. A filename
+// that fills the buffer may be truncated, so it is left out.
+func execEntry(raw *rpathExecEvent) proccache.Entry {
+	exe := nullTermStr(raw.Filename[:])
+	if len(exe) >= len(raw.Filename)-1 {
+		exe = ""
+	}
+	return proccache.Entry{
+		PID:  raw.PID,
+		PPID: raw.PPID,
+		UID:  raw.UID,
+		GID:  raw.GID,
+		Comm: nullTermStr(raw.Comm[:]),
+		Exe:  exe,
 	}
 }
 

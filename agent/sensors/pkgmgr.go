@@ -10,10 +10,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dlenrow/hookmon/agent/proccache"
 )
 
 // unknownID is the UID and GID reported when the process that changed a file
-// exited before the sensor could read /proc/<pid>/status. It is (uid_t)-1,
+// exited before the sensor could read /proc/<pid>/status and is not in the
+// exec cache either. It is (uid_t)-1,
 // which the kernel never assigns, so severity rules that treat UID 0 as root
 // do not fire on it, and it cannot be mistaken for a real user.
 const unknownID = ^uint32(0)
@@ -27,6 +30,18 @@ const (
 	procMemoMax = 4096
 	// maxAncestry bounds the walk up the parent chain.
 	maxAncestry = 64
+	// execRecordWait bounds how long a lookup waits for the exec record of a
+	// writer that is gone from /proc and not yet in the exec cache. The
+	// kernel queues that record when the writer execs, before it can write
+	// anything, so it is normally cached before the fanotify event is read.
+	// It lags only while elf_rpath's reader works through records queued
+	// ahead of it; each uncached binary there is opened and parsed, and a
+	// risky one hashed, which can take tens of milliseconds for a large
+	// binary. 200 ms leaves room for several of those. The watcher reads
+	// events on one goroutine, so the bound is also how long one such event
+	// can delay the events behind it; that is why it is not longer, and why
+	// a PID that timed out is not waited for again within procMemoTTL.
+	execRecordWait = 200 * time.Millisecond
 )
 
 // pkgManagerBins are the package-manager executables whose writes are
@@ -79,7 +94,7 @@ func pkgManagerName(exe string, argv []string) string {
 
 // procInfo is what the sensor learned about the process behind a file event.
 type procInfo struct {
-	Known bool // /proc/<pid> was read, now or within procMemoTTL
+	Known bool // read from /proc/<pid> (now or within procMemoTTL) or the exec cache
 	UID   uint32
 	GID   uint32
 	PPID  uint32
@@ -103,33 +118,57 @@ type procMemo struct {
 }
 
 // procReader reads a process's identity and package-manager ancestry from
-// procfs.
+// procfs, and falls back to the exec cache (proccache) for processes that
+// have exited.
 //
 // The process that wrote a file may exit before the sensor reads its event
-// (ldconfig, run by a dpkg trigger, exits right after renaming its new
-// ld.so.cache into place). When /proc/<pid> is gone the reader falls back to
-// what it read for the same PID within the last procMemoTTL. The sensors
-// look up every event in a watched directory, including the temporary files
-// written next to watched ones (ld.so.cache~, sed's temp file, dpkg's
-// .dpkg-new), so the memo is usually filled while the writer is alive.
-// If there is no memo entry either, the result is unknown: no package-manager
-// downgrade, and unknownID instead of a UID. The sensor never assumes a
-// package manager it did not see.
+// (cp, sed -i and mv exit right after writing; ldconfig, run by a dpkg
+// trigger, exits right after renaming its new ld.so.cache into place). When
+// /proc/<pid> is gone the reader uses, in order:
+//   - what it read for the same PID within the last procMemoTTL, unless the
+//     exec cache shows the PID exec'd again after that read. The sensors look
+//     up every event in a watched directory, including the temporary files
+//     written next to watched ones (ld.so.cache~, sed's temp file, dpkg's
+//     .dpkg-new), so the memo is often filled while the writer is alive;
+//   - the exec cache, waiting up to execRecordWait for the writer's exec
+//     record if it has not arrived yet.
+//
+// The ancestry walk uses the exec cache for each ancestor that is gone from
+// /proc or is a zombie, so it still reaches a package manager whose
+// maintainer-script shell has exited.
+//
+// If neither source has the process, the result is unknown: no
+// package-manager downgrade, and unknownID instead of a UID. That remains
+// the case for a writer that never exec'd while elf_rpath was running (a
+// forked subshell, a daemon started before the bus) and has exited, and for
+// every exited writer when elf_rpath is disabled, since nothing then fills
+// the cache. The sensor never assumes a package manager it did not see.
 type procReader struct {
-	root string
-	ttl  time.Duration
-	now  func() time.Time
+	root     string
+	ttl      time.Duration
+	now      func() time.Time
+	cache    *proccache.Cache
+	execWait time.Duration
 
-	mu   sync.Mutex
-	memo map[uint32]procMemo
+	mu     sync.Mutex
+	memo   map[uint32]procMemo
+	missed map[uint32]time.Time // PIDs whose wait for an exec record timed out
 }
 
 func newProcReader(root string) *procReader {
-	return &procReader{root: root, ttl: procMemoTTL, now: time.Now, memo: make(map[uint32]procMemo)}
+	return &procReader{
+		root:     root,
+		ttl:      procMemoTTL,
+		now:      time.Now,
+		cache:    proccache.Default,
+		execWait: execRecordWait,
+		memo:     make(map[uint32]procMemo),
+		missed:   make(map[uint32]time.Time),
+	}
 }
 
-// lookup returns what is known about pid now, or from the memo if the
-// process has exited.
+// lookup returns what is known about pid now, or from the memo or the exec
+// cache if the process has exited.
 func (r *procReader) lookup(pid uint32) procInfo {
 	if pid == 0 {
 		return procInfo{}
@@ -149,11 +188,58 @@ func (r *procReader) lookup(pid uint32) procInfo {
 		return info
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if m, ok := r.memo[pid]; ok && now.Sub(m.at) <= r.ttl {
+	m, haveMemo := r.memo[pid]
+	r.mu.Unlock()
+	if haveMemo && now.Sub(m.at) <= r.ttl {
+		if e, ok := r.cache.Get(pid); ok && e.ExecTime.After(m.at) {
+			return r.fromExec(e) // exec'd again after the memo was read
+		}
 		return m.info
 	}
+	if e, ok := r.waitExec(pid, now); ok {
+		return r.fromExec(e)
+	}
 	return procInfo{}
+}
+
+// waitExec returns pid's exec record, waiting for it unless an earlier wait
+// for the same PID timed out within procMemoTTL; otherwise every event from
+// one unknown writer would pay the wait again.
+func (r *procReader) waitExec(pid uint32, now time.Time) (proccache.Entry, bool) {
+	r.mu.Lock()
+	at, missed := r.missed[pid]
+	r.mu.Unlock()
+	if missed && now.Sub(at) <= r.ttl {
+		return r.cache.Get(pid)
+	}
+	e, ok := r.cache.Wait(pid, r.execWait)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ok {
+		delete(r.missed, pid)
+		return e, true
+	}
+	r.missed[pid] = now
+	if len(r.missed) > procMemoMax {
+		for p, t := range r.missed {
+			if now.Sub(t) > r.ttl {
+				delete(r.missed, p)
+			}
+		}
+	}
+	return proccache.Entry{}, false
+}
+
+// fromExec describes an exited process from its exec record.
+func (r *procReader) fromExec(e proccache.Entry) procInfo {
+	return procInfo{
+		Known:  true,
+		UID:    e.UID,
+		GID:    e.GID,
+		PPID:   e.PPID,
+		Comm:   e.Comm,
+		PkgMgr: r.pkgManagerAncestor(e.Exe, nil, e.PPID),
+	}
 }
 
 func (r *procReader) read(pid uint32) (procInfo, bool) {
@@ -162,30 +248,58 @@ func (r *procReader) read(pid uint32) (procInfo, bool) {
 		return procInfo{}, false
 	}
 	info := procInfo{Known: true, UID: st.uid, GID: st.gid, PPID: st.ppid, Comm: st.name}
-	info.PkgMgr = r.pkgManagerAncestor(pid, st.ppid)
+	exe, argv := r.exeOf(pid, st)
+	info.PkgMgr = r.pkgManagerAncestor(exe, argv, st.ppid)
 	return info, true
 }
 
-// pkgManagerAncestor walks from pid up the parent chain and returns the first
-// package manager found. The walk stops before init (PID 1) and at the first
-// process that cannot be read; a writer whose parent already exited has been
-// reparented, so its original ancestry is lost and nothing is found.
-func (r *procReader) pkgManagerAncestor(pid, ppid uint32) string {
-	cur, next := pid, ppid
+// exeOf returns the executable and command line of a process whose /proc
+// entry exists. A zombie (exited, not yet reaped) keeps its status but has
+// no exe link or command line; its executable then comes from the exec
+// cache, if the cached exec has the same parent.
+func (r *procReader) exeOf(pid uint32, st procStatus) (string, []string) {
+	if st.zombie {
+		if e, ok := r.cache.Get(pid); ok && e.PPID == st.ppid {
+			return e.Exe, nil
+		}
+		return "", nil
+	}
+	exe, _ := os.Readlink(filepath.Join(r.root, strconv.FormatUint(uint64(pid), 10), "exe"))
+	return exe, readCmdline(r.root, pid)
+}
+
+// ancestor returns the executable, command line and parent of a process in
+// a writer's ancestry: from /proc while its entry exists, else from the exec
+// cache, whose parent is the one at exec time.
+func (r *procReader) ancestor(pid uint32) (exe string, argv []string, ppid uint32, ok bool) {
+	if st, err := readProcStatus(r.root, pid); err == nil {
+		exe, argv = r.exeOf(pid, st)
+		return exe, argv, st.ppid, true
+	}
+	if e, ok := r.cache.Get(pid); ok {
+		return e.Exe, nil, e.PPID, true
+	}
+	return "", nil, 0, false
+}
+
+// pkgManagerAncestor checks a process (by its exe and argv), then walks up
+// from its parent ppid, and returns the first package manager found. The
+// walk stops before init (PID 1) and at the first process found neither in
+// /proc nor in the exec cache. A live writer whose parent already exited has
+// been reparented, so /proc no longer names its original parent and nothing
+// above it is found.
+func (r *procReader) pkgManagerAncestor(exe string, argv []string, ppid uint32) string {
 	for depth := 0; depth < maxAncestry; depth++ {
-		exe, _ := os.Readlink(filepath.Join(r.root, strconv.FormatUint(uint64(cur), 10), "exe"))
-		if name := pkgManagerName(exe, readCmdline(r.root, cur)); name != "" {
+		if name := pkgManagerName(exe, argv); name != "" {
 			return name
 		}
-		if next <= 1 {
+		if ppid <= 1 {
 			return ""
 		}
-		cur = next
-		st, err := readProcStatus(r.root, cur)
-		if err != nil {
+		var ok bool
+		if exe, argv, ppid, ok = r.ancestor(ppid); !ok {
 			return ""
 		}
-		next = st.ppid
 	}
 	return ""
 }
@@ -193,9 +307,10 @@ func (r *procReader) pkgManagerAncestor(pid, ppid uint32) string {
 type procStatus struct {
 	name           string
 	ppid, uid, gid uint32
+	zombie         bool // exited, not yet reaped
 }
 
-// readProcStatus parses Name, PPid and the real Uid and Gid from
+// readProcStatus parses Name, State, PPid and the real Uid and Gid from
 // <root>/<pid>/status. The real IDs match what the eBPF sensors report
 // (bpf_get_current_uid_gid).
 func readProcStatus(root string, pid uint32) (procStatus, error) {
@@ -215,6 +330,8 @@ func readProcStatus(root string, pid uint32) (procStatus, error) {
 		switch key {
 		case "Name":
 			st.name = val
+		case "State":
+			st.zombie = strings.HasPrefix(val, "Z") || strings.HasPrefix(val, "X")
 		case "PPid":
 			st.ppid, _ = parseFirstUint(val)
 		case "Uid":
