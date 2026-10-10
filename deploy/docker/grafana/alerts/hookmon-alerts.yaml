@@ -64,12 +64,14 @@ groups:
   - name: hookmon-event-flow
     interval: 1m
     rules:
-      # Total events per bus. Records 0 while the bus is scraped but has no
+      # Total events per bus, leaving out BPF_INVENTORY: bpf_syscall emits an
+      # inventory every 5 minutes on its own, which would keep this from ever
+      # staying flat. Records 0 while the bus is scraped but has no
       # events yet. Without that, the first event after a bus start (a new
       # series at 1) would not count as an increase.
       - record: instance:hookmon_events_total:sum
         expr: |
-          sum by (instance) (hookmon_events_total{job="hookmon-bus"})
+          sum by (instance) (hookmon_events_total{job="hookmon-bus",event_type!="BPF_INVENTORY"})
           or
           sum by (instance) (0 * (up{job="hookmon-bus"} == 1))
 

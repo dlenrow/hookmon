@@ -52,6 +52,13 @@ tests:
         values: '1x1600'
       - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h7",sensor="ptrace_monitor"}'
         values: '0x1600'
+      # h8: only the periodic BPF inventory, no detections -> fires
+      - series: 'up{job="hookmon-bus",instance="h8"}'
+        values: '1x1600'
+      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h8",sensor="bpf_syscall"}'
+        values: '1x1600'
+      - series: 'hookmon_events_total{job="hookmon-bus",instance="h8",event_type="BPF_INVENTORY",severity="INFO",comm=""}'
+        values: '0+1x1600'
     alert_rule_test:
       - eval_time: 23h50m
         alertname: HookMonNoEvents24h
@@ -71,3 +78,7 @@ tests:
             exp_annotations:
               summary: "No HookMon events from h5 in 24 hours"
               description: "Every sensor on h5 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
+          - exp_labels: {severity: warning, instance: h8}
+            exp_annotations:
+              summary: "No HookMon events from h8 in 24 hours"
+              description: "Every sensor on h8 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
