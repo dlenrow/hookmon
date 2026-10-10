@@ -4,171 +4,203 @@ package sensors
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
-	"strings"
+	"path/filepath"
+	"slices"
+	"sync"
+	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
 
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
-// watchedLinkerPaths are the linker config files and directories to monitor.
-var watchedLinkerPaths = []string{
-	"/etc/ld.so.preload",
-	"/etc/ld.so.conf",
-	"/etc/ld.so.conf.d",
-}
+// linkerConfigFiles are the files in /etc that the dynamic linker
+// (ld.so.preload, ld.so.cache) and ldconfig (ld.so.conf) read.
+var linkerConfigFiles = []string{"ld.so.preload", "ld.so.conf", "ld.so.cache"}
 
-// LinkerConfigSensor monitors linker configuration files for modifications
-// using fanotify. Changes to /etc/ld.so.preload, /etc/ld.so.conf, and
-// /etc/ld.so.conf.d/ are strong indicators of persistence or injection.
+// linkerConfigDir is the drop-in directory ld.so.conf includes.
+const linkerConfigDir = "ld.so.conf.d"
+
+// LinkerConfigSensor reports every change to /etc/ld.so.preload,
+// /etc/ld.so.conf, /etc/ld.so.cache and the entries of /etc/ld.so.conf.d:
+// writes, creates, deletes and renames over them (sed -i, mv, ln -sf). It
+// marks /etc and /etc/ld.so.conf.d with fanotify; see fanWatcher.
+//
+// A change is CRITICAL, or INFO when a package manager is in the writer's
+// process ancestry (see procReader for what happens when the writer exited).
 type LinkerConfigSensor struct {
-	eventCh chan *event.HookEvent
-	fd      int
-	done    chan struct{}
+	etcDir   string
+	procRoot string
+
+	eventCh  chan *event.HookEvent
+	done     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+	watcher  *fanWatcher
+	baseline *fileBaseline
 }
 
 func NewLinkerConfigSensor() *LinkerConfigSensor {
+	return newLinkerConfigSensor("/etc", "/proc")
+}
+
+func newLinkerConfigSensor(etcDir, procRoot string) *LinkerConfigSensor {
 	return &LinkerConfigSensor{
-		eventCh: make(chan *event.HookEvent, 256),
-		fd:      -1,
-		done:    make(chan struct{}),
+		etcDir:   etcDir,
+		procRoot: procRoot,
+		eventCh:  make(chan *event.HookEvent, 256),
+		done:     make(chan struct{}),
+		baseline: newFileBaseline(),
 	}
 }
 
-func (s *LinkerConfigSensor) Name() string       { return "linker_config" }
-func (s *LinkerConfigSensor) Type() SensorType   { return SensorTypeFanotify }
+func (s *LinkerConfigSensor) Name() string                    { return "linker_config" }
+func (s *LinkerConfigSensor) Type() SensorType                { return SensorTypeFanotify }
 func (s *LinkerConfigSensor) Events() <-chan *event.HookEvent { return s.eventCh }
 
-func (s *LinkerConfigSensor) Start() error {
-	fd, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC, unix.O_RDONLY)
-	if err != nil {
-		return fmt.Errorf("fanotify_init: %w", err)
-	}
-	s.fd = fd
+func (s *LinkerConfigSensor) confDir() string { return filepath.Join(s.etcDir, linkerConfigDir) }
 
-	eventMask := uint64(unix.FAN_CLOSE_WRITE)
-	// Use FAN_MARK_MOUNT on /etc to catch writes to any file under /etc,
-	// then filter in handleEvent to only emit events for linker config paths.
-	if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_MOUNT, eventMask, unix.AT_FDCWD, "/etc"); err != nil {
-		return fmt.Errorf("fanotify_mark /etc: %w", err)
-	}
-
-	go s.readLoop()
-	return nil
-}
-
-func (s *LinkerConfigSensor) Stop() error {
-	close(s.done)
-	if s.fd >= 0 {
-		unix.Close(s.fd)
-	}
-	return nil
-}
-
-func (s *LinkerConfigSensor) readLoop() {
-	buf := make([]byte, 4096)
-	for {
-		select {
-		case <-s.done:
-			return
-		default:
-		}
-
-		n, err := unix.Read(s.fd, buf)
-		if err != nil {
-			select {
-			case <-s.done:
-				return
-			default:
-				continue
-			}
-		}
-
-		offset := 0
-		for offset < n {
-			meta := (*unix.FanotifyEventMetadata)(unsafe.Pointer(&buf[offset]))
-			if meta.Event_len < uint32(unsafe.Sizeof(unix.FanotifyEventMetadata{})) {
-				break
-			}
-
-			if meta.Fd >= 0 {
-				s.handleEvent(meta)
-				unix.Close(int(meta.Fd))
-			}
-
-			offset += int(meta.Event_len)
-		}
-	}
-}
-
-func isLinkerConfigPath(path string) bool {
-	for _, watched := range watchedLinkerPaths {
-		if path == watched || strings.HasPrefix(path, watched+"/") {
-			return true
-		}
+// isLinkerConfigPath reports whether path is one of the linker files, an
+// entry of ld.so.conf.d, or ld.so.conf.d itself.
+func (s *LinkerConfigSensor) isLinkerConfigPath(path string) bool {
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	switch dir {
+	case s.confDir():
+		return true
+	case s.etcDir:
+		return name == linkerConfigDir || slices.Contains(linkerConfigFiles, name)
 	}
 	return false
 }
 
-func (s *LinkerConfigSensor) handleEvent(meta *unix.FanotifyEventMetadata) {
-	// Resolve fd to path
-	fdPath := fmt.Sprintf("/proc/self/fd/%d", meta.Fd)
-	filePath, err := os.Readlink(fdPath)
+// Start marks /etc and /etc/ld.so.conf.d, records the baseline hash of every
+// watched file, and starts reading events. It fails if neither directory
+// could be marked.
+func (s *LinkerConfigSensor) Start() error {
+	w, err := newFanWatcher(func(dir string) bool { return dir == s.confDir() }, newProcReader(s.procRoot))
 	if err != nil {
-		filePath = "unknown"
+		return err
+	}
+	marked := 0
+	var errs []error
+	for _, dir := range []string{s.etcDir, s.confDir()} {
+		if err := w.addDir(dir); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		marked++
+	}
+	if marked == 0 {
+		w.close()
+		return fmt.Errorf("no fanotify mark succeeded: %v", errs)
+	}
+	s.watcher = w
+
+	// Baseline after marking, so a change made in between is still reported.
+	for _, name := range linkerConfigFiles {
+		p := filepath.Join(s.etcDir, name)
+		s.baseline.setIfAbsent(p, hashFile(p))
+	}
+	if entries, err := os.ReadDir(s.confDir()); err == nil {
+		for _, e := range entries {
+			p := filepath.Join(s.confDir(), e.Name())
+			s.baseline.setIfAbsent(p, hashFile(p))
+		}
 	}
 
-	// Filter: only emit events for linker config paths
-	if !isLinkerConfigPath(filePath) {
+	ch := make(chan dirEvent, 1024)
+	s.wg.Add(2)
+	go func() {
+		defer s.wg.Done()
+		w.run(s.done, ch)
+	}()
+	go func() {
+		defer s.wg.Done()
+		for {
+			select {
+			case <-s.done:
+				return
+			case ev := <-ch:
+				s.handleEvent(ev)
+			}
+		}
+	}()
+	return nil
+}
+
+func (s *LinkerConfigSensor) Stop() error {
+	s.stopOnce.Do(func() {
+		close(s.done)
+		if s.watcher != nil {
+			s.watcher.close()
+		}
+		s.wg.Wait()
+	})
+	return nil
+}
+
+func (s *LinkerConfigSensor) handleEvent(ev dirEvent) {
+	path := ev.path()
+	if !s.isLinkerConfigPath(path) {
 		return
 	}
-
-	op := "write"
-	if meta.Mask&unix.FAN_CREATE != 0 {
-		op = "create"
-	} else if meta.Mask&unix.FAN_DELETE != 0 {
-		op = "delete"
-	} else if meta.Mask&unix.FAN_MOVED_TO != 0 {
-		op = "rename"
+	newHash := hashFile(path)
+	op := fileOp(ev.Mask, fileExists(path))
+	if op == "delete" {
+		newHash = ""
 	}
+	oldHash := s.baseline.swap(path, newHash)
 
-	newHash := hashFile(filePath)
+	severity := event.SeverityCritical
+	if ev.Proc.PkgMgr != "" {
+		severity = event.SeverityInfo
+	}
+	uid, gid, ppid, comm := procIDs(ev.Proc)
 
 	hookEvt := &event.HookEvent{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now(),
 		EventType: event.EventLinkerConfig,
-		Severity:  event.SeverityCritical,
-		PID:       uint32(meta.Pid),
+		Severity:  severity,
+		PID:       ev.Pid,
+		PPID:      ppid,
+		UID:       uid,
+		GID:       gid,
+		Comm:      comm,
 		LinkerConfigDetail: &event.LinkerConfigDetail{
-			FilePath:  filePath,
+			FilePath:  path,
 			Operation: op,
+			OldHash:   oldHash,
 			NewHash:   newHash,
 		},
 	}
 
 	select {
 	case s.eventCh <- hookEvt:
-	default:
+	case <-s.done:
 	}
 }
 
+// hashFile returns "sha256:<hex>" of a regular file's content (following
+// symlinks), the format enrichment uses, or "" if it is not a readable
+// regular file. The open is non-blocking so a FIFO planted under a watched
+// name cannot stall the sensor.
 func hashFile(path string) string {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return ""
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }

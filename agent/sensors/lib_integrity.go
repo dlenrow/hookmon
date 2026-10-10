@@ -5,9 +5,11 @@ package sensors
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
-	"unsafe"
 
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
@@ -15,7 +17,8 @@ import (
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
-// watchedLibDirs are the standard shared library directories to monitor.
+// watchedLibDirs are the standard shared library directories to monitor,
+// including everything below them.
 var watchedLibDirs = []string{
 	"/usr/lib",
 	"/usr/lib64",
@@ -23,149 +26,215 @@ var watchedLibDirs = []string{
 	"/lib64",
 }
 
-// LibIntegritySensor monitors standard library directories for modifications
-// to shared object files using fanotify. Changes to .so files on disk may
-// indicate an attacker replacing a legitimate library with a trojaned version.
+// LibIntegritySensor reports every write, create, delete and rename of a
+// shared object (*.so, *.so.*) under the standard library directories. It
+// marks each directory in those trees with fanotify; see fanWatcher.
+//
+// At start it records a baseline hash of every shared object, which becomes
+// the OldHash of the first change to that file. The baseline is hashed in the
+// background (gigabytes on a desktop install), so a file changed before its
+// turn has no OldHash. InLdCache says whether the dynamic linker finds the
+// library through /etc/ld.so.cache.
+//
+// A change is ALERT, or INFO when a package manager is in the writer's
+// process ancestry (see procReader for what happens when the writer exited).
 type LibIntegritySensor struct {
-	eventCh chan *event.HookEvent
-	fd      int
-	done    chan struct{}
+	roots       []string
+	ldCachePath string
+	procRoot    string
+
+	realRoots []string // roots with symlinks resolved, set by Start
+	eventCh   chan *event.HookEvent
+	done      chan struct{}
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
+	watcher   *fanWatcher
+	baseline  *fileBaseline
+	ldcache   *ldCacheIndex
 }
 
 func NewLibIntegritySensor() *LibIntegritySensor {
+	return newLibIntegritySensor(watchedLibDirs, "/etc/ld.so.cache", "/proc")
+}
+
+func newLibIntegritySensor(roots []string, ldCachePath, procRoot string) *LibIntegritySensor {
 	return &LibIntegritySensor{
-		eventCh: make(chan *event.HookEvent, 256),
-		fd:      -1,
-		done:    make(chan struct{}),
+		roots:       roots,
+		ldCachePath: ldCachePath,
+		procRoot:    procRoot,
+		eventCh:     make(chan *event.HookEvent, 256),
+		done:        make(chan struct{}),
+		baseline:    newFileBaseline(),
+		ldcache:     newLdCacheIndex(ldCachePath),
 	}
 }
 
-func (s *LibIntegritySensor) Name() string       { return "lib_integrity" }
-func (s *LibIntegritySensor) Type() SensorType   { return SensorTypeFanotify }
+func (s *LibIntegritySensor) Name() string                    { return "lib_integrity" }
+func (s *LibIntegritySensor) Type() SensorType                { return SensorTypeFanotify }
 func (s *LibIntegritySensor) Events() <-chan *event.HookEvent { return s.eventCh }
 
+func isSharedObjectName(name string) bool {
+	return strings.HasSuffix(name, ".so") || strings.Contains(name, ".so.")
+}
+
+func (s *LibIntegritySensor) underRoot(path string) bool {
+	for _, r := range s.realRoots {
+		if path == r || strings.HasPrefix(path, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// Start marks every directory under the library roots, starts the baseline
+// hash and starts reading events. It fails if no directory could be marked.
 func (s *LibIntegritySensor) Start() error {
-	fd, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC, unix.O_RDONLY)
+	w, err := newFanWatcher(s.underRoot, newProcReader(s.procRoot))
 	if err != nil {
-		return fmt.Errorf("fanotify_init: %w", err)
+		return err
 	}
-	s.fd = fd
-
-	// Use FAN_MARK_MOUNT to catch writes to files within library directories.
-	// FAN_CLOSE_WRITE is the only event mask that delivers fd-based events
-	// without FAN_REPORT_FID; filtering to .so files happens in handleEvent.
-	marked := make(map[string]bool)
-	for _, dir := range watchedLibDirs {
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
+	var libs []string
+	marked := 0
+	var errs []error
+	for _, root := range s.roots {
+		real, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				errs = append(errs, err)
+			}
 			continue
 		}
-		// Avoid double-marking the same mount point
-		if marked[dir] {
+		if s.underRoot(real) { // /lib -> usr/lib on merged-/usr systems
 			continue
 		}
-		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_MOUNT,
-			uint64(unix.FAN_CLOSE_WRITE), unix.AT_FDCWD, dir); err != nil {
-			continue
+		s.realRoots = append(s.realRoots, real)
+		n, err := w.addTree(real, func(p string) {
+			if isSharedObjectName(filepath.Base(p)) {
+				libs = append(libs, p)
+			}
+		})
+		marked += n
+		if err != nil {
+			errs = append(errs, err)
 		}
-		marked[dir] = true
 	}
+	if marked == 0 {
+		w.close()
+		return fmt.Errorf("no fanotify mark succeeded under %v: %v", s.roots, errs)
+	}
+	s.watcher = w
+	s.ldcache.contains("") // parse ld.so.cache now rather than on the first event
 
-	go s.readLoop()
+	ch := make(chan dirEvent, 1024)
+	s.wg.Add(3)
+	go func() {
+		defer s.wg.Done()
+		s.hashBaseline(libs)
+	}()
+	go func() {
+		defer s.wg.Done()
+		w.run(s.done, ch)
+	}()
+	go func() {
+		defer s.wg.Done()
+		for {
+			select {
+			case <-s.done:
+				return
+			case ev := <-ch:
+				s.handleEvent(ev)
+			}
+		}
+	}()
 	return nil
 }
 
-func (s *LibIntegritySensor) Stop() error {
-	close(s.done)
-	if s.fd >= 0 {
-		unix.Close(s.fd)
-	}
-	return nil
-}
+// hashBaseline records the startup hash of each library found when marking.
+// Marks are placed first, so a library changed meanwhile is still reported;
+// setIfAbsent keeps the hash an event recorded over the startup one.
+//
+// On the Ubuntu 22.10 test host this reads 2.3 GB, about 9 s of one core, so
+// it runs at the lowest CPU priority. The goroutine is locked to its thread
+// and never unlocks, so the thread exits with it and the priority does not
+// pass to other goroutines.
+func (s *LibIntegritySensor) hashBaseline(libs []string) {
+	runtime.LockOSThread()
+	unix.Setpriority(unix.PRIO_PROCESS, unix.Gettid(), 19)
 
-func (s *LibIntegritySensor) readLoop() {
-	buf := make([]byte, 4096)
-	for {
+	byTarget := make(map[string]string) // a symlink and its target are read once
+	for _, p := range libs {
 		select {
 		case <-s.done:
 			return
 		default:
 		}
-
-		n, err := unix.Read(s.fd, buf)
+		target, err := filepath.EvalSymlinks(p)
 		if err != nil {
-			select {
-			case <-s.done:
-				return
-			default:
-				continue
-			}
+			continue
 		}
-
-		offset := 0
-		for offset < n {
-			meta := (*unix.FanotifyEventMetadata)(unsafe.Pointer(&buf[offset]))
-			if meta.Event_len < uint32(unsafe.Sizeof(unix.FanotifyEventMetadata{})) {
-				break
-			}
-
-			if meta.Fd >= 0 {
-				s.handleEvent(meta)
-				unix.Close(int(meta.Fd))
-			}
-
-			offset += int(meta.Event_len)
+		h, ok := byTarget[target]
+		if !ok {
+			h = hashFile(target)
+			byTarget[target] = h
 		}
+		s.baseline.setIfAbsent(p, h)
 	}
 }
 
-func (s *LibIntegritySensor) handleEvent(meta *unix.FanotifyEventMetadata) {
-	fdPath := fmt.Sprintf("/proc/self/fd/%d", meta.Fd)
-	filePath, err := os.Readlink(fdPath)
-	if err != nil {
-		return
-	}
-
-	// Only care about shared object files in watched library directories
-	if !strings.HasSuffix(filePath, ".so") && !strings.Contains(filePath, ".so.") {
-		return
-	}
-	inWatchedDir := false
-	for _, dir := range watchedLibDirs {
-		if strings.HasPrefix(filePath, dir+"/") {
-			inWatchedDir = true
-			break
+func (s *LibIntegritySensor) Stop() error {
+	s.stopOnce.Do(func() {
+		close(s.done)
+		if s.watcher != nil {
+			s.watcher.close()
 		}
-	}
-	if !inWatchedDir {
+		s.wg.Wait()
+	})
+	return nil
+}
+
+func (s *LibIntegritySensor) handleEvent(ev dirEvent) {
+	// Directories are followed by the watcher; only files are reported.
+	if ev.Mask&fanOnDir != 0 || !isSharedObjectName(ev.Name) {
 		return
 	}
-
-	op := "write"
-	if meta.Mask&unix.FAN_CREATE != 0 {
-		op = "create"
-	} else if meta.Mask&unix.FAN_DELETE != 0 {
-		op = "delete"
-	} else if meta.Mask&unix.FAN_MOVED_TO != 0 {
-		op = "rename"
+	path := ev.path()
+	if !s.underRoot(path) { // a watched directory moved out of the tree
+		return
 	}
+	newHash := hashFile(path)
+	op := fileOp(ev.Mask, fileExists(path))
+	if op == "delete" {
+		newHash = ""
+	}
+	oldHash := s.baseline.swap(path, newHash)
 
-	newHash := hashFile(filePath)
+	severity := event.SeverityAlert
+	if ev.Proc.PkgMgr != "" {
+		severity = event.SeverityInfo
+	}
+	uid, gid, ppid, comm := procIDs(ev.Proc)
 
 	hookEvt := &event.HookEvent{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now(),
 		EventType: event.EventLibIntegrity,
-		Severity:  event.SeverityAlert,
-		PID:       uint32(meta.Pid),
+		Severity:  severity,
+		PID:       ev.Pid,
+		PPID:      ppid,
+		UID:       uid,
+		GID:       gid,
+		Comm:      comm,
 		LibIntegrityDetail: &event.LibIntegrityDetail{
-			LibraryPath: filePath,
+			LibraryPath: path,
 			Operation:   op,
+			OldHash:     oldHash,
 			NewHash:     newHash,
+			InLdCache:   s.ldcache.contains(path),
 		},
 	}
 
 	select {
 	case s.eventCh <- hookEvt:
-	default:
+	case <-s.done:
 	}
 }
