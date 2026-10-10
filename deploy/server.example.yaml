@@ -14,12 +14,21 @@ grpc_addr: ":9443"
 # and it needs an enrollment token. Runs only when enrollment.tokens is set.
 enroll_addr: ":9444"
 
-# REST API and WebSocket.
+# REST API, WebSocket and dashboard, over TLS with tls.cert_file (plain
+# HTTP only with tls.insecure). Clients authenticate with an api.tokens
+# bearer token; no client certificate is needed here.
 http_addr: ":8443"
 
+# The built dashboard (dashboard/dist from npm run build). The server serves
+# it on http_addr, falling back to index.html for the dashboard's own
+# routes. Empty turns it off; a directory without index.html is skipped with
+# a warning.
+dashboard_dir: /usr/share/hookmon/dashboard
+
 tls:
-  # The server's certificate and key, used on both gRPC listeners. The
-  # certificate must name the address buses dial (DNS or IP SAN).
+  # The server's certificate and key, used on both gRPC listeners and on
+  # http_addr. The certificate must name the address buses and browsers
+  # dial (DNS or IP SAN).
   cert_file: /etc/hookmon/tls/server.crt
   key_file: /etc/hookmon/tls/server.key
   # The CA that signs bus certificates and verifies them on grpc_addr.
@@ -27,8 +36,11 @@ tls:
   # That CA's private key. Only enrollment uses it, to sign bus
   # certificates. Keep it root-only.
   ca_key_file: /etc/hookmon/tls/ca.key
-  # true runs gRPC without TLS. Host IDs are then whatever each bus claims.
-  # Development only.
+  # true runs gRPC and REST without TLS (the --insecure flag does the
+  # same). Host IDs are then whatever each bus claims. Enrollment needs TLS,
+  # so the server refuses insecure mode while enrollment.tokens is set.
+  # Development only. With insecure false and no cert_file, the server
+  # refuses to start.
   insecure: false
 
   # One way to make these files:

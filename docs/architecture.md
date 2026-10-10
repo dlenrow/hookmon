@@ -11,7 +11,7 @@ HookMon has three parts:
 Events reach people by two paths:
 
 - **Observability path:** bus → Loki and Prometheus; collector → Pushgateway → Prometheus → Alertmanager and Grafana. This path works and has end-to-end tests (see [claims.md](claims.md)).
-- **Server path:** bus → gRPC → `hookmon-server` → policy → PostgreSQL → REST, WebSocket and SIEM connectors. The code exists and builds. Parts of it don't work yet; the [Server](#server) section lists them with the fix plan step for each.
+- **Server path:** bus → enrollment → mutual-TLS gRPC → `hookmon-server` → policy → PostgreSQL → REST, WebSocket, dashboard and SIEM connectors. Enrollment, mutual TLS, the REST API over HTTPS and the dashboard work. Other parts don't work yet; the [Server](#server) section lists them with the fix plan step for each.
 
 ```
   Monitored Host (Linux)                     Observability stack (docker compose)
@@ -39,9 +39,9 @@ Events reach people by two paths:
  │  ┌─────────────────────────┐   │◀─────────────────────────┘       │
  │  │ :2112 /metrics, /status │◀──│──────────────────────────────────┘
  │  └─────────────────────────┘   │
- │  ┌─────────────────────────┐   │  gRPC (TLS opt-in)  ┌─────────────────────────┐
+ │  ┌─────────────────────────┐   │  gRPC (mutual TLS)  ┌─────────────────────────┐
  │  │ gRPC transport          │───│────────────────────▶│ hookmon-server          │
- │  │  or console (stdout)    │   │                     │  PostgreSQL, REST :8443 │
+ │  │  or console (stdout)    │   │                     │  PostgreSQL, HTTPS :8443│
  │  └─────────────────────────┘   │                     └─────────────────────────┘
  └─────────────────────────────────┘
 ```
@@ -106,7 +106,7 @@ The bus drops events whose PID or parent PID is its own. That removes its own `b
 ### Transports
 
 - **Console** (`--console`): JSON lines on stdout. No server connection.
-- **gRPC** (default when `--console` is not given): streams events to `hookmon-server` at `server_addr`. TLS is used only when `tls.cert_file` and the related settings are configured; otherwise it is plaintext (fix plan step 7b). Events the server did not acknowledge go to `fallback_log_path`. Nothing replays them.
+- **gRPC** (default when `--console` is not given): streams events and heartbeats to `hookmon-server` at `server_addr` over mutual TLS. Each heartbeat carries the sensor-registry snapshot. The client certificate comes from `tls.cert_file`, or from enrollment (see [Enrollment](#enrollment)). A bus with neither refuses to start; `--insecure` (or `tls.insecure: true`) connects in plaintext instead, for development. Events the server did not acknowledge go to `fallback_log_path`. Nothing replays them.
 - **Loki** (`--loki-url`): batched HTTP POST to Loki's push API, alongside either transport. Events are labeled with `service`, `event_type`, `severity`, `hostname` and `sensor`. Batches flush every 1 s or at 10 events.
 - **Prometheus and `/status`** (`--status-port`, default 2112; `--status-addr` sets the bind address): one HTTP server serves `/metrics` and `/status`. The old `--prometheus-port` flag exists only on the deprecated `hookmon-agent` binary.
 
@@ -242,35 +242,58 @@ The dashboard (`deploy/docker/grafana/dashboards/hookmon.json`, uid `hookmon-mai
 
 `hookmon-server` (`server/`) runs:
 
-- **Ingestion** (`server/ingestion`): the `AgentService` gRPC service on `--grpc-addr` (default `:9443`), with `StreamEvents` and `Enroll` RPCs, schema validation and a per-host rate limit.
-- **Policy** (`server/policy`): matches events against allowlist entries and built-in rules, and sets severity.
-- **Store** (`server/store`): PostgreSQL (`--db`), with `events`, `allowlist`, `hosts` and `audit_log` tables. Migrations are in `server/store/migrations/`.
-- **REST API and WebSocket** (`server/api`) on `--http-addr` (default `:8443`): events, policies, hosts and health under `/api/v1/`, and a live event feed at `/api/v1/ws/events`. API tokens come from `--api-tokens`. The API reference is written after fix plan step 7.
-- **Connectors** (`server/connectors`): Syslog/CEF, Splunk HEC, Elasticsearch, webhook, Kafka.
-- **Watchdog**: marks a host offline after 60 s without a heartbeat and raises AGENT_OFFLINE.
+`hookmon-server` reads `/etc/hookmon/server.yaml` if it exists, or the file given with `--config` (example: `deploy/server.example.yaml`). Unknown keys are an error. Command-line flags override the file. It runs:
 
-`hookmon-cli` is a REST client: `events`, `hosts`, `policies` (list, `create` from JSON on stdin, `delete <id>`) and `health`.
+- **Ingestion** (`server/ingestion`): the `AgentService` gRPC service on `--grpc-addr` (default `:9443`), with the `StreamEvents` RPC, schema validation and a per-host rate limit. The TLS handshake requires a client certificate signed by `tls.ca_file`. The host ID of every event and heartbeat is the CN of that certificate; the host ID in the message is ignored. Heartbeats update the host's record and its sensor-health snapshot.
+- **Enrollment** (`server/ingestion/enroll.go`) on `--enroll-addr` (default `:9444`); see [Enrollment](#enrollment).
+- **Policy** (`server/policy`): matches events against allowlist entries and built-in rules, and sets severity.
+- **Store** (`server/store`): PostgreSQL (`database.url` or `--db`), with `events`, `allowlist`, `hosts`, `enrollment_token_uses` and `audit_log` tables. Migrations are in `server/store/migrations/` and run at every start. PID, PPID, UID, GID and BPF program type are stored as BIGINT, so the bus's "unknown" UID (4294967295) is stored like any other.
+- **REST API, WebSocket and dashboard** (`server/api`) on `--http-addr` (default `:8443`), over HTTPS with the server certificate (TLS 1.2 or newer). Events, policies, hosts and health are under `/api/v1/`, and a live event feed is at `/api/v1/ws/events`. API tokens come from `api.tokens` or `--api-tokens`; `/api/v1/health` needs none. Paths outside `/api` serve the dashboard (see [Dashboard](#dashboard)). The API reference is written after fix plan step 7.
+- **Connectors** (`server/connectors`): Syslog/CEF, Splunk HEC, Elasticsearch, webhook, Kafka.
+- **Watchdog**: every `watchdog.check_interval` (default 15 s) it marks an ONLINE host UNRESPONSIVE once it has gone `watchdog.heartbeat_timeout` (default 60 s) without a heartbeat, and stores an AGENT_OFFLINE event (CRITICAL). The next heartbeat sets the host ONLINE again. No AGENT_RECOVERED event is sent.
+
+TLS is the default. The server refuses to start without a certificate (`tls.cert_file` or `--tls-cert`) unless `--insecure` (or `tls.insecure: true`) is given. It logs "refusing to start without TLS" with the error:
+
+```
+no TLS certificate configured: set tls.cert_file, tls.key_file and tls.ca_file (or --tls-cert, --tls-key and --tls-ca), or pass --insecure to run gRPC and REST in plaintext (development only)
+```
+
+and exits with status 1, before it connects to the database.
+
+Insecure mode runs gRPC and REST in plaintext and takes each host ID from the message, so any host can report as any other. Enrollment needs TLS, so insecure mode with enrollment tokens configured is a config error. It is for development only.
+
+`hookmon-cli` is a REST client: `events`, `hosts`, `policies` (list, `create` from JSON on stdin, `delete <id>`) and `health`. Its `--server` default is `http://localhost:8443`, and it has no option for a CA certificate. Against the HTTPS API, pass `--server https://<host>:8443` and add the CA to the system trust store.
 
 Not working yet:
 
 | Gap | Fix plan step |
 |-----|---------------|
-| gRPC TLS is opt-in, and plaintext when no certificate is given, with no warning. REST is always plain HTTP. | 7b |
-| `Enroll` returns the CA certificate as the "signed" certificate; enrollment tokens are never passed to the server, so every enrollment is rejected; the bus has no enrollment code. | 7a |
-| The HostID in events and heartbeats is whatever the bus sends. | 7a |
-| Nothing sets connector configuration, so no connector runs. The alert manager is created but never called. | 7d |
+| Nothing sets connector configuration, so no connector runs. The alert manager is created but never called; AGENT_OFFLINE goes to an empty connector list. | 7d |
 | The allowlist loads once at startup. | 7c |
 | The server overrides the severity the bus set. | 7c |
 | Learning mode and PENDING entries do not exist. | 7c |
 | The WebSocket accepts any non-empty token and any Origin, and one shared channel splits events across open clients. | 7e |
-| The server does not serve the dashboard. | 7b |
-| No end-to-end test covers this path. | 7h |
+| No gRPC recovery interceptor. The rate limiter's table of hosts is never trimmed. | 7f |
+| No automated end-to-end test covers this path. | 7h |
+
+### Enrollment
+
+A bus gets its identity once, with a token from the server config:
+
+1. The operator adds tokens to `enrollment.tokens` in the server config. Each has a `name`, a `secret` of at least 32 characters, an `expires` time, and optionally `single_use`. The server checks secrets in constant time. A single-use token is recorded in PostgreSQL (`enrollment_token_uses`) when it is used, so it stays used across restarts. Enrollment also needs `tls.ca_key_file`, the key of the CA that signs bus certificates. With no tokens, the enrollment listener does not run.
+2. On first start, `hookmon-bus --enroll-token <secret> --ca-file <ca.crt>` generates an ECDSA key and sends a certificate request to the enrollment address (`--enroll-addr`, default: the `--server-addr` host on port 9444). That listener uses TLS that authenticates the server only, since the bus has no certificate yet, and serves only the `Enroll` RPC. The bus verifies the server against `--ca-file`.
+3. The server checks the token, assigns a host ID (a UUID), and signs a client certificate with that ID as its CN. Nothing in the request chooses the ID. It creates the host record in the same transaction that records a single-use token, and returns the certificate and the CA certificate.
+4. The bus checks that the certificate matches its key, chains to the CA it was given, and names the host ID in the response. It stores `bus.key`, `bus.crt` and `ca.crt` in `--state-dir` (default `/var/lib/hookmon`), each with mode 0600, then connects to `--server-addr` with mutual TLS.
+
+Later starts use the stored identity and ignore `--enroll-token`. A certificate configured with `tls.cert_file` takes precedence over both. Certificates last `enrollment.cert_validity` (default one year); there is no renewal. The token is visible in the process list while the first start runs.
 
 ## Dashboard
 
-`dashboard/` is a React and TypeScript app built with Vite (`make build-dashboard` writes `dashboard/dist`). It has five pages: Event Feed, Policy Manager, Host Inventory, Investigation and Settings. It talks to the server's REST API and WebSocket.
+`dashboard/` is a React and TypeScript app built with Vite (`make build-dashboard` writes `dashboard/dist`). It has five pages: Event Feed, Policy Manager, Host Inventory, Investigation and Settings. It talks to the server's REST API and WebSocket with relative URLs (`/api/v1`), using `wss:` when the page is loaded over HTTPS. The API token is entered on the Settings page and kept in the browser's local storage.
 
-Not working yet: the server does not serve the built files (step 7b). The Vite dev server proxies `/api` to `https://localhost:8443`, but the server speaks plain HTTP there (step 7e). There is no PENDING-approval page and no per-sensor health on Host Inventory (step 7e).
+`hookmon-server` serves the built files from `dashboard_dir` (`--dashboard-dir`, default `/usr/share/hookmon/dashboard`) on the same HTTPS listener as the API. A request for a file in that directory gets the file. Any other path outside `/api` gets `index.html`, so the dashboard's own routes (such as `/hosts`) load directly. An unknown `/api` path gets a JSON 404, never `index.html`. If the directory has no `index.html`, the server logs a warning and serves the API only; an empty `dashboard_dir` turns the dashboard off. `deploy/docker/Dockerfile.server` copies the build to `/usr/share/hookmon/dashboard`.
+
+Not working yet: the Vite dev server's `/api` proxy lacks `ws: true`, so the live feed does not work under `npm run dev`. The Settings page shows an enrollment command that does not exist. There is no PENDING-approval page and no per-sensor health on Host Inventory. (step 7e)
 
 ## Directory Structure
 
@@ -301,11 +324,14 @@ hookmon/
 ├── proto/                         # Protobuf definitions (buf.yaml, buf.gen.yaml)
 ├── gen/hookmon/v1/                # Generated protobuf and gRPC code
 ├── pkg/                           # event, crypto, version
-├── deploy/docker/                 # Compose stack, Prometheus, Alertmanager, Grafana provisioning
+├── deploy/docker/                 # Compose stack, Prometheus, Alertmanager, Grafana provisioning, Dockerfiles
+├── deploy/server.example.yaml     # hookmon-server config example
 ├── test/e2e/                      # End-to-end tests (Linux, root, -tags e2e)
 ├── test/canary/                   # Programs the e2e tests run
 ├── test/smoketest/                # Unprivileged smoketests
-├── test/transport/                # Wire and transport tests
+├── test/transport/                # Wire, transport and enrollment tests
+├── test/integration/              # Server + PostgreSQL tests (need HOOKMON_TEST_PG_DSN)
+├── test/enrpki/                   # Throwaway CA and certificates for tests
 └── docs/
 ```
 
@@ -318,5 +344,5 @@ hookmon/
 | eBPF programs | C, built with clang against the host's BTF | Required by the eBPF toolchain |
 | Observability | Grafana + Loki + Prometheus + Alertmanager | Standard stack, no custom UI needed for the published path |
 | Fleet health | Pushgateway + hookmon-collector | Checks each bus from outside the host |
-| Wire protocol | gRPC, with mutual TLS when configured | Streaming, binary encoding; TLS by default is step 7b |
+| Wire protocol | gRPC with mutual TLS | Streaming, binary encoding, mutual authentication; plaintext only with `--insecure` |
 | Database | PostgreSQL | JSON support, enterprise-accepted |

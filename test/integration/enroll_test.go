@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -110,6 +111,7 @@ func enrServerConfig(pki *enrpki.PKI, dsn string, tok enrTokens) server.Config {
 	cfg.GRPCAddr = "127.0.0.1:0"
 	cfg.EnrollAddr = "127.0.0.1:0"
 	cfg.HTTPAddr = "127.0.0.1:0"
+	cfg.DashboardDir = ""
 	cfg.TLS = server.TLSConfig{
 		CertFile:  pki.ServerCertFile,
 		KeyFile:   pki.ServerKeyFile,
@@ -132,10 +134,21 @@ func enrServerConfig(pki *enrpki.PKI, dsn string, tok enrTokens) server.Config {
 type enrServer struct {
 	*server.Server
 	stop func()
+	// client reaches the REST API over TLS, trusting the server's CA.
+	client *http.Client
 }
 
 func enrStartServer(t *testing.T, cfg server.Config) *enrServer {
 	t.Helper()
+	caPEM, err := os.ReadFile(cfg.TLS.CAFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("parse CA certificate")
+	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}}
 	srv := server.New(cfg, zaptest.NewLogger(t, zaptest.Level(zap.WarnLevel)))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -164,7 +177,7 @@ func enrStartServer(t *testing.T, cfg server.Config) *enrServer {
 		})
 	}
 	t.Cleanup(stop)
-	return &enrServer{Server: srv, stop: stop}
+	return &enrServer{Server: srv, stop: stop, client: client}
 }
 
 // enrBusConfig is one bus's config, for a bus about to enroll with s.
@@ -228,15 +241,16 @@ func enrWaitFor(t *testing.T, timeout time.Duration, what string, cond func() bo
 	}
 }
 
-// enrGet does an authenticated REST GET and decodes the JSON response.
+// enrGet does an authenticated REST GET over TLS and decodes the JSON
+// response.
 func enrGet(t *testing.T, s *enrServer, path string, out any) int {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, "http://"+s.HTTPAddr()+path, nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+s.HTTPAddr()+path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+enrAPIToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}

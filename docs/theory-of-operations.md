@@ -170,7 +170,7 @@ Raw eBPF events carry kernel-side information: PID, PPID, UID, GID and comm. The
 - **cgroup_path:** the cgroup path
 - **container_id:** from the cgroup path, for Docker, cri-containerd, CRI-O and libpod, on cgroup v1 and v2
 
-Enrichment runs as soon as the bus receives the event. If the process has already exited, these fields are empty. File-sensor events whose writer has exited get UID 4294967295 ("unknown").
+Enrichment runs as soon as the bus receives the event. If the process has already exited, these fields are empty. File-sensor events whose writer has exited get UID 4294967295 ("unknown"). The server stores that value as is: PID, PPID, UID and GID are BIGINT columns (migration `005_uint32_bigint.sql`).
 
 ## Self-Filtering
 
@@ -334,6 +334,8 @@ The bus cannot be trusted to report its own health if it has been compromised. T
 
 This does not cover an attacker with root on the host, who can stop the bus and serve a fake "alive" `/status`, or write fresh timestamps into a heartbeat map. See [SECURITY.md](../SECURITY.md).
 
+On the server path, `hookmon-server` has a watchdog of its own. A host with no heartbeat for `watchdog.heartbeat_timeout` (default 60 s) is marked UNRESPONSIVE and an AGENT_OFFLINE event (CRITICAL) is stored. Heartbeats arrive over mutual TLS, and the server takes the host ID from the bus's certificate, so one host cannot keep another looking alive. The same root attacker can still run a fake bus with the stolen key and certificate from `/var/lib/hookmon`. AGENT_OFFLINE reaches the database and the dashboard, but no SIEM connector yet (fix plan step 7d).
+
 ### Tamper Signal Hierarchy
 
 | Signal | Interpretation | Prometheus rule | Severity label |
@@ -348,7 +350,7 @@ The rules are in `deploy/docker/grafana/alerts/hookmon-alerts.yaml`. Prometheus 
 
 The "no events for 24 h" row combines heartbeat liveness with event rate. A host can genuinely have no events for 24 hours (a dormant standby, for example); the host's role decides. Heartbeats confirm the sensors run; they cannot confirm events flow end to end. `HookMonNoEvents24h` uses the bus's own `/metrics` (`hookmon_sensor_alive` and `hookmon_events_total`), so it needs each bus listed as a scrape target in `prometheus.yml`.
 
-Known gap: `hookmon_events_total` also counts BPF_INVENTORY events, which `bpf_syscall` sends every 5 minutes. They come from the bus itself, not from a hook, so on a host where `bpf_syscall` runs, `HookMonNoEvents24h` cannot fire even if every hook's events are lost. This is not fixed.
+`hookmon_events_total` also counts BPF_INVENTORY events, which `bpf_syscall` sends every 5 minutes on its own, not from a hook. The rule leaves them out, so a host whose hooks' events are all lost can still fire `HookMonNoEvents24h`.
 
 The collector-silence rule matters because Pushgateway keeps serving the last values it received. Without it, a dead collector would leave the fleet showing "all alive" forever.
 

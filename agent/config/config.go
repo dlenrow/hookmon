@@ -88,7 +88,10 @@ type TLSConfig struct {
 	KeyFile    string `yaml:"key_file"`
 	CAFile     string `yaml:"ca_file"`
 	ServerName string `yaml:"server_name"`
-	Insecure   bool   `yaml:"insecure"`
+	// Insecure (or --insecure) connects to the server without TLS.
+	// Development only. Without it, a bus with no client certificate and
+	// no enrollment token refuses to start.
+	Insecure bool `yaml:"insecure"`
 }
 
 // SensorConfig controls which sensors are enabled.

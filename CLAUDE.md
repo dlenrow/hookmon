@@ -50,13 +50,13 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
 │  │    ├── event enrichment (pid → cmdline, cgroup, container)   │   │
 │  │    ├── sensor health registry (heartbeat maps + links)       │   │
 │  │    ├── /status HTTP endpoint + Prometheus /metrics           │   │
-│  │    ├── gRPC stream to server (TLS opt-in; 7b)                │   │
+│  │    ├── mTLS gRPC to server (enrolled cert)                   │   │
 │  │    └── local fallback log (if server unreachable)            │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                     │
 │  Deployed today: built from source. DEB/RPM/Ansible: step 7g        │
 └──────────────────────────┬──────────────────────────────────────────┘
-                           │ gRPC (port 9443; TLS opt-in)
+                           │ gRPC (port 9443, mutual TLS; enrollment on 9444)
                            │ HTTP /status (port 2112) ← polled by collector
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -164,17 +164,21 @@ hookmon/
 │   │   ├── container.go       # Container runtime detection
 │   │   └── hash.go            # Binary/library SHA256 hashing
 │   ├── transport/
-│   │   ├── grpc.go            # gRPC client stream (mTLS only when configured)
+│   │   ├── grpc.go            # mutual-TLS gRPC client stream (plaintext only with --insecure)
+│   │   ├── enroll.go          # Enrollment: keypair, Enroll RPC, identity in state_dir
+│   │   ├── console.go         # --console: JSON lines on stdout
 │   │   ├── fallback.go        # Local file fallback when server down
 │   │   └── retry.go           # Reconnection with exponential backoff
 │   └── config/
 │       └── config.go          # Agent configuration (YAML)
 │
 ├── server/                    # Central server package
-│   ├── server.go              # Server lifecycle
-│   ├── watchdog.go            # Marks hosts offline (AGENT_OFFLINE)
+│   ├── server.go              # Server lifecycle; refuses to start without TLS unless --insecure
+│   ├── config.go              # YAML config (/etc/hookmon/server.yaml; example in deploy/)
+│   ├── watchdog.go            # Marks hosts UNRESPONSIVE (AGENT_OFFLINE)
 │   ├── ingestion/
-│   │   ├── grpc.go            # gRPC server for agent connections
+│   │   ├── grpc.go            # gRPC server for agent connections; host ID from the client cert
+│   │   ├── enroll.go          # Enroll RPC: token check, CSR signing, host ID assignment
 │   │   ├── validation.go      # Event schema validation
 │   │   └── ratelimit.go       # Per-host rate limiting
 │   ├── policy/
@@ -186,7 +190,8 @@ hookmon/
 │   │   ├── postgres.go        # PostgreSQL event/policy store (queries live here)
 │   │   └── migrations/        # SQL migration files
 │   │       ├── 001_initial.sql
-│   │       └── ...
+│   │       ├── ...
+│   │       └── 005_uint32_bigint.sql  # pid, ppid, uid, gid, prog_type to BIGINT
 │   ├── connectors/
 │   │   ├── syslog.go          # Syslog/CEF output
 │   │   ├── splunk.go          # Splunk HTTP Event Collector
@@ -195,7 +200,8 @@ hookmon/
 │   │   ├── kafka.go           # Kafka producer (optional)
 │   │   └── connector.go       # Common connector interface
 │   └── api/
-│       ├── router.go          # HTTP API router (REST)
+│       ├── router.go          # HTTPS router: REST API, then the dashboard for non-API paths
+│       ├── dashboard.go       # Serves dashboard_dir, index.html fallback for client routes
 │       ├── events.go          # Event query endpoints
 │       ├── policies.go        # Policy CRUD endpoints
 │       ├── hosts.go           # Host inventory endpoints
@@ -259,7 +265,8 @@ hookmon/
 │   │   ├── prometheus.yml, alertmanager.yml
 │   │   ├── grafana/           # Dashboard, datasources, alert rules and their promtool tests
 │   │   ├── Dockerfile.agent   # Agent container image
-│   │   └── Dockerfile.server  # Server container image (alt to appliance)
+│   │   └── Dockerfile.server  # Server container image; dashboard in /usr/share/hookmon/dashboard
+│   ├── server.example.yaml    # hookmon-server config example
 │   └── ansible/
 │       └── roles/
 │           └── hookmon-agent/ # Agent deployment role (tasks only; its files and templates are missing; step 7g)
@@ -268,8 +275,10 @@ hookmon/
 │   ├── event/
 │   │   └── event.go           # Canonical event types (shared agent+server)
 │   ├── crypto/
-│   │   ├── mtls.go            # mTLS certificate utilities
-│   │   └── enroll.go          # Agent enrollment protocol
+│   │   ├── mtls.go            # TLS configs: mTLS gRPC, enrollment, REST
+│   │   ├── enroll.go          # Keypair, CA loading, CSR signing
+│   │   ├── identity.go        # Host ID from a verified client certificate
+│   │   └── token.go           # Enrollment tokens: expiry, constant-time compare, single use
 │   └── version/
 │       └── version.go         # Build version injection
 │
@@ -277,13 +286,15 @@ hookmon/
 │   ├── e2e/                   # End-to-end with real eBPF (Linux, root, -tags e2e)
 │   ├── canary/                # Programs the e2e tests run (BPF canaries, bpftime_sim, ...)
 │   ├── smoketest/             # Unprivileged pre-push smoketests
-│   └── transport/             # Wire-format and transport tests
+│   ├── transport/             # Wire-format, transport and enrollment tests
+│   ├── integration/           # Real server + PostgreSQL (skips without HOOKMON_TEST_PG_DSN)
+│   └── enrpki/                # Throwaway CA and certificates for tests
 │
 ├── docs/
 │   ├── architecture.md        # Detailed architecture document
 │   ├── threat-model.md        # Ways code enters a process, coverage, what HookMon trusts
 │   ├── theory-of-operations.md # Attack classes, allowlist model, tests
-│   ├── deployment-guide.md    # Observability stack + sensor bus deployment
+│   ├── deployment-guide.md    # Observability stack, sensor bus, server path and enrollment
 │   ├── claims.md              # Claims ledger: what was tested, and how
 │   ├── api-reference.md       # REST API docs — written after step 7
 │   └── allowlist-guide.md     # How to build allowlists — written after step 7
@@ -708,7 +719,7 @@ Ubuntu Server 24.04 LTS (minimal). Rationale: widest enterprise acceptance, long
 Bundled and configured automatically:
 - **hookmon-server** binary (Go, statically linked)
 - **PostgreSQL 16** (local, dedicated DB)
-- **nginx** (TLS termination, static dashboard serving, reverse proxy to API)
+- **nginx** (TLS termination, static dashboard serving, reverse proxy to API). `hookmon-server` now terminates TLS and serves the dashboard itself, and `nginx.sh` still proxies to plain `http://127.0.0.1:8443` (step 7g)
 - **systemd** units for all services
 - **certbot** or self-signed TLS cert generation
 - **unattended-upgrades** for security patches
@@ -727,18 +738,19 @@ Console-based setup wizard on first boot:
      sudo bash -s -- --token <enrollment-token>
    ```
 
-The `/enroll` script and `curl` command above do not exist (fix plan steps 7a and 7g).
+The `/enroll` script and `curl` command above do not exist (fix plan step 7g). A bus enrolls with `hookmon-bus --enroll-token` instead.
 
 ### Agent Enrollment Protocol
 
-**Status: not working (fix plan step 7a).** The `Enroll` RPC exists, but it returns the CA certificate instead of signing the CSR, no enrollment token is ever passed to the server (so every request is rejected), and the bus has no enrollment code. The HostID in later RPCs is whatever the bus sends.
+**Status: working (fix plan step 7a).** There is no enrollment script or package install yet (step 7g); the operator installs the bus and runs it once with a token.
 
-1. Agent downloads enrollment script from server
-2. Script installs hookmon-agent package
-3. Agent generates keypair, sends CSR to server with enrollment token
-4. Server signs cert, returns signed cert + CA cert
-5. Agent configures mTLS and connects
-6. Server registers host in inventory
+1. The server config (`/etc/hookmon/server.yaml`) lists enrollment tokens: name, secret (at least 32 characters), expiry, optional `single_use`. With tokens configured, the server listens for enrollment on 9444 (TLS, server authentication only, `Enroll` RPC only).
+2. On first start, `hookmon-bus --enroll-token <secret> --server-addr <host>:9443 --ca-file ca.crt` generates an ECDSA P-256 keypair and sends a CSR to `--enroll-addr` (default: the server host on 9444), verifying the server against `--ca-file`.
+3. The server checks the token in constant time, rejects it if expired or already used (single-use tokens are recorded in PostgreSQL), assigns a UUID host ID, and signs a client certificate with that ID as CN. It creates the host in the inventory and returns the certificate and the CA certificate.
+4. The bus checks the certificate against its key and its CA, stores `bus.key`, `bus.crt` and `ca.crt` in `/var/lib/hookmon` (`--state-dir`) with mode 0600, and connects to 9443 with mutual TLS.
+5. On every later RPC the server takes the host ID from the client certificate and ignores the one in the message. Heartbeats carry the sensor-registry snapshot. Later starts reuse the stored identity.
+
+Gaps: the token is visible in the process list during the first start; certificates are not renewed; no AGENT_RECOVERED event is sent when a host comes back.
 
 ## Build System
 
@@ -806,11 +818,11 @@ At this point you have a working standalone agent that detects BPF loads and exe
 6. `agent/transport/grpc.go` — agent-side gRPC client
 7. `cmd/hookmon-server/main.go` — server binary
 
-Status: built, with gaps. TLS is opt-in (step 7b), enrollment does not work (7a), the allowlist loads once at startup (7c), and no e2e test covers this path (7h).
+Status: built, with gaps. Enrollment (7a) and TLS by default (7b) work. The allowlist loads once at startup (7c), connectors can't be configured (7d), and no e2e test covers this path (7h).
 
 ### Phase 3: Dashboard
 
-Status: the five pages build; the server does not serve them (step 7b), and the WebSocket and dev proxy have known bugs (step 7e).
+Status: the five pages build, and `hookmon-server` serves them from `dashboard_dir` over HTTPS (step 7b). The WebSocket, the Settings page and the dev proxy have known bugs (step 7e).
 
 1. Event feed page (WebSocket real-time)
 2. Host inventory page
@@ -828,7 +840,7 @@ Status: code exists; nothing configures it (step 7d).
 
 ### Phase 5: Virtual Appliance
 
-Status: not working (step 7g; enrollment is 7a).
+Status: not working (step 7g). Enrollment itself works (7a); the appliance does not set it up.
 
 1. Packer template
 2. First-boot wizard
@@ -868,12 +880,13 @@ The sensor bus runs as root (eBPF, fanotify). This makes it a high-value target.
 
 Mitigations, with their status today:
 - Sensor bus binary is statically compiled Go. It runs two helpers every 10 s (`/bin/true`, `hookmon-dlopen-probe`), which must be root-owned.
-- Sensor bus talks to the central server over gRPC — mutual TLS only when certificates are configured; plaintext otherwise (step 7b). It also pushes to Loki (plain HTTP) and serves `/status` and `/metrics` (unauthenticated HTTP; `status_addr` limits the bind address).
+- Sensor bus talks to the central server over mutual-TLS gRPC. Without a certificate or enrollment token it refuses to connect; `--insecure` allows plaintext for development. It also pushes to Loki (plain HTTP) and serves `/status` and `/metrics` (unauthenticated HTTP; `status_addr` limits the bind address).
 - Config file is root-readable only (operator's job; no package sets it yet).
-- Private key is root-readable only (operator's job; enrollment that creates it is step 7a).
-- Server API requires a token on every endpoint except `/api/v1/health`. The WebSocket accepts any non-empty token (step 7e). REST is plain HTTP (step 7b).
+- Private key is root-readable only: enrollment writes `bus.key`, `bus.crt` and `ca.crt` with mode 0600.
+- The server refuses to start without a TLS certificate unless `--insecure`. REST, the WebSocket and the dashboard are served over HTTPS on 8443.
+- Server API requires a token on every endpoint except `/api/v1/health`. The WebSocket accepts any non-empty token (step 7e).
 - Appliance firewall rules (only ports 9443 gRPC, 443 HTTPS, 2112 status) — not built (step 7g).
-- All inter-component communication TLS-encrypted — not true today (step 7b).
+- All inter-component communication TLS-encrypted — bus to server and REST, yes; Loki pushes, `/status`, `/metrics` and the default PostgreSQL connection (`sslmode=disable`) are not.
 - PostgreSQL listens only on localhost — the default connection string, not enforced.
 - Binary integrity: server verifies the sensor bus binary hash at enrollment — not built.
 
@@ -894,7 +907,7 @@ A sophisticated attacker will attempt to disable HookMon before proceeding. The 
 | Agent language | Go | cilium/ebpf ecosystem, static linking, cross-compile |
 | eBPF library | cilium/ebpf | Industry standard, active maintenance. Objects are built with clang by `make bpf` and embedded with `go:embed`; no bpf2go |
 | Server language | Go | Same binary ecosystem as agent, excellent gRPC support |
-| Wire protocol | gRPC + mTLS | Streaming, efficient binary encoding, mutual auth (TLS opt-in today; step 7b) |
+| Wire protocol | gRPC + mTLS | Streaming, efficient binary encoding, mutual auth (plaintext only with `--insecure`) |
 | Database | PostgreSQL | Reliable, JSON support for flexible event payloads, enterprise-accepted |
 | Dashboard | React + TypeScript | Standard, large component ecosystem |
 | Appliance base | Ubuntu Server 24.04 LTS | Enterprise acceptance, 10-year support window |

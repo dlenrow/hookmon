@@ -17,6 +17,15 @@ import (
 // --config is not given.
 const DefaultConfigPath = "/etc/hookmon/server.yaml"
 
+// DefaultDashboardDir is where the server looks for the built dashboard
+// unless dashboard_dir says otherwise.
+const DefaultDashboardDir = "/usr/share/hookmon/dashboard"
+
+// ErrNoTLS is returned when the server has no TLS certificate and is not
+// in insecure mode.
+var ErrNoTLS = errors.New("no TLS certificate configured: set tls.cert_file, tls.key_file and tls.ca_file " +
+	"(or --tls-cert, --tls-key and --tls-ca), or pass --insecure to run gRPC and REST in plaintext (development only)")
+
 // Config holds the hookmon-server configuration. It is read from a YAML
 // file (see deploy/server.example.yaml); command-line flags override it.
 type Config struct {
@@ -26,8 +35,15 @@ type Config struct {
 	// only, serving the Enroll RPC alone. It runs only when enrollment
 	// tokens are configured.
 	EnrollAddr string `yaml:"enroll_addr"`
-	// HTTPAddr is the REST API and WebSocket listener.
+	// HTTPAddr is the REST API, WebSocket and dashboard listener. It uses
+	// TLS with the server certificate.
 	HTTPAddr string `yaml:"http_addr"`
+
+	// DashboardDir holds the built dashboard (index.html and assets, from
+	// npm run build). The server serves it on HTTPAddr. Empty turns the
+	// dashboard off; a directory without index.html is skipped with a
+	// warning.
+	DashboardDir string `yaml:"dashboard_dir"`
 
 	TLS        TLSConfig        `yaml:"tls"`
 	Database   DatabaseConfig   `yaml:"database"`
@@ -44,7 +60,7 @@ type Config struct {
 // TLSConfig holds server TLS settings.
 type TLSConfig struct {
 	// CertFile and KeyFile are the server's certificate and key, used on the
-	// gRPC and enrollment listeners.
+	// gRPC, enrollment and REST listeners.
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
 	// CAFile is the CA certificate that verifies bus client certificates.
@@ -52,8 +68,9 @@ type TLSConfig struct {
 	// CAKeyFile is that CA's private key. Enrollment signs bus certificates
 	// with it, so enrollment needs it; nothing else does.
 	CAKeyFile string `yaml:"ca_key_file"`
-	// Insecure runs gRPC without TLS. Host IDs are then whatever each bus
-	// says. Development only.
+	// Insecure runs gRPC and REST without TLS. Host IDs are then whatever
+	// each bus says. Development only. Without it the server refuses to
+	// start unless CertFile is set.
 	Insecure bool `yaml:"insecure"`
 }
 
@@ -79,9 +96,10 @@ type EnrollmentConfig struct {
 // DefaultConfig returns the configuration used when no file sets a value.
 func DefaultConfig() Config {
 	return Config{
-		GRPCAddr:   ":9443",
-		EnrollAddr: ":9444",
-		HTTPAddr:   ":8443",
+		GRPCAddr:     ":9443",
+		EnrollAddr:   ":9444",
+		HTTPAddr:     ":8443",
+		DashboardDir: DefaultDashboardDir,
 		Database: DatabaseConfig{
 			URL: "postgres://hookmon:hookmon@localhost:5432/hookmon?sslmode=disable",
 		},
@@ -109,9 +127,20 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-// UseTLS reports whether the gRPC listeners use TLS.
+// UseTLS reports whether the gRPC and REST listeners use TLS.
 func (c *Config) UseTLS() bool {
 	return !c.TLS.Insecure && c.TLS.CertFile != ""
+}
+
+// CheckTLS returns ErrNoTLS unless the server has a certificate or is in
+// insecure mode. It is separate from Validate because a config file may
+// leave TLS to the command-line flags; the server runs it once both are
+// applied.
+func (c *Config) CheckTLS() error {
+	if c.TLS.Insecure || c.TLS.CertFile != "" {
+		return nil
+	}
+	return ErrNoTLS
 }
 
 // Validate checks the settings that depend on each other. It does not read

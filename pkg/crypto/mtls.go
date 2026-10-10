@@ -52,6 +52,21 @@ func LoadEnrollServerTLS(certFile, keyFile string) (credentials.TransportCredent
 	}), nil
 }
 
+// LoadHTTPServerTLS returns the TLS config for the REST API and dashboard
+// listener: the server certificate, and no client certificate, because
+// browsers and API clients authenticate with a token instead. TLS 1.2 is the
+// minimum, since browsers reach this listener.
+func LoadHTTPServerTLS(certFile, keyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server keypair: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
+}
+
 // EnrollClientTLS returns TLS credentials for a bus enrolling: it verifies
 // the server against caPEM and presents no client certificate. An empty
 // serverName means the host in the dial address.

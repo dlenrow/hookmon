@@ -30,6 +30,7 @@ func main() {
 	enrollAddr := flag.String("enroll-addr", "", "hookmon-server enrollment address (host:port); default: the server-addr host on port 9444")
 	caFile := flag.String("ca-file", "", "CA certificate that signed the server's certificate; overrides config")
 	stateDir := flag.String("state-dir", "", "directory for the enrolled key and certificates (default /var/lib/hookmon); overrides config")
+	insecure := flag.Bool("insecure", false, "connect to the server without TLS (development only); without it, a bus with no certificate and no enrollment token refuses to start")
 	flag.Parse()
 
 	if *showVersion {
@@ -75,6 +76,9 @@ func main() {
 		cfg.DlopenProbePath = *dlopenProbe
 	}
 	cfg.ApplyEnrollFlags(*enrollToken, *serverAddr, *enrollAddr, *caFile, *stateDir)
+	if *insecure {
+		cfg.TLS.Insecure = true
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 

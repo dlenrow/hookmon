@@ -116,9 +116,19 @@ func (t *GRPCTransport) SetSensorSource(fn func() []event.SensorHealth) {
 
 // Run connects to the server and keeps an event stream open until ctx is
 // cancelled. After any stream failure it reconnects with RetryLoop's
-// exponential backoff. It returns nil once ctx is cancelled. Call Close only
-// after Run has returned.
+// exponential backoff. It returns nil once ctx is cancelled, and
+// ErrNoIdentity at once if the bus has no client certificate and is not in
+// insecure mode. Call Close only after Run has returned.
 func (t *GRPCTransport) Run(ctx context.Context) error {
+	// Never fall back to plaintext: without --insecure the bus needs a
+	// client certificate, which EnsureIdentity provides.
+	if !t.cfg.TLS.Insecure && t.cfg.TLS.CertFile == "" {
+		return ErrNoIdentity
+	}
+	if t.cfg.TLS.Insecure {
+		t.logger.Warn("insecure mode: connecting to the server without TLS; development only",
+			zap.String("server", t.cfg.ServerAddr))
+	}
 	for {
 		var s *session
 		err := RetryLoop(ctx, t.retry, t.logger, func(ctx context.Context) error {
@@ -183,18 +193,20 @@ func (t *GRPCTransport) connect(ctx context.Context) (*session, error) {
 	}, nil
 }
 
+// dialOptions returns mutual-TLS credentials, or plaintext only when
+// TLS.Insecure is set.
 func (t *GRPCTransport) dialOptions() ([]grpc.DialOption, error) {
-	if !t.cfg.TLS.Insecure && t.cfg.TLS.CertFile != "" {
-		creds, err := hcrypto.LoadClientTLS(
-			t.cfg.TLS.CertFile, t.cfg.TLS.KeyFile,
-			t.cfg.TLS.CAFile, t.cfg.TLS.ServerName,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("load TLS credentials: %w", err)
-		}
-		return []grpc.DialOption{grpc.WithTransportCredentials(creds)}, nil
+	if t.cfg.TLS.Insecure {
+		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
 	}
-	return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
+	creds, err := hcrypto.LoadClientTLS(
+		t.cfg.TLS.CertFile, t.cfg.TLS.KeyFile,
+		t.cfg.TLS.CAFile, t.cfg.TLS.ServerName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS credentials: %w", err)
+	}
+	return []grpc.DialOption{grpc.WithTransportCredentials(creds)}, nil
 }
 
 // serve runs one stream until it breaks or ctx is cancelled, then tears it

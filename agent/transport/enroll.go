@@ -40,10 +40,16 @@ const DefaultEnrollPort = "9444"
 // enrollCallTimeout bounds one Enroll RPC.
 const enrollCallTimeout = 30 * time.Second
 
+// ErrNoIdentity is returned when the bus has no client certificate, no
+// enrollment token and no --insecure: it will not connect in plaintext.
+var ErrNoIdentity = errors.New("no client certificate and no enrollment token: refusing to connect to the server without TLS; " +
+	"enroll with --enroll-token and --ca-file, set tls.cert_file, or pass --insecure to connect without TLS (development only)")
+
 // EnsureIdentity makes sure the bus has a client certificate before the
 // transport connects, and sets cfg.TLS and cfg.HostID to match. In order:
 //
-//  1. TLS.Insecure: nothing to do.
+//  1. TLS.Insecure (--insecure): nothing to do; the bus connects without
+//     TLS.
 //  2. TLS.CertFile set: that certificate is used as configured.
 //  3. bus.crt and bus.key in StateDir: the identity from an earlier
 //     enrollment is used. EnrollToken is ignored.
@@ -52,7 +58,8 @@ const enrollCallTimeout = 30 * time.Second
 //     stores the key, certificate and CA in StateDir. Transient failures
 //     (server unreachable) are retried with backoff until ctx ends; a
 //     rejected token or request is returned at once.
-//  5. Otherwise the bus has no certificate and connects without TLS.
+//  5. Otherwise the bus has no certificate. It refuses to connect without
+//     TLS and returns ErrNoIdentity.
 func EnsureIdentity(ctx context.Context, cfg *config.AgentConfig, logger *zap.Logger, retry RetryConfig) error {
 	if cfg.TLS.Insecure {
 		return nil
@@ -70,7 +77,7 @@ func EnsureIdentity(ctx context.Context, cfg *config.AgentConfig, logger *zap.Lo
 		if cfg.EnrollToken != "" {
 			return errors.New("enrollment needs a state directory (state_dir)")
 		}
-		return nil
+		return ErrNoIdentity
 	}
 
 	keyPath := filepath.Join(cfg.StateDir, KeyFileName)
@@ -85,9 +92,7 @@ func EnsureIdentity(ctx context.Context, cfg *config.AgentConfig, logger *zap.Lo
 	}
 
 	if cfg.EnrollToken == "" {
-		logger.Warn("no client certificate and no enrollment token: connecting without TLS; enroll with --enroll-token",
-			zap.String("state_dir", cfg.StateDir))
-		return nil
+		return ErrNoIdentity
 	}
 	if err := enroll(ctx, cfg, keyPath, certPath, caPath, logger, retry); err != nil {
 		return err

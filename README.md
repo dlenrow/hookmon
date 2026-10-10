@@ -29,15 +29,14 @@ Events leave the sensor bus (`hookmon-bus`) on two paths.
 
 **Observability path (works today).** The bus pushes events to Loki and serves `/metrics` and `/status`. `hookmon-collector` polls `/status` on every host and pushes fleet health to Pushgateway. Grafana shows events and health. Prometheus alert rules go to Alertmanager. This path is tested end to end; see [docs/claims.md](docs/claims.md).
 
-**Server path (partly working).** The bus streams events over gRPC to `hookmon-server`. The server checks each event against an allowlist, sets its severity, stores it in PostgreSQL, and serves a REST API and a WebSocket feed. `hookmon-cli` talks to the REST API. What doesn't work yet:
+**Server path (partly working).** The bus enrolls with `hookmon-server` once, with a token, and gets a client certificate. It then streams events over mutual-TLS gRPC. The server takes each host's ID from its certificate, checks each event against an allowlist, sets its severity, stores it in PostgreSQL, and serves a REST API, a WebSocket feed and the React dashboard over HTTPS. `hookmon-cli` talks to the REST API. The server and the bus refuse to run without TLS unless `--insecure` is given. What doesn't work yet:
 
-- TLS is opt-in. Without certificates, gRPC is plaintext and nothing warns you. The REST API is always plain HTTP. (fix plan step 7b)
-- Enrollment does not work. The `Enroll` RPC returns the CA certificate, not a signed client certificate, and the bus has no way to enroll. (step 7a)
-- SIEM connectors can't be turned on. The connector code exists, but no flag or config file sets it up. (step 7d)
-- The React dashboard builds, but the server does not serve it. (step 7b)
+- SIEM connectors can't be turned on. The connector code exists, but the server config has no section for it. (fix plan step 7d)
 - The allowlist loads once, at startup. A policy added through the API takes effect after a restart. (step 7c)
 - The server replaces the bus's severity with its own. (step 7c)
-- No end-to-end test has run the server path. Every e2e test runs the bus with `--console`. (step 7h)
+- The WebSocket feed accepts any non-empty token and splits events across open browser tabs. The dashboard's Settings page shows an enrollment command that does not exist. (step 7e)
+- `hookmon-cli` defaults to `http://localhost:8443` and has no option for a CA certificate. Against the HTTPS API, pass `--server https://<host>:8443` and add the CA to the system trust store.
+- No automated end-to-end test covers the server path. Every e2e test runs the bus with `--console`. (step 7h)
 
 ## Why This Exists
 
@@ -82,12 +81,13 @@ That suits allowlist-based monitoring: the base rate of legitimate new activity 
  │  :2112 /metrics    │◀── scrape ────────│ Pushgateway :9091                │
  │  :2112 /status     │◀── poll 30s ──┐   │ Grafana :3000                    │
  └─────────┬──────────┘               │   └───────────────▲──────────────────┘
-           │ gRPC (TLS opt-in)        │                   │ push
+           │ gRPC (mutual TLS)        │                   │ push
            ▼                          └──── hookmon-collector (runs on its own)
  ┌────────────────────────────────┐
  │ hookmon-server (server path)   │
- │  ingestion, allowlist policy,  │
- │  PostgreSQL, REST :8443, WS    │
+ │  enrollment :9444, allowlist,  │
+ │  PostgreSQL, HTTPS :8443       │
+ │  (REST, WebSocket, dashboard)  │
  └────────────────────────────────┘
 ```
 
@@ -122,7 +122,7 @@ The expectation is that most hosts raise no alerts in a typical week. That has n
 
 ## Quick Start
 
-This sets up the observability path. The server path is not ready for a quick start (see "Two Paths").
+This sets up the observability path. For the server path, see [Server Path](docs/deployment-guide.md#server-path) in the deployment guide.
 
 ### 1. Deploy the Observability Stack
 
@@ -160,7 +160,7 @@ sudo bin/hookmon-bus --console \
 
 Keep `hookmon-dlopen-probe` in the same directory as `hookmon-bus`, or pass `--dlopen-probe <path>`. Without it, `dlopen_monitor` is reported `unverifiable` and the host `degraded`.
 
-`--console` prints events to stdout and stops the bus from connecting to a server. Without it, the bus streams events to `hookmon-server` at `server_addr` (default `localhost:9443`), and writes the events it can't send to `fallback_log_path`.
+`--console` prints events to stdout and stops the bus from connecting to a server. Without it, the bus streams events to `hookmon-server` at `server_addr` (default `localhost:9443`) over mutual TLS, and writes the events it can't send to `fallback_log_path`. It needs a client certificate for that: on first start it enrolls with `--enroll-token`. A bus with no certificate and no token refuses to start unless `--insecure` is given, which connects in plaintext (development only).
 
 ### 3. Run the Collector
 
@@ -185,12 +185,12 @@ The collector polls each host's `/status` every 30 seconds.
 
 Open `http://<appliance>:3000/d/hookmon-main/hookmon` in your browser.
 
-### Not Working Yet: Appliance Images, Packages, Enrollment
+### Not Working Yet: Appliance Images and Packages
 
 - **Appliance images (ISO, OVA, QCOW2, VHD).** None of them builds a working image. The Packer template defines only a QEMU (qcow2) build, `make appliance-ova` names a VMware build that does not exist, and the ISO's `appliance/iso/user-data.yaml` is missing. Today the only "appliance" is the compose stack above. (fix plan step 7g)
 - **DEB and RPM packages.** They ship `hookmon-agent`, not `hookmon-bus`, with no systemd unit, default config or dlopen helper. (step 7g)
 - **Ansible.** The agent role (`deploy/ansible/roles/hookmon-agent`) and the appliance playbook (`appliance/ansible/playbook.yml`) refer to templates and files that do not exist. (step 7g)
-- **Enrollment.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists, and the bus cannot enroll. (step 7a)
+- **Enrollment script.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists. A bus enrolls with `hookmon-bus --enroll-token` instead (see the [deployment guide](docs/deployment-guide.md#server-path)). Installing the bus from a package is step 7g.
 
 ## Allowlist Workflow
 
@@ -227,7 +227,7 @@ HookMon monitors the monitors. It provides an authorization and inventory layer 
 ## Documentation
 
 - [Architecture](docs/architecture.md): components, data flow, health checks
-- [Deployment Guide](docs/deployment-guide.md): observability stack, sensor bus, collector
+- [Deployment Guide](docs/deployment-guide.md): observability stack, sensor bus, collector, server and enrollment
 - [Theory of Operations](docs/theory-of-operations.md): attack classes, detection approach, allowlist strategy, tests
 - [Threat Model](docs/threat-model.md): every way code enters a Linux process, and which sensor covers it
 - [Claims Ledger](docs/claims.md): what has been tested, and how
@@ -240,7 +240,7 @@ HookMon monitors the monitors. It provides an authorization and inventory layer 
 # Linux with a BTF-enabled kernel. Needs Go 1.23+, make, clang, llvm-strip,
 # libbpf headers, bpftool and a C compiler. Node.js 20+ for the dashboard.
 make build-all        # eBPF objects, then hookmon-bus, -agent, -server, -cli, -collector and hookmon-dlopen-probe, into bin/
-make build-dashboard  # dashboard/dist
+make build-dashboard  # dashboard/dist, which hookmon-server serves from dashboard_dir
 ```
 
 On macOS the Go binaries build with stub sensors. No sensor works there.

@@ -22,7 +22,7 @@ The sensor bus (`hookmon-bus`) is a privileged process. Its attack surface inclu
 
 - **eBPF programs** loaded into the kernel. They are compiled from checked-in C source at build time and embedded in the binary, not downloaded at runtime.
 - **Helper processes.** Every 10 seconds the bus, as root, runs `/bin/true` and `hookmon-dlopen-probe` (from the bus binary's directory unless `dlopen_probe_path` says otherwise). Keep both binaries and their directory owned by root and not writable by anyone else.
-- **gRPC transport.** TLS is opt-in today. If no certificate is configured, the bus and the server talk plaintext gRPC, and nothing warns you. When TLS is configured, it is mutual TLS, and the bus private key should be root-readable only. Making TLS the default is fix plan step 7b.
+- **gRPC transport.** Mutual TLS. On first start the bus enrolls with a token (`--enroll-token`) and stores its key, certificate and CA certificate in `state_dir` (default `/var/lib/hookmon`), each with mode 0600. A bus with no certificate and no token refuses to connect. `--insecure` (or `tls.insecure: true`) connects in plaintext instead; use it only for development. The enrollment token is visible in the process list while the first start runs.
 - **Loki push.** Plain, unauthenticated HTTP. Anyone on the path can read, drop or forge events.
 - **Status and metrics endpoint** (port 2112). Unauthenticated HTTP serving `/status` and `/metrics`. Anyone who can reach the port can read it. Bind it to one address with `status_addr` (`--status-addr`), and limit access to the collector and Prometheus with a host firewall.
 - **Configuration file.** YAML parsed by the bus; should be root-readable only.
@@ -33,11 +33,13 @@ The collector (`hookmon-collector`):
 
 The server (`hookmon-server`) accepts gRPC streams from sensor buses and exposes an HTTP API. Its attack surface includes:
 
-- **gRPC ingestion.** Mutual TLS only when certificates are configured; otherwise plaintext (see above). The host ID in each event and heartbeat is whatever the bus sends, so one host can report as another (fix plan step 7a). The per-host rate limit is keyed by that self-asserted ID (step 7f).
-- **Enrollment.** Not working: the `Enroll` RPC returns the CA certificate instead of signing the request, and no enrollment token reaches the server (step 7a).
-- **REST API.** Token-authenticated (`--api-tokens`), except `/api/v1/health`. It is plain HTTP; TLS for REST is step 7b. Do not expose it to untrusted networks.
+- **TLS by default.** The server refuses to start without a certificate (`tls.cert_file` or `--tls-cert`) unless `--insecure` (or `tls.insecure: true`) is given. Insecure mode runs gRPC and REST in plaintext, takes each host ID from the message, and cannot be combined with enrollment tokens. Use it only for development.
+- **gRPC ingestion** (port 9443). The TLS handshake requires a client certificate signed by `tls.ca_file`. The server takes the host ID from that certificate's CN and ignores the host ID in each event and heartbeat. The per-host rate limit is keyed by that host ID, and its table of hosts is never trimmed (step 7f). There is no recovery interceptor, so a panic in an RPC handler stops the server (step 7f).
+- **Enrollment** (port 9444). TLS that authenticates the server only, since an enrolling bus has no certificate yet. Only the `Enroll` RPC is served there, and it needs a token from the server config: compared in constant time, with an expiry, and optionally single-use (recorded in PostgreSQL, so it stays used across restarts). The server signs the request with the CA key (`tls.ca_key_file`) and assigns the host ID itself. Anyone holding a valid token can enroll a host. The listener runs only when tokens are configured.
+- **REST API and dashboard** (port 8443). HTTPS with the server certificate, TLS 1.2 or newer; plain HTTP only in insecure mode. API calls need a token (`api.tokens` or `--api-tokens`), except `/api/v1/health`. The dashboard's static files need none. The dashboard keeps its API token in the browser's local storage.
 - **WebSocket** (`/api/v1/ws/events`). It accepts any non-empty token and any Origin (step 7e).
-- **PostgreSQL.** The default connection string points at localhost with `sslmode=disable` and a fixed password. Credentials are passed with `--db`, so they show in the process list; a server config file is step 7d.
+- **PostgreSQL.** The default connection string points at localhost with `sslmode=disable` and a fixed password. Set it in the server config file (`database.url`) rather than with `--db`, which shows in the process list.
+- **Server config file** (`/etc/hookmon/server.yaml` by default). It holds the database password, API tokens and enrollment secrets, and names the CA key, which can sign a certificate for any host. Keep the file and the key root-only (mode 0600).
 - **SIEM connectors.** Outbound connections to configured endpoints. Today nothing configures them (step 7d).
 
 ## Known Limitations

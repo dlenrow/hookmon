@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -112,6 +113,31 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.cfg.Validate(); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	// Refuse plaintext unless it was asked for, before touching anything
+	// else, so a server with no certificate never starts.
+	if err := s.cfg.CheckTLS(); err != nil {
+		return err
+	}
+	useTLS := s.cfg.UseTLS()
+	var httpTLS *tls.Config
+	if useTLS {
+		var err error
+		httpTLS, err = hcrypto.LoadHTTPServerTLS(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("load REST TLS: %w", err)
+		}
+	} else {
+		s.logger.Warn("insecure mode: gRPC and REST run without TLS, and host IDs are taken from each message, so any host can report as any other; development only")
+	}
+	var dashboard *api.Dashboard
+	if s.cfg.DashboardDir != "" {
+		var err error
+		dashboard, err = api.NewDashboard(s.cfg.DashboardDir)
+		if err != nil {
+			s.logger.Warn("not serving the dashboard", zap.String("dir", s.cfg.DashboardDir), zap.Error(err))
+		}
+	}
+
 	tokens, err := hcrypto.NewTokenSet(s.cfg.Enrollment.Tokens)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -148,11 +174,6 @@ func (s *Server) Run(ctx context.Context) error {
 		s.logger.Warn("failed to load allowlist", zap.Error(err))
 	} else {
 		s.policy.LoadAllowlist(entries)
-	}
-
-	useTLS := s.cfg.UseTLS()
-	if !useTLS {
-		s.logger.Warn("gRPC is running without TLS: host IDs are taken from each message, so any host can report as any other")
 	}
 
 	// Initialize ingestion server
@@ -254,11 +275,17 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	// HTTP API server
+	// REST API, WebSocket and dashboard, on TLS unless insecure.
+	var dashHandler http.Handler
+	if dashboard != nil {
+		dashHandler = dashboard
+	}
+	apiSrv := api.NewServer(s.store, s.logger, s.ingestion.GetEventChannel())
+	s.httpServer = &http.Server{Handler: apiSrv.Router(s.cfg.API.Tokens, dashHandler)}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runHTTP(ctx, httpLis); err != nil {
+		if err := serveHTTP(ctx, s.httpServer, httpLis, httpTLS); err != nil {
 			s.logger.Error("HTTP server error", zap.Error(err))
 		}
 	}()
@@ -271,11 +298,16 @@ func (s *Server) Run(ctx context.Context) error {
 		s.watchdog.Run(ctx)
 	}()
 
+	dashDir := ""
+	if dashboard != nil {
+		dashDir = dashboard.Dir()
+	}
 	s.logger.Info("hookmon server started",
 		zap.String("grpc", s.grpcAddr),
 		zap.String("enroll", s.enrollAddr),
 		zap.String("http", s.httpAddr),
 		zap.Bool("tls", useTLS),
+		zap.String("dashboard", dashDir),
 	)
 
 	<-ctx.Done()
@@ -307,22 +339,24 @@ func serveGRPC(ctx context.Context, srv *grpc.Server, lis net.Listener) error {
 	return err
 }
 
-func (s *Server) runHTTP(ctx context.Context, lis net.Listener) error {
-	apiSrv := api.NewServer(s.store, s.logger, s.ingestion.GetEventChannel())
-	router := apiSrv.Router(s.cfg.API.Tokens)
-
-	s.httpServer = &http.Server{
-		Handler: router,
-	}
-
+// serveHTTP serves srv on lis until ctx is cancelled, over TLS when tlsCfg
+// is non-nil and plain HTTP otherwise.
+func serveHTTP(ctx context.Context, srv *http.Server, lis net.Listener, tlsCfg *tls.Config) error {
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		s.httpServer.Shutdown(shutdownCtx)
+		srv.Shutdown(shutdownCtx)
 	}()
 
-	if err := s.httpServer.Serve(lis); err != http.ErrServerClosed {
+	var err error
+	if tlsCfg != nil {
+		srv.TLSConfig = tlsCfg
+		err = srv.ServeTLS(lis, "", "")
+	} else {
+		err = srv.Serve(lis)
+	}
+	if err != http.ErrServerClosed {
 		return err
 	}
 	return nil

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"path"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -26,8 +27,10 @@ func NewServer(store Store, logger *zap.Logger, eventCh <-chan *event.HookEvent)
 	}
 }
 
-// Router returns the configured HTTP router.
-func (s *Server) Router(apiTokens []string) http.Handler {
+// Router returns the configured HTTP router. With a non-nil dashboard, every
+// path outside /api that no route matches is handed to it; unknown /api
+// paths always get a JSON 404.
+func (s *Server) Router(apiTokens []string, dashboard http.Handler) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -58,6 +61,16 @@ func (s *Server) Router(apiTokens []string) http.Handler {
 
 	// WebSocket (token in query param)
 	r.Get("/api/v1/ws/events", s.handleWebSocket)
+
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		if dashboard == nil || isAPIPath(path.Clean("/"+r.URL.Path)) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
+		dashboard.ServeHTTP(w, r)
+	})
 
 	return r
 }

@@ -21,9 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /hookmon-server /usr/bin/hookmon-server
-COPY --from=dashboard /dashboard/dist /var/www/hookmon/dashboard
+# hookmon-server serves the dashboard from its default dashboard_dir.
+COPY --from=dashboard /dashboard/dist /usr/share/hookmon/dashboard
 
-EXPOSE 9443 8443
+# The server refuses to start without TLS. Mount /etc/hookmon/server.yaml
+# (see deploy/server.example.yaml) and the certificates it names, or pass
+# --insecure for development.
+# 9443: bus gRPC (mutual TLS), 9444: enrollment, 8443: REST API and dashboard.
+EXPOSE 9443 9444 8443
 
 ENTRYPOINT ["/usr/bin/hookmon-server"]
 CMD ["--grpc-addr", ":9443", "--http-addr", ":8443"]

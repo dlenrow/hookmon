@@ -27,8 +27,11 @@ func TestLoadConfig_Example(t *testing.T) {
 	if cfg.GRPCAddr != ":9443" || cfg.EnrollAddr != ":9444" || cfg.HTTPAddr != ":8443" {
 		t.Errorf("addresses: %q %q %q", cfg.GRPCAddr, cfg.EnrollAddr, cfg.HTTPAddr)
 	}
-	if cfg.TLS.CAKeyFile != "/etc/hookmon/tls/ca.key" || !cfg.UseTLS() {
+	if cfg.TLS.CAKeyFile != "/etc/hookmon/tls/ca.key" || !cfg.UseTLS() || cfg.CheckTLS() != nil {
 		t.Errorf("tls: %+v", cfg.TLS)
+	}
+	if cfg.DashboardDir != DefaultDashboardDir {
+		t.Errorf("dashboard_dir: %q", cfg.DashboardDir)
 	}
 	if len(cfg.Enrollment.Tokens) != 1 {
 		t.Fatalf("tokens: %+v", cfg.Enrollment.Tokens)

@@ -2,13 +2,13 @@
 
 ## Overview
 
-This guide sets up the observability path, which works today. It has three parts:
+This guide sets up the observability path, which works today, and then the server path. The observability path has three parts:
 
 1. **Observability stack:** Grafana, Loki, Prometheus, Pushgateway and Alertmanager, run with Docker Compose. Today this compose stack is the whole "appliance". The appliance images (ISO, OVA, QCOW2, VHD) do not build a working image yet (fix plan step 7g).
 2. **Sensor buses:** `hookmon-bus` on each monitored Linux host. Each detects eBPF loads, linker environment injection, ptrace abuse, library tampering and more, and pushes events to Loki.
 3. **Collector:** `hookmon-collector`, run on the stack's host but outside Compose. It polls each host's `/status` endpoint and pushes fleet health to Pushgateway.
 
-The server path (`hookmon-server`, PostgreSQL, the dashboard, enrollment, SIEM connectors) is not covered here. Parts of it don't work yet; see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus from source.
+[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet, such as SIEM connectors (step 7d) and learning mode (step 7c); see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
 
 All sensors are read-only. They observe and report, and cannot block or change anything. There is no enforcement mode.
 
@@ -102,7 +102,13 @@ The sensor bus will:
 4. Serve `/status` and `/metrics` on port 2112
 5. Every 10 seconds, fire each eBPF hook itself to check that it still runs
 
-Without `--console`, the bus also streams events over gRPC to `hookmon-server` at `server_addr` (default `localhost:9443`). If no server answers, the events are written to `fallback_log_path`. Use `--console` if you run no server.
+Without `--console`, the bus also streams events over mutual-TLS gRPC to `hookmon-server` at `server_addr` (default `localhost:9443`). If no server answers, the events are written to `fallback_log_path`. A bus without `--console` needs a client certificate, which it gets by enrolling (see [Server Path](#server-path)). With no certificate and no enrollment token it refuses to start:
+
+```
+enrollment: no client certificate and no enrollment token: refusing to connect to the server without TLS; enroll with --enroll-token and --ca-file, set tls.cert_file, or pass --insecure to connect without TLS (development only)
+```
+
+Use `--console` if you run no server.
 
 ### Sensor Bus Flags
 
@@ -115,6 +121,12 @@ Without `--console`, the bus also streams events over gRPC to `hookmon-server` a
 | `--status-addr` | all interfaces | Bind address for `/status` and `/metrics`, e.g. `127.0.0.1` |
 | `--dlopen-probe` | `hookmon-dlopen-probe` next to the bus binary | Path to the dlopen helper |
 | `--scan-rpath <dir>` | — | Scan a directory's ELF binaries for RPATH issues, print JSON, and exit |
+| `--server-addr` | `localhost:9443` (from config) | `hookmon-server` gRPC address |
+| `--enroll-token` | — | Enrollment secret. Used on the first start, when the bus has no certificate yet |
+| `--enroll-addr` | the `--server-addr` host, port 9444 | `hookmon-server` enrollment address |
+| `--ca-file` | — | CA certificate that signed the server's certificate. Required to enroll |
+| `--state-dir` | `/var/lib/hookmon` (from config) | Where the enrolled key and certificates are stored |
+| `--insecure` | false | Connect to the server without TLS. Development only |
 | `--version` | — | Print version and exit |
 
 `hookmon-bus` has no `--prometheus-port` flag. Only the deprecated `hookmon-agent` binary still accepts it (as an alias for the status port); `hookmon-agent` reads `/etc/hookmon/agent.yaml` by default.
@@ -124,8 +136,10 @@ Without `--console`, the bus also streams events over gRPC to `hookmon-server` a
 `/etc/hookmon/bus.yaml` (all keys are optional; these are the defaults, except `host_id` and `loki_url`):
 
 ```yaml
-host_id: "prod-web-01"            # self-asserted until enrollment works (fix plan step 7a)
+host_id: "prod-web-01"            # replaced by the certificate's host ID; the server ignores it except with --insecure
 server_addr: "localhost:9443"
+enroll_addr: ""                   # empty: the server_addr host on port 9444
+state_dir: "/var/lib/hookmon"     # bus.key, bus.crt and ca.crt from enrollment, mode 0600
 loki_url: "http://hookmon.internal:3100"
 status_port: 2112
 status_addr: ""                   # empty: all interfaces
@@ -135,12 +149,12 @@ heartbeat_interval: 30s           # heartbeat RPC to the server
 heartbeat_sensor_interval: 10s    # probe and health-check cycle
 dead_threshold: 15s               # no confirmed beat for this long: dead
 dlopen_probe_path: ""             # empty: next to the bus binary
-tls:                              # gRPC to the server; plaintext if unset
-  cert_file: ""
+tls:                              # mutual TLS to the server
+  cert_file: ""                   # empty: the enrolled certificate in state_dir
   key_file: ""
-  ca_file: ""
-  server_name: ""
-  insecure: false
+  ca_file: ""                     # same as --ca-file
+  server_name: ""                 # empty: the host in server_addr
+  insecure: false                 # true: plaintext gRPC (development only)
 sensors:
   bpf_syscall: true
   exec_injection: true
@@ -176,7 +190,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Install `hookmon-dlopen-probe` to `/usr/local/bin/` too. With `--console`, events also go to the journal; drop it if you run `hookmon-server`.
+Install `hookmon-dlopen-probe` to `/usr/local/bin/` too. With `--console`, events also go to the journal. If you run `hookmon-server`, drop `--console` and enroll the bus first (see [Server Path](#server-path)); the unit then needs no token.
 
 ```bash
 sudo install -m 0755 bin/hookmon-bus bin/hookmon-dlopen-probe /usr/local/bin/
@@ -296,6 +310,95 @@ curl -s http://<bus-host>:2112/status | jq .
 
 `overall` should be `alive`, and each of the eight sensors `alive`.
 
+## Server Path
+
+The server path sends events from each bus to `hookmon-server`, which stores them in PostgreSQL and serves the REST API and the dashboard. Every connection uses TLS, from one CA you create. Not working yet: SIEM connectors (step 7d), learning mode and allowlist reload (step 7c), and WebSocket authentication (step 7e).
+
+### Build
+
+```bash
+make build-server build-cli
+make build-dashboard                      # needs Node.js 20+; writes dashboard/dist
+sudo install -m 0755 bin/hookmon-server bin/hookmon-cli /usr/local/bin/
+sudo mkdir -p /usr/share/hookmon/dashboard
+sudo cp -r dashboard/dist/. /usr/share/hookmon/dashboard/
+```
+
+You also need a PostgreSQL database and a user that can create tables in it. The server runs its migrations at every start.
+
+### Certificates
+
+Make a CA and a server certificate. The certificate must name the address buses and browsers use (a DNS or IP SAN):
+
+```bash
+sudo mkdir -p /etc/hookmon/tls && cd /etc/hookmon/tls
+sudo openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout ca.key -out ca.crt -days 3650 -subj "/CN=hookmon CA"
+sudo openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout server.key -out server.csr -subj "/CN=hookmon.internal"
+sudo bash -c 'openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -days 825 -out server.crt \
+  -extfile <(printf "subjectAltName=DNS:hookmon.internal\nextendedKeyUsage=serverAuth")'
+sudo chmod 0600 ca.key server.key
+```
+
+`ca.key` signs every bus certificate at enrollment. Keep it root-only.
+
+### Configure and Start the Server
+
+```bash
+sudo install -m 0600 deploy/server.example.yaml /etc/hookmon/server.yaml
+```
+
+Edit `/etc/hookmon/server.yaml`:
+- `database.url`: your PostgreSQL connection string.
+- `api.tokens`: one or more bearer tokens for the REST API and the dashboard.
+- `enrollment.tokens`: replace the example secret with the output of `openssl rand -hex 32`, and set `expires`. Set `single_use: true` for a token that should enroll one host.
+- `tls`: the paths above are the defaults in the example.
+
+```bash
+sudo hookmon-server                        # reads /etc/hookmon/server.yaml
+curl --cacert /etc/hookmon/tls/ca.crt https://hookmon.internal:8443/api/v1/health
+```
+
+The server listens on 9443 (bus gRPC, mutual TLS), 9444 (enrollment, only when tokens are configured) and 8443 (HTTPS: REST API, WebSocket and dashboard). Flags override the file; `hookmon-server --help` lists them. Without a certificate the server refuses to start:
+
+```
+no TLS certificate configured: set tls.cert_file, tls.key_file and tls.ca_file (or --tls-cert, --tls-key and --tls-ca), or pass --insecure to run gRPC and REST in plaintext (development only)
+```
+
+### Enroll Each Sensor Bus
+
+Copy `ca.crt` (not `ca.key`) to the host, then start the bus once with an enrollment token:
+
+```bash
+sudo hookmon-bus --enroll-token <secret> \
+  --server-addr hookmon.internal:9443 \
+  --ca-file /path/to/ca.crt \
+  --loki-url http://<stack-host>:3100
+```
+
+The bus generates a key, enrolls on port 9444, and stores `bus.key`, `bus.crt` and `ca.crt` in `/var/lib/hookmon` (mode 0600). The server assigns the host's ID and writes it into the certificate. Later starts use the stored identity and need no token, so the systemd unit above works without `--console` once `server_addr` is set in `/etc/hookmon/bus.yaml`. The token shows in the process list while the first start runs.
+
+Check the inventory:
+
+```bash
+curl --cacert /etc/hookmon/tls/ca.crt -H "Authorization: Bearer <api-token>" \
+  https://hookmon.internal:8443/api/v1/hosts
+```
+
+The host shows `ONLINE` with its sensors' health. If its heartbeats stop for `watchdog.heartbeat_timeout` (default 60 s), the server marks it `UNRESPONSIVE` and stores an AGENT_OFFLINE event.
+
+`hookmon-cli` defaults to `http://localhost:8443` and has no option for a CA certificate. Pass `--server https://hookmon.internal:8443 --token <api-token>`, and add `ca.crt` to the system trust store.
+
+### Open the Dashboard
+
+Browse to `https://hookmon.internal:8443/` from a machine that trusts `ca.crt`. Enter an API token on the Settings page; the browser keeps it in local storage. The server serves the dashboard from `dashboard_dir` (default `/usr/share/hookmon/dashboard`).
+
+### Development Without TLS
+
+`hookmon-server --insecure` and `hookmon-bus --insecure` run gRPC and REST in plaintext. The server then takes each host ID from the message, so any host can report as any other, and enrollment can't be used. Use it only on a test machine.
+
 ## Network Requirements
 
 | From | To | Port | Protocol | Purpose |
@@ -305,7 +408,9 @@ curl -s http://<bus-host>:2112/status | jq .
 | Collector | Sensor bus | 2112 (or 22 for SSH) | HTTP / SSH | `/status` poll |
 | Collector | Pushgateway | 9091 | HTTP | Fleet health push |
 | Browser | Stack host | 3000 | HTTP | Grafana |
-| Sensor bus | Server | 9443 | gRPC | Server path only; plaintext unless TLS is configured (step 7b) |
+| Sensor bus | Server | 9443 | gRPC, mutual TLS | Server path: events and heartbeats |
+| Sensor bus | Server | 9444 | gRPC, TLS | Server path: enrollment, first start only |
+| Browser, `hookmon-cli` | Server | 8443 | HTTPS | Server path: REST API, WebSocket and dashboard |
 
 The status port is unauthenticated. Restrict it with a host firewall or `--status-addr`. Loki pushes are unauthenticated plain HTTP.
 

@@ -19,14 +19,15 @@ func main() {
 	configPath := flag.String("config", "", "server config file (YAML); default "+server.DefaultConfigPath+" if it exists")
 	grpcAddr := flag.String("grpc-addr", ":9443", "gRPC (mutual TLS) listen address; overrides config")
 	enrollAddr := flag.String("enroll-addr", ":9444", "enrollment listen address; overrides config")
-	httpAddr := flag.String("http-addr", ":8443", "HTTP API listen address; overrides config")
+	httpAddr := flag.String("http-addr", ":8443", "REST API and dashboard listen address (HTTPS; HTTP with --insecure); overrides config")
+	dashboardDir := flag.String("dashboard-dir", server.DefaultDashboardDir, "built dashboard directory to serve; empty disables; overrides config")
 	dbURL := flag.String("db", "postgres://hookmon:hookmon@localhost:5432/hookmon?sslmode=disable", "PostgreSQL connection string; overrides config")
 	apiTokens := flag.String("api-tokens", "", "comma-separated API tokens; overrides config")
-	tlsCert := flag.String("tls-cert", "", "TLS certificate file; overrides config")
+	tlsCert := flag.String("tls-cert", "", "server TLS certificate file, used by gRPC, enrollment and REST; overrides config")
 	tlsKey := flag.String("tls-key", "", "TLS private key file; overrides config")
 	tlsCA := flag.String("tls-ca", "", "CA certificate that verifies bus certificates; overrides config")
 	tlsCAKey := flag.String("tls-ca-key", "", "CA private key that signs bus certificates at enrollment; overrides config")
-	insecure := flag.Bool("insecure", false, "disable TLS (development only); overrides config")
+	insecure := flag.Bool("insecure", false, "run gRPC and REST without TLS (development only); without it the server refuses to start with no certificate; overrides config")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -68,6 +69,8 @@ func main() {
 			cfg.EnrollAddr = *enrollAddr
 		case "http-addr":
 			cfg.HTTPAddr = *httpAddr
+		case "dashboard-dir":
+			cfg.DashboardDir = *dashboardDir
 		case "db":
 			cfg.Database.URL = *dbURL
 		case "api-tokens":
@@ -87,6 +90,13 @@ func main() {
 			cfg.TLS.Insecure = *insecure
 		}
 	})
+
+	// Refuse to start in plaintext unless --insecure (or tls.insecure) asked
+	// for it. Run checks this too; checking here gives the reason as the
+	// only error line.
+	if err := cfg.CheckTLS(); err != nil {
+		logger.Fatal("refusing to start without TLS", zap.Error(err))
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
