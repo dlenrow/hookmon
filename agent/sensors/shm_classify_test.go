@@ -43,6 +43,11 @@ func TestShmPtrClassifySHM(t *testing.T) {
 			[]byte("PATH=/usr/bin\x00BPFTIME_GLOBAL_SHM_NAME=innocuous_cache"), "unknown", event.SeverityInfo},
 		{"empty env value", "", shmPtrEnv("BPFTIME_GLOBAL_SHM_NAME="), "unknown", event.SeverityInfo},
 		{"bpf-related name", "hookmon_bpf_maps", plainEnv, "bpf_related", event.SeverityAlert},
+		{"libbpf name", "libbpf-ringbuf", nil, "bpf_related", event.SeverityAlert},
+		{"ebpf name", "my.ebpf.maps", nil, "bpf_related", event.SeverityAlert},
+		{"bpf followed by a digit", "xdp_bpf2", nil, "bpf_related", event.SeverityAlert},
+		{"random chromium name with bpf inside", ".org.chromium.Chromium.BtbpfW", nil, "unknown", event.SeverityInfo},
+		{"bpf inside a word", "abpfx", nil, "unknown", event.SeverityInfo},
 		{"generic name", "PostgreSQL.1804289383", plainEnv, "unknown", event.SeverityInfo},
 		{"generic name, no env", "sem.pulse", nil, "unknown", event.SeverityInfo},
 	}

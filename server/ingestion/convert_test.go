@@ -82,7 +82,9 @@ func TestProtoToEvent_AllSeverities(t *testing.T) {
 		{hookmonv1.Severity_SEVERITY_WARN, event.SeverityWarn},
 		{hookmonv1.Severity_SEVERITY_ALERT, event.SeverityAlert},
 		{hookmonv1.Severity_SEVERITY_CRITICAL, event.SeverityCritical},
-		{hookmonv1.Severity_SEVERITY_UNSPECIFIED, event.SeverityInfo}, // default
+		// Left empty so the policy engine rates it; INFO would mean the bus
+		// chose INFO, which the engine never raises.
+		{hookmonv1.Severity_SEVERITY_UNSPECIFIED, event.Severity("")},
 	}
 	for _, tt := range tests {
 		pe := &hookmonv1.HookEvent{Severity: tt.proto}

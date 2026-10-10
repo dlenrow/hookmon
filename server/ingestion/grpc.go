@@ -456,7 +456,10 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 	case hookmonv1.Severity_SEVERITY_CRITICAL:
 		evt.Severity = event.SeverityCritical
 	default:
-		evt.Severity = event.SeverityInfo
+		// Left empty, not INFO: the policy engine treats a bus INFO rating as
+		// deliberate and never raises it, but rates an event that came
+		// without one itself (reportedSeverity).
+		evt.Severity = ""
 	}
 
 	// Convert type-specific detail payloads.

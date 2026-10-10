@@ -25,11 +25,11 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | Fleet health banner | `deploy/docker/grafana/dashboards/hookmon.json` | The "Fleet Health" panel exists. | Code reading |
 | Read-only in default mode | Audit of the sensors | Tracepoints, uprobes and `FAN_CLASS_NOTIF` fanotify only. No blocking path exists. | Code reading |
 | Enforcement mode available | Audit of the whole repo | No enforcement code exists. | Not true |
-| Learning mode auto-populates candidates | Audit of `server/` | No learning mode, PENDING state or candidates exist anywhere. | Not true |
+| Learning mode auto-populates candidates | `test/integration/policy_test.go`; real bus, server and Postgres on drl-nuc8i3bek | Since step 7c, learning mode runs on the server, per fleet or per host, with an end time. Each unmatched unique tuple becomes a PENDING allowlist entry with occurrence count, first and last seen, and the hosts it appeared on. A 5-minute fleet learning run on the idle test host produced 14 PENDING entries. There is no bus-side candidate file; plan step 6 is out of scope. | Verified |
 | Every way code enters a Linux process | `docs/threat-model.md` | Since step 5, the threat model lists each way code enters a process and rates its coverage. Tested: `bpf()` load and the LINK_CREATE and RAW_TRACEPOINT_OPEN attach paths, BPF inventory, LD_PRELOAD/LD_AUDIT/LD_DEBUG, ld.so.preload and ld.so.conf.d, executable RPATH, `.so` files in the four library directories, glibc dlopen (including in containers), ptrace register writes, and /dev/shm via openat and openat2. Not covered: attaches outside `bpf()`, BPF_LINK_UPDATE, dlmopen, musl and static binaries, libraries' own RUNPATH, other library directories, process_vm_writev, writes to /proc/<pid>/mem, reflective and JIT loaders, SysV shm, io_uring opens, kernel modules, binfmt_misc, and GCONV_PATH and interpreter variables. | Not true |
 | mTLS enrollment | `server/ingestion` Postgres integration tests; real `hookmon-bus` and `hookmon-server` on drl-nuc8i3bek | Since step 7a: the bus enrolls on a separate port (9444) that authenticates the server only, using a token from the server config (constant-time compare, expiry, optional single-use). The server signs the CSR and assigns the HostID as the certificate CN. Every other RPC (port 9443) requires a CA-signed client certificate, and the HostID comes from that certificate, never from the message. Since 7b, TLS is the default: the server and the bus refuse plaintext unless `--insecure` is given. | Verified |
 | SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | Audit of `server/connectors`, `cmd/hookmon-server` | The connectors exist, but `hookmon-server` cannot enable any of them, so nothing reaches a SIEM. Fixed in 7d. | Not true |
-| Allowlist scopes and learning mode on the server | Audit of `server/policy` | There is no learning mode and no PENDING state, and the allowlist is read only at startup. Fixed in 7c. | Not true |
+| Allowlist scopes and learning mode on the server | `test/integration/policy_test.go`; `pkg/allowlist` tests; real stack on drl-nuc8i3bek | Since step 7c, candidates are approved or rejected through the API and CLI, either for the fleet or for one host (a `host_id`-scoped entry). After all 14 PENDING entries were approved, the only non-ALLOW events came from a newly loaded BPF canary. A policy change through the API takes effect in about 26 ms, with no restart; SIGHUP also reloads. The dashboard approval page comes in 7e. | Verified |
 | Dashboard pages (event feed, policies, hosts, investigation, settings) | Audit of `dashboard/`; `curl` against the server on drl-nuc8i3bek | Since 7b the server serves the built dashboard over TLS, with client-side routes falling back to `index.html`. The pages call the real API. Still open until 7e: the WebSocket feed accepts any token and splits events across tabs, and Settings is static. | Not true |
 | Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | Audit of `appliance/`, `deploy/` | Only the compose monitoring stack runs. Packer targets QEMU only and would fail, the ISO builder is a stub, the RPM spec and Ansible roles are broken, and the DEB ships the old binary. Fixed in 7g. | Not true |
 
@@ -246,3 +246,27 @@ Ran on drl-nuc8i3bek with a real Postgres (`postgres:16-alpine`, pinned by diges
 | `Dockerfile.server` serves the dashboard | Read the Dockerfile | Not built; the test host's disk is full. | Code reading |
 
 Still open: the appliance's nginx proxies to plain HTTP and starts the server without TLS, so it will now refuse to start (7g). The dashboard shows an enrollment command that doesn't exist (7e).
+
+### Step 7c: Policy and learning mode (2026-10-10)
+
+Ran on drl-nuc8i3bek with a real root bus (enrolled), a TLS server and Postgres 16.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| 5 minutes of fleet learning on an idle host produces a PENDING list | Real stack | 14 PENDING entries: 13 BPF_INVENTORY programs, by tag and type, each seen 12 times; 1 shared-memory entry from `/opt/slimjet/slimjet`, pattern `unknown`, seen 576 times. All on one host. | Verified |
+| After approving everything, a new BPF canary is the only alert | Real stack, `hello_bpf_v2.o` | The only non-ALLOW events were 6 from `load_canary`: 4 BPF_LOAD (including cilium/ebpf feature probes) and 2 BPF_ATTACH. They were CRITICAL because they ran as root. The 50 slimjet shm events in that window matched the learned entry. | Verified |
+| A policy change through the API takes effect within 1 s, with no restart | `test/integration/policy_test.go`; real stack | 26 ms from the start of the POST to the next event stored as ALLOW. On the real stack, a canary launched 8 ms after the POST was allowed. SIGHUP reload is tested with a real signal. | Verified |
+| One matcher for the server and the e2e tests | `pkg/allowlist`; `TestPolicy_*ByProgHash` | The e2e copy of the matcher is deleted. The policy tests now run through the real matcher and assert the same results. | Verified |
+| `prog_hash` is stored | Postgres integration test | Stored and read back (migration 006). | Verified |
+| No regressions | `make build-all`, `go vet ./...`, `go test -race ./...`, root `go test -race ./agent/...`, 18 Postgres tests, `make test-e2e` | Pass. e2e: 38 pass, 2 skip, 0 fail. | Verified |
+
+Design:
+- **Severity.** The server keeps the bus's rating, with two increases: an event from root becomes CRITICAL, and a WARN event with no exe hash becomes ALERT. Neither increase applies to an event the bus rated INFO, or to ELF_RPATH. The full table is in CLAUDE.md.
+- **Dedupe key.** The key is event type, exe hash, subject, and a flag for whether the event came from a container.
+- **Shared memory is keyed on the bus's pattern, not the segment name.** On the first run, Chromium's random names made 566 of 599 candidates.
+- **Containers.** The bus reports container IDs, not image names. The key uses "ran in a container", and `container_image` in an allowlist entry is still compared against the container ID.
+- **Multiple matches.** When several entries match, the most restrictive action wins.
+
+Fixed while merging:
+- The server turned an event with no severity into INFO, which the new table never raises. It now leaves the severity empty, so the engine rates the event itself.
+- The shm `bpf_related` rule matched "bpf" anywhere in a name. That made Chromium's random `.org.chromium.Chromium.BtbpfW` an ALERT. It now needs "bpf", "ebpf" or "libbpf" as a separate word.

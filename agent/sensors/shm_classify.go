@@ -2,6 +2,7 @@ package sensors
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 
 	"github.com/dlenrow/hookmon/pkg/event"
@@ -31,19 +32,25 @@ const bpftimeShmNameEnv = "BPFTIME_GLOBAL_SHM_NAME"
 //     bpftime_maps_shm, does), or the creator's environment sets
 //     BPFTIME_GLOBAL_SHM_NAME to this name, which is how bpftime runs under
 //     any other name.
-//   - "bpf_related", ALERT: the name contains "bpf".
-//   - "unknown", INFO: anything else. Many programs use /dev/shm.
+//   - "bpf_related", ALERT: the name has "bpf" (or "ebpf", "libbpf") as a
+//     word of its own, e.g. "hookmon_bpf_maps" or "libbpf-ringbuf".
+//   - "unknown", INFO: anything else. Many programs use /dev/shm, and some
+//     use random names ("BtbpfW" in a Chromium segment is not BPF).
 func classifySHM(name string, env []byte) (string, event.Severity) {
 	lower := strings.ToLower(name)
 	switch {
 	case strings.Contains(lower, "bpftime"), shmEnvNamesBpftime(env, name):
 		return shmPatternBpftime, event.SeverityCritical
-	case strings.Contains(lower, "bpf"):
+	case shmBPFWord.MatchString(lower):
 		return shmPatternBPFRelated, event.SeverityAlert
 	default:
 		return shmPatternUnknown, event.SeverityInfo
 	}
 }
+
+// shmBPFWord matches "bpf", "ebpf" or "libbpf" as a word of its own in a
+// lower-cased segment name: not run into other letters on either side.
+var shmBPFWord = regexp.MustCompile(`(^|[^a-z0-9])(lib|e)?bpf([^a-z]|$)`)
 
 // shmEnvNamesBpftime reports whether env sets BPFTIME_GLOBAL_SHM_NAME to
 // the segment name. boost::interprocess adds a leading '/' when the value has
