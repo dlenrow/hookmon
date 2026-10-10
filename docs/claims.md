@@ -27,6 +27,11 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | Enforcement mode available | Audit of the whole repo | No enforcement code exists. | Not true |
 | Learning mode auto-populates candidates | Audit of `server/` | No learning mode, PENDING state or candidates exist anywhere. | Not true |
 | Every way code enters a Linux process | `docs/threat-model.md` | Since step 5, the threat model lists each way code enters a process and rates its coverage. Tested: `bpf()` load and the LINK_CREATE and RAW_TRACEPOINT_OPEN attach paths, BPF inventory, LD_PRELOAD/LD_AUDIT/LD_DEBUG, ld.so.preload and ld.so.conf.d, executable RPATH, `.so` files in the four library directories, glibc dlopen (including in containers), ptrace register writes, and /dev/shm via openat and openat2. Not covered: attaches outside `bpf()`, BPF_LINK_UPDATE, dlmopen, musl and static binaries, libraries' own RUNPATH, other library directories, process_vm_writev, writes to /proc/<pid>/mem, reflective and JIT loaders, SysV shm, io_uring opens, kernel modules, binfmt_misc, and GCONV_PATH and interpreter variables. | Not true |
+| mTLS enrollment | `server/ingestion` Postgres integration tests; real `hookmon-bus` and `hookmon-server` on drl-nuc8i3bek | Since step 7a: the bus enrolls on a separate port (9444) that authenticates the server only, using a token from the server config (constant-time compare, expiry, optional single-use). The server signs the CSR and assigns the HostID as the certificate CN. Every other RPC (port 9443) requires a CA-signed client certificate, and the HostID comes from that certificate, never from the message. TLS is still opt-in until 7b. | Verified |
+| SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | Audit of `server/connectors`, `cmd/hookmon-server` | The connectors exist, but `hookmon-server` cannot enable any of them, so nothing reaches a SIEM. Fixed in 7d. | Not true |
+| Allowlist scopes and learning mode on the server | Audit of `server/policy` | There is no learning mode and no PENDING state, and the allowlist is read only at startup. Fixed in 7c. | Not true |
+| Dashboard pages (event feed, policies, hosts, investigation, settings) | Audit of `dashboard/` | The pages call the real API. The WebSocket feed accepts any token and splits events across tabs, Settings is static, and nothing serves the built dashboard. Fixed in 7b and 7e. | Not true |
+| Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | Audit of `appliance/`, `deploy/` | Only the compose monitoring stack runs. Packer targets QEMU only and would fail, the ISO builder is a stub, the RPM spec and Ansible roles are broken, and the DEB ships the old binary. Fixed in 7g. | Not true |
 
 ## Step log
 
@@ -199,3 +204,27 @@ Limits:
 - **Bugs found while writing docs, and fixed:**
   - `HookMonNoEvents24h` could never fire. The periodic `BPF_INVENTORY` events kept `hookmon_events_total` rising, so the recording rule now excludes them. A promtool case for an inventory-only host fails against the old rule and passes against the new one (`promtool test rules`, on drl-nuc8i3bek).
   - This ledger named five e2e tests without their `TestSensor1_` prefix, and implied that ptrace SEIZE, POKETEXT and POKEDATA had tests. Both are corrected.
+
+### Step 7a: Enrollment and host identity (2026-10-10)
+
+Ran on drl-nuc8i3bek against a real Postgres (`postgres:16-alpine`, pinned by digest, removed afterwards) and the real binaries.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| A fresh host enrolls and appears in the inventory | Integration test, plus real `hookmon-bus --enroll-token` as root | The bus enrolled with a single-use token and stored its key and certificates with mode 0600; `openssl verify -purpose sslclient` passes. The host shows ONLINE with 8 sensors alive, and 67 events were stored under the certificate CN. | Verified |
+| Expired, reused and invalid tokens are rejected | Integration test, plus the real bus | All rejected with PermissionDenied, including a single-use token reused after a server restart. | Verified |
+| Host A's certificate cannot send as host B | Integration test | Events and heartbeats are recorded under A's certificate CN, whatever HostID the message carries. | Verified |
+| Stopping the bus raises an offline alert within the watchdog timeout | Integration test (2 s timeout); real bus (20 s timeout, 5 s check) | AGENT_OFFLINE fired 1.97 s after stop in the test and 20.97 s after `kill -TERM` with the real bus. The host went UNRESPONSIVE, then back ONLINE when the bus restarted with its stored identity. | Verified |
+| No regressions | `make build-all`, `go vet ./...`, `go test -race ./...`, root `go test -race ./agent/...`, `make test-e2e` | Pass. e2e: 38 pass, 2 skip, 0 fail. | Verified |
+
+Design:
+- A YAML server config (`deploy/server.example.yaml`) holds addresses, TLS, database, API, enrollment tokens and watchdog settings.
+- Single-use tokens are recorded by fingerprint in Postgres, in the same transaction as the new host row.
+- Heartbeats now carry the sensor-registry snapshot, which is stored per host.
+- Plaintext mode still trusts the message HostID as an explicit development mode, with a warning. Step 7b makes TLS the default.
+
+Known gaps:
+- The bus and server can still run with TLS off (7b).
+- `events.uid` is a 32-bit INTEGER, so events carrying UID 4294967295 ("unknown", since step 4) can't be stored. This is pulled forward from 7f into 7b.
+- `--enroll-token` is visible in the process list during the first start.
+- No AGENT_RECOVERED event is sent when a host comes back.
