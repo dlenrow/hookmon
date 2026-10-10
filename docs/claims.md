@@ -28,7 +28,7 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | Learning mode auto-populates candidates | `test/integration/policy_test.go`; real bus, server and Postgres on drl-nuc8i3bek | Since step 7c, learning mode runs on the server, per fleet or per host, with an end time. Each unmatched unique tuple becomes a PENDING allowlist entry with occurrence count, first and last seen, and the hosts it appeared on. A 5-minute fleet learning run on the idle test host produced 14 PENDING entries. There is no bus-side candidate file; plan step 6 is out of scope. | Verified |
 | Every way code enters a Linux process | `docs/threat-model.md` | Since step 5, the threat model lists each way code enters a process and rates its coverage. Tested: `bpf()` load and the LINK_CREATE and RAW_TRACEPOINT_OPEN attach paths, BPF inventory, LD_PRELOAD/LD_AUDIT/LD_DEBUG, ld.so.preload and ld.so.conf.d, executable RPATH, `.so` files in the four library directories, glibc dlopen (including in containers), ptrace register writes, and /dev/shm via openat and openat2. Not covered: attaches outside `bpf()`, BPF_LINK_UPDATE, dlmopen, musl and static binaries, libraries' own RUNPATH, other library directories, process_vm_writev, writes to /proc/<pid>/mem, reflective and JIT loaders, SysV shm, io_uring opens, kernel modules, binfmt_misc, and GCONV_PATH and interpreter variables. | Not true |
 | mTLS enrollment | `server/ingestion` Postgres integration tests; real `hookmon-bus` and `hookmon-server` on drl-nuc8i3bek | Since step 7a: the bus enrolls on a separate port (9444) that authenticates the server only, using a token from the server config (constant-time compare, expiry, optional single-use). The server signs the CSR and assigns the HostID as the certificate CN. Every other RPC (port 9443) requires a CA-signed client certificate, and the HostID comes from that certificate, never from the message. Since 7b, TLS is the default: the server and the bus refuse plaintext unless `--insecure` is given. | Verified |
-| SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | Audit of `server/connectors`, `cmd/hookmon-server` | The connectors exist, but `hookmon-server` cannot enable any of them, so nothing reaches a SIEM. Fixed in 7d. | Not true |
+| SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` on drl-nuc8i3bek; `server/connectors` tests | Since step 7d, connectors are configured in the server config, and a bad setting fails startup. Each connector delivers asynchronously from its own queue. A BPF canary reached real syslog and webhook receivers: an RFC 5424 line with valid CEF fields, and the full JSON event. AGENT_OFFLINE reached both after the bus stopped. Splunk HEC, Elastic (bulk, auth, ILM policy and index template) and Kafka are tested only against stand-ins (`httptest` servers and sarama's mock producer), not real products. Syslog has no TLS, and Kafka has no TLS or SASL. | Verified |
 | Allowlist scopes and learning mode on the server | `test/integration/policy_test.go`; `pkg/allowlist` tests; real stack on drl-nuc8i3bek | Since step 7c, candidates are approved or rejected through the API and CLI, either for the fleet or for one host (a `host_id`-scoped entry). After all 14 PENDING entries were approved, the only non-ALLOW events came from a newly loaded BPF canary. A policy change through the API takes effect in about 26 ms, with no restart; SIGHUP also reloads. The dashboard approval page comes in 7e. | Verified |
 | Dashboard pages (event feed, policies, hosts, investigation, settings) | Audit of `dashboard/`; `curl` against the server on drl-nuc8i3bek | Since 7b the server serves the built dashboard over TLS, with client-side routes falling back to `index.html`. The pages call the real API. Still open until 7e: the WebSocket feed accepts any token and splits events across tabs, and Settings is static. | Not true |
 | Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | Audit of `appliance/`, `deploy/` | Only the compose monitoring stack runs. Packer targets QEMU only and would fail, the ISO builder is a stub, the RPM spec and Ansible roles are broken, and the DEB ships the old binary. Fixed in 7g. | Not true |
@@ -270,3 +270,28 @@ Design:
 Fixed while merging:
 - The server turned an event with no severity into INFO, which the new table never raises. It now leaves the severity empty, so the engine rates the event itself.
 - The shm `bpf_related` rule matched "bpf" anywhere in a name. That made Chromium's random `.org.chromium.Chromium.BtbpfW` an ALERT. It now needs "bpf", "ebpf" or "libbpf" as a separate word.
+
+### Step 7d: Alerting and SIEM (2026-10-10)
+
+Ran on drl-nuc8i3bek with a real root bus (enrolled), a TLS server, Postgres 16, and syslog and webhook receivers in `alpine:3.20` containers pinned by digest. All were removed afterwards.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| A BPF canary load reaches syslog and webhook | `TestSIEM_RealStackCanaryReachesSyslogAndWebhook`, run twice | Syslog received `<130>1 2026-10-10T23:46:59.185902Z drl-NUC8i3BEK hookmon - BPF_LOAD - CEF:0\|HookMon\|HookMon\|1.0\|BPF_LOAD\|BPF Program Loaded\|10\|... cs2=hello_count cs5Label=ProgTag cs5=aa93b500236fde34 ...`. The webhook received the event JSON with `bpf_detail.prog_hash` set to the tag and `policy_result.action` ALERT. | Verified |
+| Hosts going offline reach the connectors | Real stack, plus an integration test | AGENT_OFFLINE reached the webhook 8.8 s after SIGTERM (10 s timeout) and also reached syslog. In the integration test it arrived in 2.2 s (2 s timeout). | Verified |
+| Connector config errors fail startup | `server/config_test.go`, `cmd/hookmon-server/main_test.go` | Pass. | Verified |
+| A slow sink doesn't block ingestion; drops are counted | `server/connectors` queue tests | Pass. | Verified |
+| Splunk HEC, Elastic bulk with auth and ILM, webhook batching (no retry on 4xx), Kafka | `httptest` and sarama mock tests | Pass, against stand-ins only. | Verified |
+| No regressions | `make build-all`, `go vet ./...`, `go test -race ./...`, root `go test -race ./agent/...`, 20 Postgres tests, `make test-e2e` | All pass. e2e: 38 pass, 3 skip (the SIEM test is env-gated), 0 fail. | Verified |
+
+Design:
+- Each connector has a `min_severity`. The default, ALERT, sends unallowed events at that level or above, deduplicated for 5 minutes. INFO or WARN sends every event. AGENT_OFFLINE always goes out.
+- The dedup key is host + exe path + the learning key. On the NUC, `load_canary`'s feature-probe loads would otherwise have hidden the canary.
+- CEF uses only valid keys (no `cs7`) and has fields for every event type. Pipes are escaped only in the header, as the CEF spec says. Events without a process no longer claim `suid=0`.
+- Elastic installs a delete-after ILM policy (90 days by default) and an index template at startup. `ilm.setup: false` skips this.
+
+Fixed while merging: AGENT_OFFLINE timestamps were in local time; they are now UTC. Doc lines that still said connectors didn't work are corrected.
+
+Still open:
+- No AGENT_RECOVERED event is sent.
+- The hostname in events (syslog HOSTNAME, CEF `shost`) is what the bus reports. The host ID comes from its certificate (7f).

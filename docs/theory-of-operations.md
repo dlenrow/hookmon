@@ -336,7 +336,7 @@ The bus cannot be trusted to report its own health if it has been compromised. T
 
 This does not cover an attacker with root on the host, who can stop the bus and serve a fake "alive" `/status`, or write fresh timestamps into a heartbeat map. See [SECURITY.md](../SECURITY.md).
 
-On the server path, `hookmon-server` has a watchdog of its own. A host with no heartbeat for `watchdog.heartbeat_timeout` (default 60 s) is marked UNRESPONSIVE and an AGENT_OFFLINE event (CRITICAL) is stored. Heartbeats arrive over mutual TLS, and the server takes the host ID from the bus's certificate, so one host cannot keep another looking alive. The same root attacker can still run a fake bus with the stolen key and certificate from `/var/lib/hookmon`. AGENT_OFFLINE reaches the database and the dashboard, but no SIEM connector yet (fix plan step 7d).
+On the server path, `hookmon-server` has a watchdog of its own. A host with no heartbeat for `watchdog.heartbeat_timeout` (default 60 s) is marked UNRESPONSIVE and an AGENT_OFFLINE event (CRITICAL) is stored. Heartbeats arrive over mutual TLS, and the server takes the host ID from the bus's certificate, so one host cannot keep another looking alive. The same root attacker can still run a fake bus with the stolen key and certificate from `/var/lib/hookmon`. AGENT_OFFLINE is stored and sent to every configured SIEM connector, whatever its `min_severity`.
 
 ### Tamper Signal Hierarchy
 

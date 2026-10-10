@@ -40,7 +40,7 @@ The server (`hookmon-server`) accepts gRPC streams from sensor buses and exposes
 - **WebSocket** (`/api/v1/ws/events`). It accepts any non-empty token and any Origin (step 7e).
 - **PostgreSQL.** The default connection string points at localhost with `sslmode=disable` and a fixed password. Set it in the server config file (`database.url`) rather than with `--db`, which shows in the process list.
 - **Server config file** (`/etc/hookmon/server.yaml` by default). It holds the database password, API tokens and enrollment secrets, and names the CA key, which can sign a certificate for any host. Keep the file and the key root-only (mode 0600).
-- **SIEM connectors.** Outbound connections to configured endpoints. Today nothing configures them (step 7d).
+- **SIEM connectors.** Outbound connections to the endpoints in the server config's `connectors` section. Their secrets (HEC token, Elastic credentials, webhook headers) live in that file. Syslog is plain TCP or UDP, and Kafka has no TLS or SASL options yet.
 
 ## Known Limitations
 

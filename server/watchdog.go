@@ -115,7 +115,7 @@ func (w *Watchdog) check(ctx context.Context) {
 		// Generate AGENT_OFFLINE event (CRITICAL / SEV-1)
 		alertEvt := &event.HookEvent{
 			ID:        uuid.New().String(),
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 			HostID:    host.ID,
 			Hostname:  host.Hostname,
 			EventType: event.EventAgentOffline,

@@ -836,7 +836,7 @@ At this point you have a working standalone agent that detects BPF loads and exe
 6. `agent/transport/grpc.go` — agent-side gRPC client
 7. `cmd/hookmon-server/main.go` — server binary
 
-Status: built, with gaps. Enrollment (7a) and TLS by default (7b) work. The allowlist loads once at startup (7c). SIEM connectors work (7d); their e2e test is the only one on this path, and the full-path test is 7h.
+Status: built, with gaps. Enrollment (7a), TLS by default (7b), learning mode with allowlist reload on every API write and SIGHUP (7c), and SIEM connectors (7d) work. The SIEM e2e test is the only one on this path; the full-path test is 7h.
 
 ### Phase 3: Dashboard
 
