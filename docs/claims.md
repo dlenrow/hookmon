@@ -12,13 +12,13 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 
 | Claim | Test or command | Result | Status |
 | --- | --- | --- | --- |
-| Eight sensors | Audit of `agent/sensors/` at d961b69 | Eight implementations exist. `elf_rpath` is not a started sensor: it only runs on events other sensors emit (`agent/agent.go:240`). Since step 3, `/status` lists only the seven sensors that are actually started; `elf_rpath` comes back as a real sensor in step 4. | Code reading |
-| SHA256 bytecode hashing detects a modified program with the same name | Audit of `agent/sensors/bpf_syscall.go` | The hash covers the loader's buffer, which includes map fd numbers, and is read from `/proc/<pid>/mem` after the call. It is unstable across loads and races the loader. To be replaced by the kernel program tag in step 4. | Not true |
+| Eight sensors | `make test-e2e`; `/status` | Eight sensors are started and health-checked. Since step 4, `elf_rpath` is its own eBPF sensor on `sched_process_exec`. The e2e suite detects an attack for each of the eight. | Verified |
+| SHA256 bytecode hashing detects a modified program with the same name | `TestBPFSyscall_SameProgramSameTag`, `TestBPFSyscall_ModifiedProgramNewTag` | The capability works, but not by SHA256. Since step 4 the bus records the kernel's program tag, which the kernel computes over the instructions with map references zeroed, so it is stable across loads. The same canary loaded twice gets the same tag; a modified canary gets a new one. Two programs with identical instructions and different types share a tag, so allowlist entries should also pin the program type. The blog should say "kernel program tag". | Not true |
 | Enrichment with PID, UID, cmdline, exe path, exe SHA256, cgroup, container ID | Audit of `agent/enrichment/` | Partial. fanotify events default UID to 0. Container IDs are only recognized for docker/64-hex. The exe hash uses the host-namespace path for container processes. | Not true |
-| `lib_integrity` baselines at startup; package-manager writes are INFO | Audit of `agent/sensors/lib_integrity.go` | No baseline is taken (`OldHash` is never set). There is no package-manager detection. | Not true |
-| `linker_config` catches linker-cache poisoning | Audit of `agent/sensors/linker_config.go` | `/etc/ld.so.cache` is not watched. Only close-write events are seen, so rename, delete and `sed -i` are missed. | Not true |
+| `lib_integrity` baselines at startup; package-manager writes are INFO | `TestLibIntegrity_AptReinstallIsInfo`, `TestLibIntegrity_SoOperations` | Since step 4, every watched file is hashed at startup and each event carries the previous hash. Package-manager writes are INFO: `apt-get install --reinstall libmnl0` produced only INFO events, and the writer was recognized by dpkg's executable path. The server still overrides bus severity (`server/policy/engine.go`) until step 7c, so INFO reaches the console, Loki and metrics but not the server path. | Verified |
+| `linker_config` catches linker-cache poisoning | `TestLinkerConfig_PreloadOperations`; the apt reinstall run | Since step 4, `/etc/ld.so.cache` is watched along with `/etc/ld.so.preload` and `ld.so.conf(.d)`. Directory-entry events catch create, delete and rename. `cp`, `sed -i`, `mv`, `ln -sf` and `rm` on `/etc/ld.so.preload` each raised CRITICAL. ldconfig's rewrite of `ld.so.cache` was seen, as INFO because the writer was the package manager. No test writes `ld.so.cache` from outside a package manager. | Verified |
 | `ptrace_monitor` sees register manipulation | Audit of `agent/sensors/ptrace_monitor.c` | Filters only ATTACH, SEIZE, POKETEXT and POKEDATA. SETREGS, SETREGSET and POKEUSER are not seen. | Not true |
-| `elf_rpath` audits every exec | Audit of `agent/agent.go` | It runs only on events emitted by other sensors, not on every exec. | Not true |
+| `elf_rpath` audits every exec | `TestSensor8_ElfRpath_OriginTmpCleanEnv` (10/10), `TestSensor8_ElfRpath_SuspiciousPath` (10/10) | Since step 4, every successful exec (execve and execveat) runs through `sched_process_exec`. The binary is identified by the kernel's inode and mtime, with an LRU cache that also remembers binaries with no RPATH. Not analysed if the process has already exited and its path can't be resolved: relative paths outside the cwd, `/dev/fd/N` (fexecve, memfd), scripts (the interpreter is what loads), other mount namespaces, and names of 255 bytes or more. | Verified |
 | Heartbeat every 10 s independent of traffic | `TestHeartbeat_IdleAllAlive` (`HOOKMON_E2E_LONG=1`); `agent/health_test.go` | Since step 3, every 10 s the bus fires each eBPF hook itself. A sensor is alive only if its kernel heartbeat map advanced and its program and link are still attached. On an idle host all sensors were alive at every one of 120 polls over 10 minutes. Detaching a hook can't be tested on kernel 5.19 (`bpftool link detach` returns EOPNOTSUPP for these links), so the dead path is covered by unit tests. A root attacker can forge the heartbeat map (see SECURITY.md). | Verified |
 | `/status` plus a 30 s collector poll | `TestHeartbeat_KillBusCollectorUnreachable` | Default poll is 30 s. After `kill -9` of the bus, the collector (set to poll every 2 s for the test) reported the host unreachable 1.955 s later, within one poll. A root attacker can serve a fake `/status` (see SECURITY.md). | Verified |
 | Four-row alert hierarchy, including "zero events for 24h" | `promtool test rules deploy/docker/grafana/alerts/tests/*.yml`; live run on drl-nuc8i3bek | There are five rules: HostUnreachable, SensorDead, FleetDegraded, plus CollectorSilent and NoEvents24h (new in step 3). Alertmanager now routes them to a placeholder webhook. CollectorSilent fired live after the collector was stopped and reached Alertmanager. Both new rules pass promtool unit tests; NoEvents24h has not fired on a live host. The blog's "four rows" no longer matches the count. | Verified |
@@ -102,3 +102,29 @@ Tests whose expectations changed: `TestOverallAllUnknown`, `TestStatusHandler` a
 Deviations from the plan:
 - `/bin/true` runs every cycle, not once a minute, because a once-a-minute probe can't meet a 15 s threshold.
 - The default `dead_threshold` is now 15 s, down from 35 s.
+
+### Step 4, wave 1: bpf_syscall, elf_rpath, linker_config and lib_integrity (2026-10-10)
+
+Three branches were merged onto main and the merged tree was run on drl-nuc8i3bek. The merge caused one compile error: two Linux-only test helpers had the same name. It was fixed in a follow-up commit.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| The same program loaded twice gets the same tag | `TestBPFSyscall_SameProgramSameTag` | Pass. | Verified |
+| A modified program gets a different tag | `TestBPFSyscall_ModifiedProgramNewTag` | Pass. | Verified |
+| A program loaded before the bus starts appears in the first inventory | `TestBPFInventory_PreexistingProgram` | Pass. `BPF_INVENTORY` events go out at startup and every 5 minutes, followed by a host summary. | Verified |
+| Link-based and raw-tracepoint attaches are reported | `TestBPFSyscall_LinkCreateAttach`, `TestBPFSyscall_RawTracepointAttach` | Pass. | Verified |
+| New event fields survive the wire | `test/transport/bpf_inventory_wire_test.go` | Pass. The test fails if a field is dropped from the converter. | Verified |
+| A binary with RUNPATH `$ORIGIN/../tmp`, run with a clean environment, raises ELF_RPATH | `TestSensor8_ElfRpath_OriginTmpCleanEnv` | 10/10, CRITICAL. | Verified |
+| The Sensor8 flake is gone | `TestSensor8_ElfRpath_SuspiciousPath`, 10x standalone | 10/10, against about 50% before. | Verified |
+| `cp`, `sed -i`, `mv`, `ln -sf` and `rm` against `/etc/ld.so.preload` and against a `.so` in `/usr/lib` | `TestLinkerConfig_PreloadOperations`, `TestLibIntegrity_SoOperations` | Each operation raises an event. `/etc/ld.so.preload` and `/usr/lib` were restored afterwards; neither the file nor any canary was left behind. | Verified |
+| An apt reinstall of a library is INFO, not ALERT | `TestLibIntegrity_AptReinstallIsInfo` (libmnl0) | INFO. | Verified |
+| Everything as CI runs it, plus root-only unit tests | `make build-all`, `go vet ./...`, `go test -race ./...`, `sudo go test -race ./agent/sensors/`, `make smoketest` | Pass. | Verified |
+| Full e2e suite | `make test-e2e`, run twice | 24 pass, 2 skip, 0 fail, both runs. | Verified |
+
+Design decisions that change behavior:
+- `ProgHash` now holds the kernel program tag (16 hex digits, as `bpftool` prints it), not a sha256 of the loader's buffer. Existing `prog_hash` allowlist values no longer match.
+- `MAP_CREATE` is no longer reported. A map runs no code, and any program that uses it is reported when it loads.
+- File hashes from `linker_config` and `lib_integrity` use `sha256:<hex>`.
+- When the writer process has already exited, UID is reported as 4294967295 ("unknown"), not 0.
+
+Not covered: attaches that don't go through `bpf()` (perf `SET_BPF` ioctl, netlink XDP/tc, `SO_ATTACH_BPF`); `BPF_LINK_UPDATE`; moving a file out of a watched directory (`FAN_MOVED_FROM` is not in the mask); writes through a hard link outside the watched directories; `/usr/local/lib` and other `ld.so.conf` directories.

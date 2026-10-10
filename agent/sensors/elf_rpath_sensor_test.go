@@ -34,7 +34,7 @@ func execRecord(t *testing.T, path, filename string, pid, ppid uint32) *rpathExe
 	return raw
 }
 
-func writeFile(t *testing.T, path string) {
+func writeExecutable(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte("#!/bin/true\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func writeFile(t *testing.T, path string) {
 
 func TestOpenExecutedAbsoluteAfterExit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tool")
-	writeFile(t, path)
+	writeExecutable(t, path)
 	f, got := openExecuted(execRecord(t, path, path, noSuchPID, noSuchPID))
 	if f == nil {
 		t.Fatal("absolute filename of an exited process was not resolved")
@@ -59,7 +59,7 @@ func TestOpenExecutedAbsoluteAfterExit(t *testing.T) {
 func TestOpenExecutedRejectsReplacedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tool")
-	writeFile(t, path)
+	writeExecutable(t, path)
 	raw := execRecord(t, path, path, noSuchPID, noSuchPID)
 
 	// Rewritten in place: same inode, new mtime.
@@ -77,7 +77,7 @@ func TestOpenExecutedRejectsReplacedFile(t *testing.T) {
 	if err := os.Rename(path, path+".old"); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, path)
+	writeExecutable(t, path)
 	if f, _ := openExecuted(raw); f != nil {
 		f.Close()
 		t.Error("replacement file with a different inode was accepted")
@@ -88,7 +88,7 @@ func TestOpenExecutedRejectsReplacedFile(t *testing.T) {
 func TestOpenExecutedFIFODoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tool")
-	writeFile(t, path)
+	writeExecutable(t, path)
 	raw := execRecord(t, path, path, noSuchPID, noSuchPID)
 	os.Remove(path)
 	if err := syscall.Mkfifo(path, 0o644); err != nil {
@@ -117,7 +117,7 @@ func TestOpenExecutedFIFODoesNotBlock(t *testing.T) {
 func TestOpenExecutedRelativeViaParentCwd(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tool")
-	writeFile(t, path)
+	writeExecutable(t, path)
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -148,7 +148,7 @@ func TestOpenExecutedRelativeViaParentCwd(t *testing.T) {
 // /dev/fd/N (execveat with a dirfd, fexecve) would name the bus's own fd.
 func TestOpenExecutedSkipsDevFd(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tool")
-	writeFile(t, path)
+	writeExecutable(t, path)
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestOpenExecutedProcExe(t *testing.T) {
 func TestHandleExecCachesNegativeResults(t *testing.T) {
 	s := NewElfRpathSensor()
 	path := filepath.Join(t.TempDir(), "tool")
-	writeFile(t, path) // not ELF: analyzed as "no RPATH"
+	writeExecutable(t, path) // not ELF: analyzed as "no RPATH"
 
 	raw := execRecord(t, path, path, noSuchPID, noSuchPID)
 	if evt := s.handleExec(raw); evt != nil {
