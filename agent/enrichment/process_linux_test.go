@@ -151,11 +151,15 @@ func TestEnrichContainerExeHashedThroughProcRoot(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot create user and mount namespaces here: %v", err)
 	}
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	// done is closed once Wait returns, so both the loop below and the
+	// cleanup can wait on it; a one-shot channel value would leave the
+	// cleanup blocked forever after the loop took it.
+	var waitErr error
+	done := make(chan struct{})
+	go func() { waitErr = cmd.Wait(); close(done) }()
 	t.Cleanup(func() {
 		cmd.Process.Kill()
-		<-exited
+		<-done
 	})
 
 	procDir := fmt.Sprintf("/proc/%d", cmd.Process.Pid)
@@ -165,12 +169,12 @@ func TestEnrichContainerExeHashedThroughProcRoot(t *testing.T) {
 			break
 		}
 		select {
-		case err := <-exited:
+		case <-done:
 			var ee *exec.ExitError
-			if errors.As(err, &ee) && ee.ExitCode() == enrichSetupFailed {
+			if errors.As(waitErr, &ee) && ee.ExitCode() == enrichSetupFailed {
 				t.Skipf("namespace setup refused here: %s", stderr.String())
 			}
-			t.Fatalf("child exited before exec: %v: %s", err, stderr.String())
+			t.Fatalf("child exited before exec: %v: %s", waitErr, stderr.String())
 		default:
 		}
 		if time.Now().After(deadline) {
