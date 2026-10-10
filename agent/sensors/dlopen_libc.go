@@ -287,6 +287,13 @@ type dlopenAttachments struct {
 	attach func(*dlopenCandidate) (io.Closer, error)
 }
 
+// dlopenMaxAttachments caps how many distinct libcs get a uprobe link. Any
+// user can map private copies of libc, and each copy would cost the bus a
+// link and a program run per dlopen. Past the cap a libc is recorded as
+// failed, so the attachment check reports the sensor unhealthy rather than
+// the bus growing without bound.
+var dlopenMaxAttachments = 256
+
 func newDlopenAttachments(attach func(*dlopenCandidate) (io.Closer, error)) *dlopenAttachments {
 	return &dlopenAttachments{
 		attached: make(map[dlopenLibcID]*dlopenAttachment),
@@ -316,6 +323,10 @@ func (a *dlopenAttachments) reconcile(found map[dlopenLibcID]*dlopenCandidate) i
 	}
 	for _, id := range dlopenSortedIDs(found) {
 		if a.attached[id] != nil {
+			continue
+		}
+		if len(a.attached) >= dlopenMaxAttachments {
+			a.failed[id] = fmt.Sprintf("attachment limit (%d libcs) reached", dlopenMaxAttachments)
 			continue
 		}
 		c := found[id]

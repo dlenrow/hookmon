@@ -14,10 +14,10 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | --- | --- | --- | --- |
 | Eight sensors | `make test-e2e`; `/status` | Eight sensors are started and health-checked. Since step 4, `elf_rpath` is its own eBPF sensor on `sched_process_exec`. The e2e suite detects an attack for each of the eight. | Verified |
 | SHA256 bytecode hashing detects a modified program with the same name | `TestBPFSyscall_SameProgramSameTag`, `TestBPFSyscall_ModifiedProgramNewTag` | The capability works, but not by SHA256. Since step 4 the bus records the kernel's program tag, which the kernel computes over the instructions with map references zeroed, so it is stable across loads. The same canary loaded twice gets the same tag; a modified canary gets a new one. Two programs with identical instructions and different types share a tag, so allowlist entries should also pin the program type. The blog should say "kernel program tag". | Not true |
-| Enrichment with PID, UID, cmdline, exe path, exe SHA256, cgroup, container ID | Audit of `agent/enrichment/` | Partial. fanotify events default UID to 0. Container IDs are only recognized for docker/64-hex. The exe hash uses the host-namespace path for container processes. | Not true |
+| Enrichment with PID, UID, cmdline, exe path, exe SHA256, cgroup, container ID | `agent/enrichment` tests; container hash check on drl-nuc8i3bek | Since step 4: exe hashes are `sha256:<hex>`, cached by (device, inode, mtime, ctime). A container process is hashed through `/proc/<pid>/root`: for `sleep` in a container the new bus hashed the container's busybox, matching `sha256sum` inside it, where the old bus hashed the host's coreutils. Container IDs are recognized for docker, cri-containerd, CRI-O and libpod on cgroup v1 and v2. One gap remains: a file-sensor writer that exits before the bus reads `/proc` gets UID "unknown" (4294967295), never 0. A follow-up fills this from a process cache. | Verified |
 | `lib_integrity` baselines at startup; package-manager writes are INFO | `TestLibIntegrity_AptReinstallIsInfo`, `TestLibIntegrity_SoOperations` | Since step 4, every watched file is hashed at startup and each event carries the previous hash. Package-manager writes are INFO: `apt-get install --reinstall libmnl0` produced only INFO events, and the writer was recognized by dpkg's executable path. The server still overrides bus severity (`server/policy/engine.go`) until step 7c, so INFO reaches the console, Loki and metrics but not the server path. | Verified |
 | `linker_config` catches linker-cache poisoning | `TestLinkerConfig_PreloadOperations`; the apt reinstall run | Since step 4, `/etc/ld.so.cache` is watched along with `/etc/ld.so.preload` and `ld.so.conf(.d)`. Directory-entry events catch create, delete and rename. `cp`, `sed -i`, `mv`, `ln -sf` and `rm` on `/etc/ld.so.preload` each raised CRITICAL. ldconfig's rewrite of `ld.so.cache` was seen, as INFO because the writer was the package manager. No test writes `ld.so.cache` from outside a package manager. | Verified |
-| `ptrace_monitor` sees register manipulation | Audit of `agent/sensors/ptrace_monitor.c` | Filters only ATTACH, SEIZE, POKETEXT and POKEDATA. SETREGS, SETREGSET and POKEUSER are not seen. | Not true |
+| `ptrace_monitor` sees register manipulation | `test/e2e/shm_ptrace_test.go` | Since step 4, POKEUSER, SETREGS and SETREGSET are reported, along with ATTACH, SEIZE, POKETEXT and POKEDATA. `TargetComm` is filled, including across PID namespaces; it is empty when the target is in a namespace nested below the caller's. The `Addr` field was wrong on every event before this step, because of struct padding; it is now fixed and tested. | Verified |
 | `elf_rpath` audits every exec | `TestSensor8_ElfRpath_OriginTmpCleanEnv` (10/10), `TestSensor8_ElfRpath_SuspiciousPath` (10/10) | Since step 4, every successful exec (execve and execveat) runs through `sched_process_exec`. The binary is identified by the kernel's inode and mtime, with an LRU cache that also remembers binaries with no RPATH. Not analysed if the process has already exited and its path can't be resolved: relative paths outside the cwd, `/dev/fd/N` (fexecve, memfd), scripts (the interpreter is what loads), other mount namespaces, and names of 255 bytes or more. | Verified |
 | Heartbeat every 10 s independent of traffic | `TestHeartbeat_IdleAllAlive` (`HOOKMON_E2E_LONG=1`); `agent/health_test.go` | Since step 3, every 10 s the bus fires each eBPF hook itself. A sensor is alive only if its kernel heartbeat map advanced and its program and link are still attached. On an idle host all sensors were alive at every one of 120 polls over 10 minutes. Detaching a hook can't be tested on kernel 5.19 (`bpftool link detach` returns EOPNOTSUPP for these links), so the dead path is covered by unit tests. A root attacker can forge the heartbeat map (see SECURITY.md). | Verified |
 | `/status` plus a 30 s collector poll | `TestHeartbeat_KillBusCollectorUnreachable` | Default poll is 30 s. After `kill -9` of the bus, the collector (set to poll every 2 s for the test) reported the host unreachable 1.955 s later, within one poll. A root attacker can serve a fake `/status` (see SECURITY.md). | Verified |
@@ -128,3 +128,44 @@ Design decisions that change behavior:
 - When the writer process has already exited, UID is reported as 4294967295 ("unknown"), not 0.
 
 Not covered: attaches that don't go through `bpf()` (perf `SET_BPF` ioctl, netlink XDP/tc, `SO_ATTACH_BPF`); `BPF_LINK_UPDATE`; moving a file out of a watched directory (`FAN_MOVED_FROM` is not in the mask); writes through a hard link outside the watched directories; `/usr/local/lib` and other `ld.so.conf` directories.
+
+### Step 4, wave 2: exec_injection, shm_monitor, ptrace_monitor, dlopen_monitor, enrichment (2026-10-10)
+
+Four branches were merged onto main, plus follow-up fixes. The merged tree was run on drl-nuc8i3bek.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| `LD_PRELOAD` as the 100th environment variable is detected | `TestExecInj_PreloadAt100th` | Pass. The environment scan moved to `sched_process_exec` and reads the new process's `env_start..env_end`. It reads up to 8192 variables with `bpf_loop` (kernel 5.17+), or 512 on older kernels. | Verified |
+| `execveat` with `LD_PRELOAD` is detected | `TestExecInj_Execveat` | Pass. | Verified |
+| An environment longer than the scan raises `scan_truncated` | `TestExecInj_ScanTruncated` | Pass (ALERT). `LibraryHash` is filled with `sha256:<hex>` for an absolute LD_PRELOAD or LD_AUDIT path. | Verified |
+| shm severity follows the pattern | `test/e2e/shm_ptrace_test.go` | bpftime is CRITICAL, bpf-related is ALERT, anything else is INFO. Names come from upstream bpftime (`bpftime_maps_shm`, `handler_manager.hpp:51`), including the `BPFTIME_GLOBAL_SHM_NAME` override (`handler_manager.hpp:60-66`). `openat2` is covered. | Verified |
+| A real bpftime runtime is detected | — | Not run. There are no release binaries, the image is 1.6 GB, and a source build needs about 250 MB of toolchain on a host with under 3 GB free. The attack chain test uses a simulator. | Not true |
+| A dlopen inside a container with its own libc is detected | `TestDlopenW_ContainerLibc` (`debian:bookworm-slim`, pinned by digest and removed afterwards) | Pass. The same test against the old bus times out. Every distinct glibc mapped by any process gets a uprobe; libcs are rediscovered every 5 minutes and links are closed when a libc is no longer mapped. Attachments are capped at 256; past the cap the sensor reports unhealthy. | Verified |
+| dlopen events are deduplicated | `TestDlopenW_Dedupe` | One event per (exe hash, library path) per hour. | Verified |
+| Idle host shows no RPATH noise | 2 minutes of `--console` on the idle host, running `systemctl` and `sudo` 3x each | 18 ELF_RPATH events before, 0 after. `--scan-rpath /usr/bin` went from 72 MEDIUM to 73 LOW. | Verified |
+| Each binary version raises at most one ELF_RPATH event | `TestRpathW_EmitOncePerBinaryVersion` | Pass. | Verified |
+| Root-only unit tests, including RPATH ranking by parent directory | `sudo go test -race ./agent/sensors/ ./agent/enrichment/ ./agent/` | Pass. | Verified |
+| Idle host, all sensors alive | `HOOKMON_E2E_LONG=1 HOOKMON_E2E_IDLE_DURATION=2m` (run per branch) | 8 of 8 sensors alive at 24 of 24 polls, with 0 events from the bus or its probes. | Verified |
+| Everything as CI runs it | `make build-all`, `go vet ./...`, `go test -race ./...`, `make smoketest` | Pass. | Verified |
+| Full e2e suite | `make test-e2e`, run twice | 38 pass, 2 skip, 0 fail on both runs. | Verified |
+
+RPATH ranking, as David decided on 2026-10-10:
+- A non-standard directory is ranked by who can write to it.
+  - LOW, no event: only root can write the directory and every parent above it.
+  - MEDIUM: a non-root user owns the directory or a parent, or its group can write it.
+  - A sticky parent such as `/tmp` counts only through its owner.
+- DT_RPATH never lifts LOW to MEDIUM.
+- `/tmp`, `/var/tmp`, `/dev/shm` and `/home` are CRITICAL as exact paths, not only as prefixes.
+- `${ORIGIN}`, `$LIB` and `$PLATFORM` are expanded as ld.so expands them.
+
+Not covered:
+- dlopen:
+  - musl (Alpine) and statically linked binaries, and `dlmopen`.
+  - A libc mapped since the last scan, for up to 5 minutes.
+  - Container libcs can't be probed by the host helper, so their only liveness signal is the attachment check.
+- shm:
+  - Relative or dirfd-relative opens, `/run/shm`, `creat`, O_TMPFILE+linkat, and renames into `/dev/shm`.
+  - A modified bpftime that uses some other segment name.
+- exec_injection: a library named without an absolute path gets no hash. Values over 255 bytes are flagged `value_truncated`.
+- Out of scope per the plan: `process_vm_writev`, writes to `/proc/<pid>/mem`, and memfd or reflective loaders that bypass `dlopen`.
+- Server path: until step 7c, the policy engine overrides bus severity, so the INFO and ALERT downgrades for shm, RPATH and package-manager writes reach only the console, Loki and metrics.

@@ -291,6 +291,10 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 		case entry.Exists && isWorldWritable(resolved):
 			entry.Risk = event.RpathRiskHigh
 			entry.Reason = fmt.Sprintf("$ORIGIN resolves to world-writable directory %s", resolved)
+		case entry.Exists:
+			risk, why := writableRisk(resolved)
+			entry.Risk = risk
+			entry.Reason = fmt.Sprintf("$ORIGIN-relative path in non-SUID binary, resolves to %s: %s", resolved, why)
 		default:
 			entry.Risk = event.RpathRiskLow
 			entry.Reason = "$ORIGIN-relative path in non-SUID binary"
@@ -345,25 +349,43 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 		return entry
 	}
 
-	// Non-standard but existing: ranked by who can write to it. Only
-	// root: LOW, no event. A non-root owner or a writing group: MEDIUM.
-	uid, gid, perm, ok := dirOwner(cleaned)
-	switch {
-	case !ok:
-		entry.Risk = event.RpathRiskMedium
-		entry.Reason = "non-standard library directory, owner unknown"
-	case uid != 0:
-		entry.Risk = event.RpathRiskMedium
-		entry.Reason = fmt.Sprintf("non-standard library directory owned by uid %d", uid)
-	case perm&0o020 != 0:
-		entry.Risk = event.RpathRiskMedium
-		entry.Reason = fmt.Sprintf("non-standard library directory writable by gid %d", gid)
-	default:
-		entry.Risk = event.RpathRiskLow
-		entry.Reason = "non-standard library directory, writable only by root"
-	}
+	// Non-standard but existing: ranked by who can write to it.
+	risk, why := writableRisk(cleaned)
+	entry.Risk = risk
+	entry.Reason = "non-standard library directory: " + why
 	entry = bumpIfDeprecated(entry)
 	return entry
+}
+
+// writableRisk ranks an existing library directory by who can change what
+// ld.so finds there. Only root: LOW, no event. A non-root owner or a writing
+// group: MEDIUM. The directories above it count too, because whoever can
+// write a parent can rename the library directory and put another in its
+// place. A sticky parent (like /tmp) protects entries its writers do not
+// own, so only its owner counts; the library directory itself gets no such
+// pass, since adding a file is enough there.
+func writableRisk(dir string) (event.RpathRisk, string) {
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return event.RpathRiskMedium, fmt.Sprintf("cannot resolve %s: %v", dir, err)
+	}
+	for d, leaf := real, true; ; d, leaf = filepath.Dir(d), false {
+		uid, gid, mode, ok := dirOwner(d)
+		protected := !leaf && mode&os.ModeSticky != 0
+		switch {
+		case !ok:
+			return event.RpathRiskMedium, fmt.Sprintf("owner of %s unknown", d)
+		case mode&0o002 != 0 && !protected:
+			return event.RpathRiskHigh, fmt.Sprintf("%s is world-writable", d)
+		case uid != 0:
+			return event.RpathRiskMedium, fmt.Sprintf("%s owned by uid %d", d, uid)
+		case mode&0o020 != 0 && !protected:
+			return event.RpathRiskMedium, fmt.Sprintf("%s writable by gid %d", d, gid)
+		}
+		if d == "/" || d == "." {
+			return event.RpathRiskLow, "writable only by root"
+		}
+	}
 }
 
 // expandDST expands the dynamic string tokens ld.so substitutes in an
@@ -458,7 +480,9 @@ var hostDST = sync.OnceValue(func() dstValues {
 	return v
 })
 
-// bumpIfDeprecated raises the risk one level if the entry uses DT_RPATH (deprecated).
+// bumpIfDeprecated raises the risk one level if the entry uses DT_RPATH
+// (deprecated). It never lifts LOW to MEDIUM: a directory only root can
+// write stays below the event threshold whichever tag names it.
 func bumpIfDeprecated(entry event.RpathEntry) event.RpathEntry {
 	if !entry.IsRpath {
 		return entry
@@ -468,8 +492,7 @@ func bumpIfDeprecated(entry event.RpathEntry) event.RpathEntry {
 		entry.Risk = event.RpathRiskLow
 		entry.Reason += " [+deprecated DT_RPATH]"
 	case event.RpathRiskLow:
-		entry.Risk = event.RpathRiskMedium
-		entry.Reason += " [+deprecated DT_RPATH]"
+		entry.Reason += " [deprecated DT_RPATH]"
 	case event.RpathRiskMedium:
 		entry.Risk = event.RpathRiskHigh
 		entry.Reason += " [+deprecated DT_RPATH]"

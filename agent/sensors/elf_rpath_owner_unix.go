@@ -7,9 +7,9 @@ import (
 	"syscall"
 )
 
-// dirOwner returns the owner, group and permission bits of the directory
-// at path, following symlinks as ld.so does.
-func dirOwner(path string) (uid, gid uint32, perm os.FileMode, ok bool) {
+// dirOwner returns the owner, group and mode (permission and sticky bits)
+// of the directory at path, following symlinks as ld.so does.
+func dirOwner(path string) (uid, gid uint32, mode os.FileMode, ok bool) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return 0, 0, 0, false
@@ -18,5 +18,5 @@ func dirOwner(path string) (uid, gid uint32, perm os.FileMode, ok bool) {
 	if !ok {
 		return 0, 0, 0, false
 	}
-	return st.Uid, st.Gid, fi.Mode().Perm(), true
+	return st.Uid, st.Gid, fi.Mode(), true
 }

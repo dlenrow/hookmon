@@ -385,3 +385,30 @@ func TestDlopenWCheckReportsDetachedLink(t *testing.T) {
 		t.Fatalf("check = %v, want the container libc's link named", err)
 	}
 }
+
+// Past the attachment cap a libc is not attached but recorded as failed, so
+// the attachment check fails instead of the bus taking unbounded links.
+func TestDlopenWReconcileCap(t *testing.T) {
+	saved := dlopenMaxAttachments
+	dlopenMaxAttachments = 2
+	t.Cleanup(func() { dlopenMaxAttachments = saved })
+
+	fa := &dlopenWAttacher{errs: map[uint64]error{}, attachN: map[uint64]int{}}
+	a := newDlopenAttachments(fa.attach)
+	if n := a.reconcile(dlopenWFound(1, 2, 3)); n != 2 {
+		t.Fatalf("attached %d, want 2 (the cap)", n)
+	}
+	if fa.attachN[3] != 0 {
+		t.Error("libc past the cap was attached")
+	}
+	if err := a.check(func(io.Closer) error { return nil }); err == nil || !strings.Contains(err.Error(), "attachment limit") {
+		t.Errorf("check = %v, want an attachment-limit failure", err)
+	}
+	// Once a libc goes away there is room again.
+	if n := a.reconcile(dlopenWFound(1, 3)); n != 2 {
+		t.Fatalf("attached %d after libc 2 left, want 2", n)
+	}
+	if err := a.check(func(io.Closer) error { return nil }); err != nil {
+		t.Errorf("check after room freed: %v", err)
+	}
+}

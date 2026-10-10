@@ -59,7 +59,7 @@ func TestRpathWBraceOrigin(t *testing.T) {
 	rpathWClassify(t, "${ORIGIN}/../lib", "/usr/bin", false, false, event.RpathRiskLow)
 	rpathWClassify(t, "${ORIGIN}/../lib", "/usr/bin", false, true, event.RpathRiskCritical)
 	rpathWClassify(t, "${ORIGIN}/..", "/tmp/x", false, false, event.RpathRiskCritical)
-	rpathWClassify(t, "${ORIGIN}", "/usr/bin", true, false, event.RpathRiskMedium) // LOW, bumped for DT_RPATH
+	rpathWClassify(t, "${ORIGIN}", "/usr/bin", true, false, event.RpathRiskLow) // DT_RPATH never lifts LOW
 
 	if _, origin := expandDST("${ORIGIN}/lib", "/opt/app/bin"); !origin {
 		t.Error("${ORIGIN} not recognized as $ORIGIN")
@@ -118,8 +118,8 @@ func TestRpathWHostLibExists(t *testing.T) {
 // world-writable.
 func rpathWRootOnly(t *testing.T, dir string) bool {
 	t.Helper()
-	uid, _, perm, ok := dirOwner(dir)
-	return ok && uid == 0 && perm&0o022 == 0
+	uid, _, mode, ok := dirOwner(dir)
+	return ok && uid == 0 && mode&0o022 == 0
 }
 
 // A non-standard directory is ranked by who can write to it: only root is
@@ -133,8 +133,8 @@ func TestRpathWRankByWritability(t *testing.T) {
 		if !e.Exists {
 			t.Error("/usr/bin: exists = false")
 		}
-		// DT_RPATH still bumps one level.
-		rpathWClassify(t, "/usr/bin", "/usr/sbin", true, false, event.RpathRiskMedium)
+		// DT_RPATH does not lift a root-only directory to an event.
+		rpathWClassify(t, "/usr/bin", "/usr/sbin", true, false, event.RpathRiskLow)
 	} else {
 		t.Log("/usr/bin is not root-only-writable here; skipping that case")
 	}
@@ -188,4 +188,40 @@ func TestRpathWAnalyzeRootOnlyRunpathIsLow(t *testing.T) {
 	if d.HighestRisk != event.RpathRiskLow || !RiskBelow(d.HighestRisk, event.RpathRiskMedium) {
 		t.Errorf("highest risk = %s, want LOW", d.HighestRisk)
 	}
+}
+
+// A root-only library directory still ranks by the directories above it:
+// whoever can write a parent can swap the library directory. A sticky,
+// world-writable parent protects entries it does not own.
+func TestRpathWRankByParent(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to create root-owned directories under other owners")
+	}
+	rpathWNoDangerousDirs(t)
+	base := t.TempDir()
+
+	userParent := filepath.Join(base, "userparent")
+	rpathWMkdir(t, userParent, 0o755)
+	if err := os.Chown(userParent, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	inUser := filepath.Join(userParent, "lib")
+	rpathWMkdir(t, inUser, 0o755)
+	rpathWClassify(t, inUser, "/usr/bin", false, false, event.RpathRiskMedium)
+
+	openParent := filepath.Join(base, "open")
+	rpathWMkdir(t, openParent, 0o777)
+	inOpen := filepath.Join(openParent, "lib")
+	rpathWMkdir(t, inOpen, 0o755)
+	rpathWClassify(t, inOpen, "/usr/bin", false, false, event.RpathRiskHigh)
+
+	stickyParent := filepath.Join(base, "sticky")
+	rpathWMkdir(t, stickyParent, 0o777|os.ModeSticky)
+	inSticky := filepath.Join(stickyParent, "lib")
+	rpathWMkdir(t, inSticky, 0o755)
+	rpathWClassify(t, inSticky, "/usr/bin", false, false, event.RpathRiskLow)
+
+	// $ORIGIN into a user-owned tree ranks like the directory it names.
+	rpathWClassify(t, "$ORIGIN/lib", userParent, false, false, event.RpathRiskMedium)
+	rpathWClassify(t, "$ORIGIN/lib", stickyParent, false, false, event.RpathRiskLow)
 }

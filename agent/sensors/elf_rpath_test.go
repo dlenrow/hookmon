@@ -67,7 +67,7 @@ func TestClassifyEntry(t *testing.T) {
 			name:     "$ORIGIN non-suid with DT_RPATH",
 			path:     "$ORIGIN/../lib",
 			isRpath:  true,
-			wantRisk: event.RpathRiskMedium, // LOW bumped to MEDIUM
+			wantRisk: event.RpathRiskLow, // DT_RPATH never lifts LOW to an event
 		},
 		{
 			name:     "standard system path /usr/lib",

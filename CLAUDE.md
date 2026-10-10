@@ -529,12 +529,12 @@ When an exec event fires and `cfg.Sensors.ElfRpath` is enabled, the agent:
 
 Risk classification (`$ORIGIN`, `$LIB` and `$PLATFORM`, also written `${NAME}`, are expanded first, as ld.so expands them):
 - CRITICAL: relative paths; `/tmp`, `/var/tmp`, `/dev/shm`, `/home` and anything under them; `$ORIGIN` in SUID binary; `$ORIGIN` resolving into one of those directories
-- HIGH: empty entries (`::`), non-existent directories, world-writable directories
-- MEDIUM: non-standard existing directory owned by a non-root user, or writable by its group
-- LOW (no event): non-standard existing directory owned by root and not group- or world-writable; `$ORIGIN` in non-SUID binary
+- HIGH: empty entries (`::`), non-existent directories, world-writable directories, directories below a world-writable parent that has no sticky bit
+- MEDIUM: non-standard existing directory owned by a non-root user or writable by its group, or below a parent directory a non-root user owns or its group can write (a sticky parent only counts through its owner)
+- LOW (no event): non-standard existing directory that only root can write, itself and every parent; `$ORIGIN` in a non-SUID binary resolving to such a directory
 - NONE: standard system library paths (`/usr/lib`, `/lib`, etc.)
 
-DT_RPATH (deprecated) bumps severity one level vs DT_RUNPATH.
+DT_RPATH (deprecated) bumps severity one level vs DT_RUNPATH, except that it never lifts LOW to MEDIUM: a directory only root can write produces no event whichever tag names it.
 
 ```go
 type ElfRpathDetail struct {
