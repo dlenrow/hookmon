@@ -9,12 +9,15 @@ The most productive path for significant changes is to **fork the repo** and dev
 ## Building from Source
 
 Prerequisites:
-- Go 1.22+
+- Go 1.23+
+- make and a C compiler (for `hookmon-dlopen-probe`)
 - Node.js 20+ (dashboard only)
-- clang/llvm (eBPF C compilation, Linux only)
+- On Linux: clang, llvm-strip, libbpf headers (`libbpf-dev`), bpftool, and a kernel with BTF (`/sys/kernel/btf/vmlinux`)
+
+On Linux, `make build-all`, `make test-unit`, `make smoketest` and `make ci` first run `make bpf`, which generates `vmlinux.h` from the running kernel's BTF and compiles the eBPF objects. The Go code embeds those objects, so on Linux even `go build ./...` and `go test ./...` fail until `make bpf` has run. Root is not needed for any of these targets. On macOS, `make bpf` is skipped and stub sensors are built instead.
 
 ```bash
-# Build all Go binaries
+# Build all Go binaries and the dlopen helper (Linux: eBPF objects first)
 make build-all
 
 # Run unit tests
@@ -26,35 +29,41 @@ make smoketest
 # Build dashboard
 make build-dashboard
 
-# Full CI-equivalent check
+# build-all, test-unit and go vet
 make ci
 ```
 
+`make ci` is close to CI but not the same: CI also runs `go test -race -count=1 ./...` and `make smoketest`, and builds the dashboard in a separate job (`.github/workflows/`).
+
+The end-to-end tests (`make test-e2e`) need Linux, root and the eBPF toolchain. They load real eBPF programs and run real attacks. See [docs/theory-of-operations.md](docs/theory-of-operations.md#test-scenarios).
+
 ## Project Structure
 
-- `agent/` — Sensor bus: sensors, registry, observability, transport
+- `agent/` — Sensor bus: sensors, health checks, registry, observability, transport
 - `server/` — Central server: ingestion, policy engine, store, connectors, API
 - `dashboard/` — React + TypeScript web UI
-- `cmd/` — Binary entry points (hookmon-bus, hookmon-server, hookmon-cli, hookmon-collector)
-- `proto/` — Protobuf definitions
+- `cmd/` — Binary entry points (hookmon-bus, hookmon-agent, hookmon-server, hookmon-cli, hookmon-collector)
+- `proto/` — Protobuf definitions; `gen/` holds the generated code
 - `pkg/` — Shared packages (event types, crypto, version)
+- `test/e2e/` and `test/canary/` — End-to-end tests and the programs they run
 - `test/smoketest/` — Pre-push smoketests
-- `docs/` — Architecture, deployment, and theory-of-operations documentation
+- `test/transport/` — Wire and transport tests
+- `docs/` — Architecture, deployment, theory of operations, threat model and the claims ledger
 
 ## Testing
 
-The smoketest suite runs on macOS and Linux without privileges (no eBPF required). It validates:
+The smoketests need no root and load no eBPF programs. They run on macOS and Linux. On Linux, `make smoketest` builds the eBPF objects first (see above). They check:
 
-- Anti-tampering: sensor heartbeat registry transitions (alive → dead → degraded → revival)
-- Sensor constructors: all 8 sensors instantiate correctly with proper name/type
-- Bus integration: live HTTP /status and /metrics endpoints with real Prometheus metrics
+- Anti-tampering: sensor registry transitions (alive, dead, degraded, revival)
+- Sensor constructors: all 8 sensors construct with the right name and type
+- Bus integration: live HTTP `/status` and `/metrics` endpoints with real Prometheus metrics
 
 ```bash
-# Run smoketests (also runs automatically on git push via pre-push hook)
 make smoketest
 
-# Install the pre-push hook
-cp scripts/pre-push .git/hooks/pre-push
+# Install the pre-push hook. It runs `go test ./test/smoketest/...` directly,
+# so on Linux run `make bpf` once first.
+cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
 ```
 
 ## Code Style

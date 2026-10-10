@@ -1,118 +1,130 @@
 # HookMon
 
-**Enterprise monitoring and policy enforcement for every mechanism by which code enters a Linux process.**
+**Monitoring for the main ways code gets into a Linux process.**
 
-HookMon is a security appliance that detects eBPF program loading, library injection, shared memory exploitation, runtime dlopen, linker configuration tampering, ptrace code injection, shared library replacement, and suspicious ELF RPATH entries across your fleet. Each event is evaluated against an allowlist and surfaced to your SOC when something unauthorized appears. Deploy as a virtual appliance (ISO/OVA/QCOW2), enroll sensor buses on your hosts, and get visibility into attack surfaces that no existing tool monitors.
+HookMon detects eBPF program loading, library injection through the dynamic linker's environment variables, bpftime-style shared memory, runtime `dlopen`, linker configuration tampering, ptrace code injection, shared library replacement, and risky ELF RPATH entries. Each event carries process context. Events go to Loki and Prometheus, and optionally to a central server that checks them against an allowlist.
 
-## Eight Read-Only Kernel Sensors
+HookMon does not cover every way code enters a process. [docs/threat-model.md](docs/threat-model.md) lists each way, and which sensor covers it or that none does. HookMon is a reference implementation. [docs/claims.md](docs/claims.md) records what has been tested and what has not. Parts of the server path don't work yet. This README marks each one with the fix plan step that addresses it.
 
-HookMon's detection layer is eight purpose-built sensors that passively observe code injection vectors. They cannot block, modify, or interfere with any operation — they produce events, nothing more.
+## Eight Read-Only Sensors
+
+The detection layer is eight sensors. They observe and report. They cannot block or change anything. There is no enforcement mode.
 
 | Sensor | Mechanism | Detects |
 |--------|-----------|---------|
-| `bpf_syscall` | `bpf()` syscall tracepoint (eBPF) | Kernel eBPF program loads and attachments |
-| `exec_injection` | `execve()` tracepoint (eBPF) | `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `LD_DEBUG` injection |
-| `shm_monitor` | `openat()` tracepoint (eBPF) | Userspace eBPF runtimes (bpftime shared memory patterns) |
-| `dlopen_monitor` | `dlopen()` uprobe (eBPF) | Runtime library injection without `LD_PRELOAD` |
-| `linker_config` | fanotify (Go) | Writes to `/etc/ld.so.preload`, `ld.so.conf`, `ld.so.conf.d/` |
-| `ptrace_monitor` | `ptrace()` tracepoint (eBPF) | `PTRACE_ATTACH`, `PTRACE_POKETEXT`, `PTRACE_POKEDATA` injection |
-| `lib_integrity` | fanotify (Go) | Shared library modification/replacement in `/usr/lib`, `/lib`, etc. |
-| `elf_rpath` | `debug/elf` audit (Go) | Suspicious `DT_RPATH`/`DT_RUNPATH` entries in executed binaries |
+| `bpf_syscall` | `sys_enter_bpf` and `sys_exit_bpf` tracepoints (eBPF), plus a list of all loaded programs at startup and every 5 minutes | BPF program loads, with the kernel's program tag; attaches through `bpf()` (`PROG_ATTACH`, `LINK_CREATE`, `RAW_TRACEPOINT_OPEN`); programs loaded before HookMon started |
+| `exec_injection` | `sched_process_exec` tracepoint (eBPF) | `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `LD_DEBUG` in a new process's environment, for `execve` and `execveat` |
+| `shm_monitor` | `sys_enter_openat` and `sys_enter_openat2` tracepoints (eBPF) | `/dev/shm` segments created with `O_CREAT`; bpftime's segment names are CRITICAL |
+| `dlopen_monitor` | uprobe on `dlopen` in every glibc that a process has mapped (eBPF) | Runtime library loading, on the host and in containers that bring their own glibc |
+| `linker_config` | fanotify (Go) | Changes to `/etc/ld.so.preload`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d/` and `/etc/ld.so.cache` |
+| `ptrace_monitor` | `sys_enter_ptrace` tracepoint (eBPF) | `PTRACE_ATTACH`, `SEIZE`, `POKETEXT`, `POKEDATA`, `POKEUSER`, `SETREGS`, `SETREGSET` |
+| `lib_integrity` | fanotify (Go) | Writes, creates, deletes and renames of `.so` files under `/usr/lib`, `/usr/lib64`, `/lib` and `/lib64` |
+| `elf_rpath` | `sched_process_exec` tracepoint (eBPF), then `debug/elf` analysis (Go) | Risky `DT_RPATH` and `DT_RUNPATH` entries in each executed binary, reported once per binary version |
 
-Every detected event is enriched with full process context (pid, uid, cmdline, binary hash, container ID, cgroup path) and streamed over mTLS gRPC to the central HookMon server.
+The bus adds process context to every event: PID, PPID, UID, GID, cmdline, exe path, exe hash (`sha256:<hex>`), cgroup path and container ID. Most of it comes from `/proc`, so a process that exits before the bus reads it gets less.
 
-**On the central server**, each event is:
+## Two Paths
 
-1. Evaluated against an allowlist of known, approved programs
-2. Classified by severity (INFO, WARN, ALERT, CRITICAL)
-3. Stored for investigation and audit
-4. Forwarded to your SIEM (Splunk, Elastic, Syslog/CEF, or generic webhook)
-5. Displayed on the real-time dashboard
+Events leave the sensor bus (`hookmon-bus`) on two paths.
+
+**Observability path (works today).** The bus pushes events to Loki and serves `/metrics` and `/status`. `hookmon-collector` polls `/status` on every host and pushes fleet health to Pushgateway. Grafana shows events and health. Prometheus alert rules go to Alertmanager. This path is tested end to end; see [docs/claims.md](docs/claims.md).
+
+**Server path (partly working).** The bus streams events over gRPC to `hookmon-server`. The server checks each event against an allowlist, sets its severity, stores it in PostgreSQL, and serves a REST API and a WebSocket feed. `hookmon-cli` talks to the REST API. What doesn't work yet:
+
+- TLS is opt-in. Without certificates, gRPC is plaintext and nothing warns you. The REST API is always plain HTTP. (fix plan step 7b)
+- Enrollment does not work. The `Enroll` RPC returns the CA certificate, not a signed client certificate, and the bus has no way to enroll. (step 7a)
+- SIEM connectors can't be turned on. The connector code exists, but no flag or config file sets it up. (step 7d)
+- The React dashboard builds, but the server does not serve it. (step 7b)
+- The allowlist loads once, at startup. A policy added through the API takes effect after a restart. (step 7c)
+- The server replaces the bus's severity with its own. (step 7c)
+- No end-to-end test has run the server path. Every e2e test runs the bus with `--console`. (step 7h)
 
 ## Why This Exists
 
-Loading an eBPF program or injecting a library via `LD_PRELOAD` are two of the most powerful instrumentation capabilities in Linux — and two of the most dangerous. An attacker who can do either one can intercept any function call, exfiltrate any data, and install backdoors that are invisible to `ps`, `lsof`, `/proc`, and every traditional detection tool.
+Loading an eBPF program or injecting a library via `LD_PRELOAD` are two of the most powerful instrumentation capabilities in Linux, and two of the most dangerous. An attacker who can do either one can intercept function calls, read data, and install backdoors that `ps`, `lsof` and most detection tools don't show.
 
 The conventional threat model assumes this requires root (or `CAP_BPF`). That assumption is now wrong.
 
 ### The bpftime Problem
 
-[bpftime-go](https://github.com/tylerflint/bpftime-go) is a Go module that runs eBPF programs **entirely in userspace** — no root, no `CAP_BPF`, no kernel eBPF subsystem involved. It works by emulating the eBPF VM in a userspace runtime and attaching to target processes via `LD_PRELOAD` and shared memory.
+[bpftime-go](https://github.com/tylerflint/bpftime-go) is a Go module that runs eBPF programs **entirely in userspace**: no root, no `CAP_BPF`, no kernel eBPF subsystem. It emulates the eBPF VM in a userspace runtime and attaches to target processes via `LD_PRELOAD` and shared memory.
 
 This means:
 
-- **An unprivileged user** can hook `malloc`, `open`, `SSL_read`, `SSL_write`, or any dynamically-linked function in any process they can launch.
+- **An unprivileged user** can hook `malloc`, `open`, `SSL_read`, `SSL_write`, or any dynamically linked function in any process they can launch.
 - **The kernel `bpf()` syscall is never called.** No audit log entry. No `bpftool` visibility. No kernel BPF program list.
-- **No artifacts in `/proc`.** The instrumentation lives in userspace memory and shared memory segments. Standard forensic tools see nothing.
-- **Every process the attacker launches inherits the hooks** via `LD_PRELOAD`. Reverse shells, SSH sessions, curl commands — all instrumented silently.
+- **Few traces in `/proc`.** The hooks live in the target's memory and in shared memory segments. What `/proc` shows is the `LD_PRELOAD` value in the process environment and the runtime library in its memory map.
+- **Every process the attacker launches inherits the hooks** via `LD_PRELOAD`.
 
-The only detection signals are the `LD_PRELOAD` environment variable being set (which legitimate tools also use), shared memory segments in `/dev/shm`, and the runtime binary itself.
+The main detection signals are the `LD_PRELOAD` variable (which legitimate tools also use), shared memory segments in `/dev/shm`, and the runtime binary itself.
 
-If you were monitoring the `bpf()` syscall to detect eBPF abuse, you are now blind to an entire class of attacks that achieves the same outcome without ever invoking that syscall.
+If you were monitoring the `bpf()` syscall to detect eBPF abuse, you are blind to this class of attack, which gets the same result without that syscall.
 
 ### The Broader Problem
 
-Even before userspace eBPF, the detection story for kernel eBPF abuse was poor. An attacker with brief root access loads an eBPF program that hooks syscalls or network functions. The program persists in kernel space. Traditional security tooling doesn't track what BPF programs are loaded, who loaded them, or whether they're authorized.
+Even before userspace eBPF, detection of kernel eBPF abuse was poor. An attacker with brief root access loads an eBPF program that hooks syscalls or network functions. The program persists in kernel space. Traditional security tooling doesn't track what BPF programs are loaded, who loaded them, or whether they're authorized.
 
-Meanwhile, legitimate eBPF usage is exploding — Cilium, Falco, Datadog, Tetragon, Tracee, and dozens of other tools load eBPF programs as part of normal operations. Nobody is tracking whether those programs are the *authorized versions* or whether something has been tampered with.
+Meanwhile, legitimate eBPF use is growing fast. Cilium, Falco, Datadog, Tetragon, Tracee and many other tools load eBPF programs as part of normal operations. Few people track whether those programs are the authorized versions.
 
 ### The Insight
 
-**Code injection events are vanishingly rare in production.** A typical server might see a handful of BPF program loads at boot and then zero for months. Shared libraries don't change between OS updates. `/etc/ld.so.preload` essentially never exists on a production host. Any new event that doesn't match a known, approved pattern is worth investigation.
+**Code injection events are rare in production.** A typical server sees a handful of BPF program loads at boot and then few or none for months. Shared libraries change with OS updates. `/etc/ld.so.preload` rarely exists on a production host. An event that doesn't match a known, approved pattern is worth a look.
 
-This makes allowlist-based monitoring extremely effective. The signal-to-noise ratio is inherently excellent because the base rate of legitimate new activity is near zero.
+That suits allowlist-based monitoring: the base rate of legitimate new activity is low.
 
 ## Architecture
 
 ```
-  Monitored Hosts                          HookMon Appliance
- ┌──────────────────┐                    ┌──────────────────────────┐
- │ hookmon-bus       │── mTLS gRPC ──▶  │ Ingestion Service        │
- │  8 sensors        │                   │         │                │
- │  /status endpoint │◀── poll 30s ────│── hookmon-collector      │
- │  Prometheus :2112 │◀── scrape ──────│── Prometheus             │
- │  Loki push ──────│── POST ────────▶│── Loki                   │
- └──────────────────┘                    │         │                │
- ┌──────────────────┐                    │    Policy Engine         │
- │ hookmon-bus       │── mTLS gRPC ──▶  │    (allowlist eval)      │
- │  /status endpoint │◀── poll 30s ────│── hookmon-collector      │
- └──────────────────┘                    │         │                │
-       ...                               │    PostgreSQL            │
-                                         │    Grafana :3000         │
-                                         │    SIEM connectors       │
-                                         └──────────────────────────┘
+  Monitored hosts                          Observability stack (docker compose)
+ ┌────────────────────┐                   ┌──────────────────────────────────┐
+ │ hookmon-bus        │── Loki push ─────▶│ Loki :3100                       │
+ │  8 sensors         │                   │ Prometheus :9090 ──▶ Alertmanager│
+ │  :2112 /metrics    │◀── scrape ────────│ Pushgateway :9091                │
+ │  :2112 /status     │◀── poll 30s ──┐   │ Grafana :3000                    │
+ └─────────┬──────────┘               │   └───────────────▲──────────────────┘
+           │ gRPC (TLS opt-in)        │                   │ push
+           ▼                          └──── hookmon-collector (runs on its own)
+ ┌────────────────────────────────┐
+ │ hookmon-server (server path)   │
+ │  ingestion, allowlist policy,  │
+ │  PostgreSQL, REST :8443, WS    │
+ └────────────────────────────────┘
 ```
 
-The sensor bus exposes Prometheus metrics and pushes structured logs to Loki. The `/status` endpoint reports per-sensor health, polled independently by the server-side collector. The appliance runs Grafana with a pre-built dashboard for real-time event visualization. See [docs/architecture.md](docs/architecture.md) for details.
+The sensor bus exposes Prometheus metrics and pushes structured logs to Loki. The `/status` endpoint reports each sensor's health, and the collector polls it from outside the host. The compose stack runs Grafana with a pre-built dashboard. See [docs/architecture.md](docs/architecture.md) for details.
 
 ## How HookMon Knows It's Still Running
 
-Detecting attacks is useless if the detector itself dies silently. HookMon has a server-initiated health model that does not depend on the sensor bus reporting its own status:
+A detector that dies silently is worse than none. HookMon checks its own sensors, and the collector checks the bus from outside:
 
-1. **Sensor heartbeats.** Each eBPF sensor writes a timestamp to a BPF map every 10 seconds. The fanotify and audit sensors update an in-process heartbeat at the same interval.
-2. **The sensor bus aggregates.** The bus reads every sensor's heartbeat and exposes the result on its `/status` HTTP endpoint — one JSON object listing each sensor, its last heartbeat, and whether it considers itself healthy.
-3. **The collector polls.** `hookmon-collector`, running on the appliance, polls `/status` on every enrolled host every 30 seconds. It writes the results to the event store.
-4. **Prometheus fires on silence.** If the collector cannot reach a bus, or if any sensor's heartbeat is stale, a Prometheus alerting rule fires, Alertmanager routes it, and the dashboard banner turns red. If the collector itself stops pushing, `HookMonCollectorSilent` fires.
+1. **Active probes.** Every 10 seconds the bus fires each eBPF sensor's hook itself with a harmless call: an `openat` and `openat2` of `/dev/null`, an invalid `ptrace`, a run of `/bin/true`, and a `dlopen` through a small helper (`hookmon-dlopen-probe`). Each hook writes a kernel timestamp to its heartbeat map. A sensor counts as alive only if its map moved forward and its program and link are still attached. The two fanotify sensors are marked alive by a timer in the bus. That shows the bus is running, not that the watch still fires.
+2. **The bus reports.** `/status` returns JSON with each sensor's status (`alive`, `dead`, `failed`, `unverifiable` or `unknown`), its last heartbeat and a reason. A sensor is dead after 15 seconds without a confirmed beat (`dead_threshold`).
+3. **The collector polls.** `hookmon-collector` polls `/status` on every host in its config file every 30 seconds. It pushes the results to Pushgateway and writes them to a JSON file (`fleet_status_file`).
+4. **Prometheus fires.** Alert rules fire when a host is unreachable, a sensor is dead, the fleet is degraded, or the collector stops pushing (`HookMonCollectorSilent`). Alertmanager routes the alerts. The Grafana "Fleet Health" panel shows the state.
 
-The key property: the server reaches out to the bus. The bus does not phone home. If the bus process is killed, the collector notices within 30 seconds because `/status` stops responding. If a single sensor crashes but the bus keeps running, the collector sees the stale heartbeat in the `/status` response. One case is not detected: a root attacker can kill the bus and serve a fake "alive" `/status`. See [SECURITY.md](SECURITY.md).
+The key property: the collector reaches out to the bus. If the bus process is killed, the collector notices at its next poll, because `/status` stops answering. If one sensor stops but the bus keeps running, `/status` reports that sensor dead. One case is not detected: a root attacker can kill the bus and serve a fake "alive" `/status`. See [SECURITY.md](SECURITY.md).
 
-## Why This Generates Almost No Alert Noise
+## Why This Should Generate Little Alert Noise
 
-HookMon monitors events that almost never happen. This is not a heuristic system that scores probabilities — it watches concrete, discrete operations that have a near-zero base rate in production:
+HookMon watches operations that are rare in production. It does not score probabilities. It reports concrete, discrete operations:
 
-- **BPF programs** load at boot and don't change until a tool is updated. A host might see 5-10 loads at startup, then zero for weeks or months.
-- **Shared libraries** don't change between OS updates. A modified `.so` file is not a statistical signal — it is a fact that demands explanation.
-- **`/etc/ld.so.preload`** essentially never exists on a production host. If it appears, that is not an anomaly to be scored. It is an event to be dispositioned.
-- **`LD_PRELOAD` in an execve** is weekly or monthly per host in steady state, and every instance maps to a specific tool (e.g., `jemalloc`, `libfaketime`).
-- **Ptrace injection** outside of debugger sessions is vanishingly rare. `PTRACE_POKETEXT` from a non-debugger process is not noise.
+- **BPF programs** load at boot and change when a tool is updated. A host might see 5-10 loads at startup, then few or none for weeks.
+- **Shared libraries** change with OS updates. A modified `.so` outside an update is a fact that needs an explanation.
+- **`/etc/ld.so.preload`** rarely exists on a production host. If it appears, someone should look at it.
+- **`LD_PRELOAD` at exec** is uncommon in steady state, and each instance should map to a specific tool (for example `jemalloc` or `libfaketime`).
+- **Ptrace injection** outside debugger sessions is rare. `PTRACE_POKETEXT` from a non-debugger process is not noise.
 
-Every unallowlisted event is individually significant. It is not a statistical anomaly that might be a false positive — it is a concrete fact that requires disposition. The allowlist is built from observed reality during learning mode. The operational question for the SOC is "do we approve this new entry?" not "is this a real threat among thousands of alerts?"
+Not every sensor is this quiet. `dlopen_monitor` reports each new (binary, library) pair, and interpreters such as Python call `dlopen` often; the bus reports each pair at most once an hour. `shm_monitor` reports every `/dev/shm` creation, at INFO unless the name looks like bpftime or BPF. `bpf_syscall` sends an INFO inventory every 5 minutes.
 
-In steady state, most hosts generate zero alerts per week. When an alert fires, it means something new and specific happened. That is the entire point.
+Each unallowlisted event needs a decision: approve it or investigate it. Learning mode, which would build the allowlist from what the hosts actually do, is not built yet (fix plan step 7c).
+
+The expectation is that most hosts raise no alerts in a typical week. That has not been measured; step 8 of the fix plan records the first minutes on real hosts.
 
 ## Quick Start
 
-### 1. Deploy the Grafana Stack (Appliance)
+This sets up the observability path. The server path is not ready for a quick start (see "Two Paths").
+
+### 1. Deploy the Observability Stack
 
 On your appliance host (any Linux box with Docker):
 
@@ -122,7 +134,7 @@ cd hookmon
 docker compose -f deploy/docker/docker-compose.grafana.yml up -d
 ```
 
-This starts Grafana (:3000), Loki (:3100), Prometheus (:9090), Pushgateway (:9091) and Alertmanager (:9093), with the HookMon dashboard pre-provisioned. All services use host networking. Default login: `admin` / `hookmon`. The collector is not part of the stack; run it on the appliance and point `push_gateway` at `http://localhost:9091`.
+This starts Grafana (:3000), Loki (:3100), Prometheus (:9090), Pushgateway (:9091) and Alertmanager (:9093), with the HookMon dashboard pre-provisioned. All services use host networking. Default Grafana login: `admin` / `hookmon`. The collector is not part of the stack; step 3 runs it.
 
 Before use:
 - Add each sensor bus (`<host>:2112`) as a target under `hookmon-bus` in `deploy/docker/prometheus.yml`.
@@ -130,99 +142,108 @@ Before use:
 
 ### 2. Build and Run the Sensor Bus
 
-On each monitored Linux host:
+On each monitored Linux host (kernel with BTF; tested on 5.19):
 
 ```bash
-# Install build deps
-sudo apt install -y clang llvm libbpf-dev  # + Go 1.22+
+# Build dependencies (Debian/Ubuntu). bpftool is in linux-tools-$(uname -r).
+sudo apt install -y make gcc clang llvm libbpf-dev
+# Go 1.23 or newer: https://go.dev/dl/
 
-# Clone and build
 git clone https://github.com/dlenrow/hookmon.git
-cd hookmon/agent/sensors
-sudo bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
-for f in *.c; do clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I. -c $f -o ${f%.c}.o; done
-cd ../..
-go build -o bin/hookmon-bus ./cmd/hookmon-bus/
+cd hookmon
+make build-bus build-dlopen-probe   # builds the eBPF objects from this kernel's BTF first
 
-# Run with observability
 sudo bin/hookmon-bus --console \
   --loki-url http://<appliance>:3100 \
-  --prometheus-port 2112 \
-  --status-port 8080
+  --status-port 2112
 ```
 
-### 3. Configure the Collector
+Keep `hookmon-dlopen-probe` in the same directory as `hookmon-bus`, or pass `--dlopen-probe <path>`. Without it, `dlopen_monitor` is reported `unverifiable` and the host `degraded`.
 
-On the appliance, register each enrolled host so the collector knows where to poll:
+`--console` prints events to stdout and stops the bus from connecting to a server. Without it, the bus streams events to `hookmon-server` at `server_addr` (default `localhost:9443`), and writes the events it can't send to `fallback_log_path`.
+
+### 3. Run the Collector
+
+On the appliance, list each host in the collector's config file. There is no command to register hosts; edit the file and restart the collector.
 
 ```bash
-hookmon-cli host add --name web-prod-01 --address 10.1.2.3:8080
+make build-collector
+sudo mkdir -p /etc/hookmon /var/lib/hookmon
+sudo tee /etc/hookmon/collector.yaml <<'EOF'
+poll_interval: 30s
+push_gateway: http://localhost:9091
+hosts:
+  - hostname: web-prod-01
+    status_url: http://10.1.2.3:2112/status
+EOF
+sudo bin/hookmon-collector --config /etc/hookmon/collector.yaml
 ```
 
-The collector begins polling `/status` on the registered host every 30 seconds.
+The collector polls each host's `/status` every 30 seconds.
 
 ### 4. View the Dashboard
 
 Open `http://<appliance>:3000/d/hookmon-main/hookmon` in your browser.
 
-### Future: Virtual Appliance
+### Not Working Yet: Appliance Images, Packages, Enrollment
 
-The appliance will ship as an ISO/OVA/QCOW2 with a first-boot wizard for network, TLS, SIEM connectors, and sensor bus enrollment. Sensor buses will enroll via:
-
-```bash
-curl -sSL https://hookmon.internal:9443/enroll | \
-  sudo bash -s -- --token <enrollment-token>
-```
-
-For fleet deployment, use the provided Ansible role or DEB/RPM packages.
+- **Appliance images (ISO, OVA, QCOW2, VHD).** None of them builds a working image. The Packer template defines only a QEMU (qcow2) build, `make appliance-ova` names a VMware build that does not exist, and the ISO's `appliance/iso/user-data.yaml` is missing. Today the only "appliance" is the compose stack above. (fix plan step 7g)
+- **DEB and RPM packages.** They ship `hookmon-agent`, not `hookmon-bus`, with no systemd unit, default config or dlopen helper. (step 7g)
+- **Ansible.** The agent role (`deploy/ansible/roles/hookmon-agent`) and the appliance playbook (`appliance/ansible/playbook.yml`) refer to templates and files that do not exist. (step 7g)
+- **Enrollment.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists, and the bus cannot enroll. (step 7a)
 
 ## Allowlist Workflow
 
-1. **Learning mode** — Deploy sensor buses, observe all events for 7-30 days. The server auto-creates pending allowlist entries for everything observed.
-2. **Review** — SOC reviews pending entries in the dashboard. Approve known-good tools (Cilium, Datadog, Falco, etc.), flag unknowns for investigation.
-3. **Monitoring mode** — Approved allowlist is active. Any new, unrecognized event generates an alert. No blocking.
-4. **Enforcement mode** *(optional, off by default)* — The sensor bus can optionally block unauthorized BPF loads or LD_PRELOAD usage inline. Requires explicit opt-in and careful rollout.
+- **Today.** You create allowlist entries through the REST API or `hookmon-cli policies create` (JSON on stdin). The server matches each event against them. It reads the allowlist only at startup. (fix plan step 7c)
+- **Learning mode: not built.** (step 7c) The plan: during a learning window, the server records each unmatched event as a PENDING entry, with counts and the hosts that saw it. An operator approves or rejects each one through the API, the CLI or the dashboard.
+- **Monitoring mode.** The steady state. Unmatched events raise alerts. Nothing is blocked.
+- **Enforcement mode: does not exist.** No code blocks anything, and the fix plan does not add it.
+
+The allowlist guide (`docs/allowlist-guide.md`) and the API reference (`docs/api-reference.md`) will be written after step 7.
 
 ## SIEM Integration
 
-HookMon forwards events to your existing security infrastructure:
+Connector code exists for:
 
-- **Syslog/CEF** (RFC 5424 + ArcSight Common Event Format) — any SIEM that accepts syslog
-- **Splunk** — HTTP Event Collector (HEC) direct integration
-- **Elasticsearch** — Bulk API, with ILM-managed index lifecycle
-- **Webhook** — Generic JSON POST to any endpoint (PagerDuty, Opsgenie, custom)
-- **Kafka** — For high-volume environments or custom processing pipelines
+- **Syslog/CEF** (RFC 5424 + ArcSight Common Event Format)
+- **Splunk** HTTP Event Collector (HEC)
+- **Elasticsearch** bulk API
+- **Webhook**: JSON POST to any endpoint
+- **Kafka**
+
+**Not working yet:** `hookmon-server` has no flag or config file that turns a connector on, so none runs. Elasticsearch index lifecycle (ILM) is not implemented. (fix plan step 7d)
 
 ## What HookMon Is Not
 
-HookMon **complements** runtime security tools — it doesn't replace them.
+HookMon **complements** runtime security tools. It doesn't replace them.
 
 - **Falco/Tetragon/Tracee** answer: "What syscalls is this container making?"
-- **HookMon** answers: "Who loaded that Falco eBPF program, when, was it the authorized binary, and has anything changed since last deployment?"
+- **HookMon** answers: "Who loaded that Falco eBPF program, when, was it the expected program, and has anything changed since deployment?"
 
-HookMon monitors the monitors. It provides the authorization and inventory layer that sits underneath the runtime security layer.
+HookMon monitors the monitors. It provides an authorization and inventory layer underneath the runtime security layer.
 
-**HookMon is read-only by default.** In the default monitoring mode, the sensor bus cannot block, modify, or prevent any operation on the host. It observes kernel and filesystem events and reports them to the central server. It does not inject code, modify process memory, alter environment variables, or interfere with any syscall. Enforcement mode — where the bus can block unauthorized BPF loads or library injection — is explicitly opt-in, off by default, and requires deliberate configuration by the operator. If you never enable enforcement mode, the sensor bus is purely passive.
+**HookMon is read-only.** Its sensors use tracepoints, uprobes and notification-only fanotify. The bus cannot block, change or delay any operation on the host. It does not inject code into other processes, change their memory, or alter their environment. Its own probes (described above) are ordinary system calls that change nothing. There is no enforcement mode.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — system design, data flow, component overview
-- [Deployment Guide](docs/deployment-guide.md) — appliance setup, sensor bus build, Grafana stack
-- [Theory of Operations](docs/theory-of-operations.md) — threat model, detection approach, allowlist strategy
+- [Architecture](docs/architecture.md): components, data flow, health checks
+- [Deployment Guide](docs/deployment-guide.md): observability stack, sensor bus, collector
+- [Theory of Operations](docs/theory-of-operations.md): attack classes, detection approach, allowlist strategy, tests
+- [Threat Model](docs/threat-model.md): every way code enters a Linux process, and which sensor covers it
+- [Claims Ledger](docs/claims.md): what has been tested, and how
+- [Security Policy](SECURITY.md): trust boundaries and known limitations
+- API reference and allowlist guide: written after fix plan step 7
 
 ## Building from Source
 
 ```bash
-# Prerequisites: Go 1.22+, clang/llvm, libbpf-dev, Node.js 20+
-# On the monitored host (Linux with BTF-enabled kernel):
-cd agent/sensors
-sudo bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
-for f in *.c; do clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I. -c $f -o ${f%.c}.o; done
-cd ../..
-go build -o bin/hookmon-bus ./cmd/hookmon-bus/
-go build -o bin/hookmon-server ./cmd/hookmon-server/
-go build -o bin/hookmon-cli ./cmd/hookmon-cli/
+# Linux with a BTF-enabled kernel. Needs Go 1.23+, make, clang, llvm-strip,
+# libbpf headers, bpftool and a C compiler. Node.js 20+ for the dashboard.
+make build-all        # eBPF objects, then hookmon-bus, -agent, -server, -cli, -collector and hookmon-dlopen-probe, into bin/
+make build-dashboard  # dashboard/dist
 ```
+
+On macOS the Go binaries build with stub sensors. No sensor works there.
 
 ## License
 

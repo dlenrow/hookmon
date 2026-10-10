@@ -1,109 +1,136 @@
 # HookMon Theory of Operations
 
-## Threat Model
+## Attack Classes
 
-HookMon defends against two classes of instrumentation abuse that are invisible to traditional security tooling.
+HookMon watches classes of instrumentation abuse that traditional security tooling does not track well. [threat-model.md](threat-model.md) lists every way code enters a Linux process, including the ones HookMon does not cover.
 
 ### Class 1: Kernel eBPF Abuse
 
-**Attack scenario:** An attacker with brief root access (or `CAP_BPF`) loads an eBPF program that hooks syscalls, network functions, or file operations. The program runs in kernel space, survives the attacker's session ending, and is invisible to `ps`, `lsof`, and standard forensic tools.
+**Attack scenario:** An attacker with brief root access (or `CAP_BPF`) loads an eBPF program that hooks syscalls, network functions, or file operations. The program runs in kernel space, survives the attacker's session ending, and does not show in `ps`, `lsof` or most forensic tools.
 
-**Detection gap:** The `bpf()` syscall is the only entry point for kernel eBPF. Traditional tools don't monitor it. `bpftool prog list` shows loaded programs but doesn't track *who* loaded them, *when*, or *whether they're authorized*.
+**Detection gap:** Every eBPF program is loaded through the `bpf()` syscall. Traditional tools don't monitor it. `bpftool prog list` shows loaded programs but not *who* loaded them, *when*, or *whether they're authorized*.
 
-**HookMon approach:** The `bpf_syscall` sensor attaches to `tracepoint/syscalls/sys_enter_bpf` and captures every BPF_PROG_LOAD, BPF_PROG_ATTACH, and BPF_MAP_CREATE with full process context and a SHA256 hash of the program bytecode. This creates an audit trail that answers: who loaded what, when, and is it the expected binary?
+**HookMon approach:** The `bpf_syscall` sensor attaches to `tracepoint/syscalls/sys_enter_bpf` and `sys_exit_bpf`. It reports:
+- every `BPF_PROG_LOAD` as BPF_LOAD, with process context and the kernel's program tag, read from the kernel when the load returns;
+- every `BPF_PROG_ATTACH`, `BPF_LINK_CREATE` and `BPF_RAW_TRACEPOINT_OPEN` as BPF_ATTACH;
+- every loaded program as BPF_INVENTORY, at startup and every 5 minutes, followed by a host summary. This catches programs loaded before HookMon started.
+
+`BPF_MAP_CREATE` is not reported: a map runs no code. Attaches that don't go through `bpf()` (the perf `SET_BPF` ioctl, netlink XDP and tc, `SO_ATTACH_BPF`) are not seen, though the program's load is.
 
 ### Class 2: Userspace eBPF (bpftime)
 
-**Attack scenario:** An attacker *without root* uses a userspace eBPF runtime (bpftime, bpftime-go) to hook any dynamically-linked function in any process they can launch. The runtime works via `LD_PRELOAD` and shared memory. No kernel BPF subsystem is involved.
+**Attack scenario:** An attacker *without root* uses a userspace eBPF runtime (bpftime, bpftime-go) to hook any dynamically linked function in any process they can launch. The runtime works via `LD_PRELOAD` and shared memory. The kernel BPF subsystem is not involved.
 
-**Detection gap:** This is the worst-case scenario for defenders:
-- No `bpf()` syscall fired — kernel BPF monitoring sees nothing
-- No audit log entry generated
+**Detection gap:**
+- No `bpf()` syscall, so kernel BPF monitoring sees nothing
+- No audit log entry
 - No `bpftool` visibility
-- No `/proc` artifacts beyond the LD_PRELOAD environment variable
-- The instrumentation lives entirely in userspace memory
+- In `/proc`, only the `LD_PRELOAD` value and the runtime library in the process's memory map
+- The instrumentation lives in userspace memory
 
-**HookMon approach:** Three sensors work together:
-1. `exec_injection` catches `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, and `LD_DEBUG` being set in the environment of new processes
-2. `shm_monitor` detects shared memory segments matching bpftime patterns in `/dev/shm`
-3. `dlopen_monitor` catches runtime library loading via `dlopen()`
+**HookMon approach:** Three sensors:
+1. `exec_injection` catches `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH` and `LD_DEBUG` in the environment of new processes.
+2. `shm_monitor` catches `/dev/shm` segments created with bpftime's names. It matches bpftime's default name (`bpftime_maps_shm`), any name containing `bpftime`, and a name set through `BPFTIME_GLOBAL_SHM_NAME` in the creator's environment.
+3. `dlopen_monitor` catches runtime library loading through glibc's `dlopen()`.
+
+These detections were tested with a simulator, not the real bpftime runtime ([claims.md](claims.md)).
 
 ### Class 3: LD_PRELOAD Injection (Non-eBPF)
 
-**Attack scenario:** Even without eBPF, `LD_PRELOAD` alone enables function interposition — replacing `malloc`, `SSL_read`, `open`, or any dynamically-linked function with attacker-controlled code. Used legitimately for debugging and instrumentation, but also a potent attack vector.
+**Attack scenario:** Even without eBPF, `LD_PRELOAD` alone enables function interposition: replacing `malloc`, `SSL_read`, `open`, or any dynamically linked function with attacker-controlled code. It has legitimate uses in debugging and instrumentation, and it is also a potent attack vector.
 
-**HookMon approach:** The `exec_injection` sensor captures every process exec that has `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, or `LD_DEBUG` set, along with the library path, its SHA256 hash, and the target binary being executed.
+**HookMon approach:** The `exec_injection` sensor attaches to `tracepoint/sched/sched_process_exec`, which fires after every successful `execve` and `execveat`. It reads the new process's environment from the kernel's copy (`env_start` to `env_end`), the same strings `ld.so` will read. Each `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH` or `LD_DEBUG` variable gives one event with the variable, its value and the target binary. For an absolute `LD_PRELOAD` or `LD_AUDIT` path, the event also carries the library's `sha256:<hex>` hash.
+
+The scan reads up to 8192 chunks of 256 bytes on kernels with `bpf_loop` (5.17 and newer), or 512 on older kernels. If it stops before the end of the environment, it sends one more event flagged `scan_truncated`, so a variable past the limit is never missed silently. A value longer than 255 bytes is flagged `value_truncated`.
 
 ### Class 4: Linker Configuration Tampering
 
-**Attack scenario:** An attacker modifies `/etc/ld.so.preload`, `/etc/ld.so.conf`, or files in `/etc/ld.so.conf.d/` to persistently inject libraries into every process started on the host. Unlike environment-based `LD_PRELOAD` (which affects only child processes), modifying `/etc/ld.so.preload` affects *all* dynamically-linked programs system-wide and survives reboots.
+**Attack scenario:** An attacker modifies `/etc/ld.so.preload`, `/etc/ld.so.conf`, a file in `/etc/ld.so.conf.d/`, or `/etc/ld.so.cache` to inject libraries into every process started on the host. Unlike environment-based `LD_PRELOAD`, which affects only child processes, `/etc/ld.so.preload` affects *all* dynamically linked programs system-wide and survives reboots.
 
-**Detection gap:** Standard file integrity monitoring (AIDE, OSSEC) can detect changes but doesn't understand the *significance* of these specific files in the context of code injection. Alert fatigue from noisy FIM rules means these changes may be overlooked.
+**Detection gap:** File integrity monitoring (AIDE, OSSEC) can detect changes but treats these files like any other. Noisy FIM rules can bury them.
 
-**HookMon approach:** The `linker_config` sensor uses fanotify to watch `/etc/ld.so.preload`, `/etc/ld.so.conf`, and `/etc/ld.so.conf.d/` for any write, create, delete, or rename operations. Every modification produces an event with the file path, operation type, and before/after content hashes. These events are always classified as CRITICAL.
+**HookMon approach:** The `linker_config` sensor marks `/etc` and `/etc/ld.so.conf.d` with fanotify directory-entry events (`FAN_REPORT_DFID_NAME`, Linux 5.9+). It catches writes, creates, deletes and renames over the files, including `sed -i`, `mv`, `cp` and `ln -sf`. At startup it hashes each watched file, so every event carries the old hash and the new one. A change is CRITICAL, or INFO when a package manager is in the writer's process ancestry.
 
 ### Class 5: Ptrace Code Injection
 
-**Attack scenario:** An attacker uses `ptrace()` to attach to a running process and inject code via `PTRACE_POKETEXT` or `PTRACE_POKEDATA`. This allows modifying executable code in a target process's memory without any library or file on disk. It's a classic technique for process hollowing, debugger-based injection, and anti-forensics.
+**Attack scenario:** An attacker uses `ptrace()` to attach to a running process and inject code: writing memory with `PTRACE_POKETEXT` or `PTRACE_POKEDATA`, or redirecting execution by writing registers. No library or file on disk is needed.
 
-**Detection gap:** While some EDR tools monitor ptrace, they often only flag `PTRACE_ATTACH` and miss the more dangerous `PTRACE_POKETEXT`/`PTRACE_POKEDATA` that actually inject code. Standard audit logging may capture the syscall but lacks context about what was injected.
+**Detection gap:** Some EDR tools only flag `PTRACE_ATTACH` and miss the writes that inject the code.
 
-**HookMon approach:** The `ptrace_monitor` sensor hooks `tracepoint/syscalls/sys_enter_ptrace` and filters for dangerous requests: `PTRACE_ATTACH`, `PTRACE_SEIZE`, `PTRACE_POKETEXT`, and `PTRACE_POKEDATA`. Each event includes the ptrace request type, target PID, target process name, and memory address (for POKE operations).
+**HookMon approach:** The `ptrace_monitor` sensor hooks `tracepoint/syscalls/sys_enter_ptrace` and reports `PTRACE_ATTACH`, `PTRACE_SEIZE`, `PTRACE_POKETEXT`, `PTRACE_POKEDATA`, `PTRACE_POKEUSER`, `PTRACE_SETREGS` and `PTRACE_SETREGSET`. Each event includes the request, the target PID, the target's comm, and the address for POKE requests. The target comm is resolved in the caller's PID namespace. It is empty when the target is in a namespace nested below the caller's.
 
 ### Class 6: Shared Library Replacement
 
-**Attack scenario:** An attacker replaces a legitimate shared library on disk (e.g., `/usr/lib/libssl.so`) with a trojanized version. Every process that loads the library subsequently executes attacker code. This is stealthy because the library path and name remain unchanged — only the contents differ.
+**Attack scenario:** An attacker replaces a shared library on disk (for example `/usr/lib/libssl.so`) with a trojanized version. Every process that loads the library afterwards runs attacker code. The path and name stay the same; only the contents differ.
 
-**Detection gap:** Package managers detect tampering at verification time, but not in real-time. Between package verifications, a replaced library operates undetected. Runtime LD_PRELOAD monitoring doesn't help because no environment variable is involved.
+**Detection gap:** Package managers detect tampering when someone runs a verification, not in real time.
 
-**HookMon approach:** The `lib_integrity` sensor uses fanotify to monitor standard library directories (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`) for write, rename, or delete operations on `.so` files. Events include the library path, operation type, before/after hashes, and whether the library is in the `ld.so.cache`.
+**HookMon approach:** The `lib_integrity` sensor marks every directory under `/usr/lib`, `/usr/lib64`, `/lib` and `/lib64` with fanotify directory-entry events. It reports writes, creates, deletes and renames of `*.so` and `*.so.*` files, with the old and new hashes and whether `ld.so.cache` lists the library. At startup it hashes every shared object in the background; a file changed before its turn has no old hash. A change is ALERT, or INFO when a package manager is in the writer's process ancestry.
 
 ### Class 7: RPATH/RUNPATH Abuse
 
-**Attack scenario:** An attacker modifies an ELF binary's dynamic section to include a malicious RPATH or RUNPATH entry (e.g., `/tmp/evil` or a relative path like `lib/`). When the binary executes, the dynamic linker searches these directories for shared libraries *before* the system defaults. The attacker places a trojanized library at that path, and it gets loaded silently — no `LD_PRELOAD`, no config file modification, no environment variable.
+**Attack scenario:** An attacker builds or modifies an ELF binary so its RPATH or RUNPATH names a directory they control (for example `/tmp/evil`, or a relative path like `lib/`). When the binary runs, the dynamic linker searches those directories for shared libraries before the system defaults. The attacker places a trojanized library there, and it loads with no `LD_PRELOAD`, no config file change and no environment variable.
 
-**Detection gap:** This is a supply-chain and persistence vector that's invisible to all other HookMon sensors. The injection is baked into the binary's ELF headers. There's no runtime event to hook because the linker resolves paths at load time using the binary's own metadata. Tools like `readelf -d` can show RPATH/RUNPATH but aren't monitored in real-time.
+**Detection gap:** The library search path is part of the binary. No other HookMon sensor sees it. `readelf -d` shows RPATH and RUNPATH, but nothing runs it on every exec.
 
-**HookMon approach:** The `elf_rpath` sensor is an audit-type sensor that runs after event enrichment on every exec event. It opens the binary using Go's `debug/elf` package and reads `DT_RPATH` and `DT_RUNPATH` entries. Each path is classified by risk:
+**HookMon approach:** The `elf_rpath` sensor attaches to `tracepoint/sched/sched_process_exec`. For each successful exec (`execve` and `execveat`) it sends the filename and the kernel's identity of the loaded binary (device, inode, mtime) to Go. Go opens the binary with `debug/elf`, reads `DT_RPATH` and `DT_RUNPATH`, and ranks each entry. Results are cached in an LRU keyed by the binary's identity, including binaries with no RPATH. A binary version whose highest risk is MEDIUM or above produces one ELF_RPATH event, on its first exec.
+
+`$ORIGIN`, `$LIB` and `$PLATFORM` (also written `${NAME}`) are expanded first, as ld.so expands them.
 
 | Condition | Risk |
 |-----------|------|
-| Relative path (no `/`, not `$ORIGIN`) | CRITICAL |
-| Writable directories: `/tmp/*`, `/var/tmp/*`, `/dev/shm/*`, `/home/*` | CRITICAL |
-| `$ORIGIN` in SUID/SGID binary | CRITICAL |
-| Empty entry (double `::` separator) | HIGH |
-| Non-existent directory | HIGH |
-| World-writable directory | HIGH |
-| `$ORIGIN` in non-SUID binary | LOW |
-| Standard system paths (`/usr/lib`, `/lib`, etc.) | NONE |
-| Non-standard but root-owned, not writable | MEDIUM |
+| Relative path; `/tmp`, `/var/tmp`, `/dev/shm`, `/home` and anything under them; `$ORIGIN` in a SUID binary; `$ORIGIN` resolving into one of those directories | CRITICAL |
+| Empty entry (`::`); non-existent directory; world-writable directory; directory below a world-writable parent with no sticky bit | HIGH |
+| Non-standard existing directory owned by a non-root user or writable by its group, or below a parent a non-root user owns or its group can write (a sticky parent counts only through its owner) | MEDIUM |
+| Non-standard existing directory that only root can write, itself and every parent; `$ORIGIN` in a non-SUID binary resolving to such a directory | LOW (no event) |
+| Standard system library paths (`/usr/lib`, `/lib`, etc.) | NONE |
 
-DT_RPATH (deprecated, takes precedence over `LD_LIBRARY_PATH`) is bumped one severity level vs DT_RUNPATH. Only binaries with MEDIUM risk or above produce an `ELF_RPATH` event. Results are cached by (path, inode, mtime) to avoid re-analyzing the same binary.
+DT_RPATH (deprecated; searched before `LD_LIBRARY_PATH`) is bumped one level above DT_RUNPATH, except that it never lifts LOW to MEDIUM.
+
+Only the executed binary is analyzed, not the libraries it loads. A binary is not analyzed if the process has already exited and its path can't be resolved: relative paths outside the cwd, `/dev/fd/N` (fexecve, memfd), scripts (the interpreter is what loads), other mount namespaces, and names of 255 bytes or more.
+
+`hookmon-bus --scan-rpath <dir>` runs the same analysis over a directory and prints JSON.
 
 ## The Allowlist Model
 
 ### Why Allowlists Work Here
 
-The key insight is that eBPF program loading and LD_PRELOAD injection are **vanishingly rare events** in production. A typical server sees:
+eBPF program loading and LD_PRELOAD injection are **rare events** in production. A typical server sees:
 
-- A handful of BPF program loads at boot (from the observability stack — Cilium, Falco, Datadog)
-- Zero new loads for weeks or months
+- A handful of BPF program loads at boot (from the observability stack: Cilium, Falco, Datadog)
+- Few or no new loads for weeks or months
 - Occasional loads during deployments or updates
 
-The base rate of *legitimate new installations* is near zero. This means every event that doesn't match a known, approved pattern is worth investigation. The signal-to-noise ratio is inherently excellent.
+The base rate of *legitimate new installations* is low, so an event that doesn't match a known, approved pattern is worth a look.
 
-Compare this with syscall monitoring (millions of events per second) or network monitoring (enormous volume). HookMon operates in a domain where the event volume is naturally low and the significance of each event is naturally high.
+Compare this with syscall monitoring (millions of events per second) or network monitoring. HookMon works in a domain where event volume is low and each event matters.
 
-### Severity Classification
+### Severity
 
-Events are classified based on allowlist evaluation:
+Severity is set twice today.
+
+**On the bus** (what the console, Loki and Prometheus show), by sensor:
+
+| Event | Severity |
+|-------|----------|
+| BPF_LOAD, BPF_ATTACH | WARN |
+| BPF_INVENTORY | INFO |
+| EXEC_INJECTION (including `scan_truncated`) | ALERT |
+| SHM_CREATE | CRITICAL for bpftime names, ALERT for other names containing `bpf`, INFO otherwise |
+| DLOPEN | WARN |
+| LINKER_CONFIG | CRITICAL; INFO when a package manager is in the writer's ancestry |
+| PTRACE_INJECT | ALERT |
+| LIB_INTEGRITY | ALERT; INFO when a package manager is in the writer's ancestry |
+| ELF_RPATH | CRITICAL, ALERT or WARN for a highest risk of CRITICAL, HIGH or MEDIUM |
+
+**On the server**, the policy engine replaces that severity with its own, from allowlist matches and built-in rules. The intended classification:
 
 | Condition | Severity | Meaning |
 |-----------|----------|---------|
 | Matches allowlist entry with ALLOW action | INFO | Known good, log for audit |
 | No allowlist match, known BPF program type | WARN | Unusual but possibly legitimate |
 | No allowlist match, unknown binary hash | ALERT | Unknown program, investigate |
-| Exec injection from non-root, non-whitelisted library | ALERT | Possible injection attack |
+| Exec injection from non-root, non-allowlisted library | ALERT | Possible injection attack |
 | Ptrace injection detected | ALERT | Process memory manipulation |
 | Shared library modified on disk | ALERT | Possible library replacement attack |
 | bpftime-pattern shared memory from unknown process | CRITICAL | Likely active userspace eBPF attack |
@@ -112,220 +139,225 @@ Events are classified based on allowlist evaluation:
 | ELF RPATH with HIGH risk entries | ALERT | Suspicious library search path |
 | Any unmatched event from root | CRITICAL | Privileged unauthorized activity |
 
+Because the server overrides the bus, the INFO downgrades for package-manager writes and ordinary shared memory, and the RPATH ranking, don't reach the server path. The root-UID check also runs before RPATH classification, so a MEDIUM RPATH from a root process is rated CRITICAL. Both are fix plan step 7c.
+
 ### Operational Workflow
 
-**Phase 1: Learning (Days 1-30)**
-Deploy sensor buses in console mode. Every event is logged. Operators build familiarity with what "normal" looks like on their infrastructure. The system auto-creates candidate allowlist entries for review.
+**Phase 1: Learning (not built; fix plan step 7c)**
+The plan: run the server in learning mode for a set period. Each unmatched unique event becomes a PENDING allowlist entry, with its count, first and last time seen, and the hosts that saw it. Operators approve or reject entries. Today nothing creates PENDING entries; you add allowlist entries by hand through the REST API or `hookmon-cli policies create`.
 
-**Phase 2: Monitoring (Steady State)**
-The allowlist is active. Known-good events log at INFO. Anything new generates alerts. No blocking — visibility only. This is the primary operating mode for most deployments.
+**Phase 2: Monitoring (steady state)**
+The allowlist is active. Known-good events log at INFO. Anything new raises an alert. Nothing is blocked. Today the server reads the allowlist only at startup (step 7c).
 
-**Phase 3: Enforcement (Optional)**
-The sensor bus can block unauthorized BPF loads or LD_PRELOAD usage at the kernel level. This requires high confidence in the allowlist and careful rollout, since a false positive can break legitimate tooling.
+**Phase 3: Enforcement (does not exist)**
+The idea was that the bus could block unauthorized BPF loads or LD_PRELOAD use. No code for this exists, and the fix plan does not add it. HookMon is read-only.
 
-## What HookMon Monitors the Monitors
+## How HookMon Monitors the Monitors
 
-A critical operational question that no existing tool answers:
+An operational question few tools answer:
 
-> "The Falco eBPF program that's loaded on prod-web-03 — is it the *authorized version*? Was it loaded by the *authorized installer*? Has it been *replaced* since deployment?"
+> "The Falco eBPF program that's loaded on prod-web-03: is it the *authorized version*? Was it loaded by the *authorized installer*? Has it been *replaced* since deployment?"
 
-HookMon captures program bytecode hashes. If an attacker replaces a legitimate eBPF program with a modified one (same name, different code), HookMon detects the hash mismatch. This provides integrity monitoring for the security tools themselves.
+HookMon records the kernel's program tag for every BPF load and every program in the inventory. The kernel computes the tag over the program's instructions with map references zeroed, so the same program has the same tag on every load on the same kernel, and a modified program with the same name gets a different tag. Two programs with identical instructions and different program types share a tag, so an allowlist entry should also pin the program type. The tag is the first 8 bytes of a SHA-1; it is not a SHA-256.
 
 ## Event Enrichment
 
-Raw eBPF events contain only kernel-space information (PID, UID, comm). The sensor bus enriches each event from `/proc`:
+Raw eBPF events carry kernel-side information: PID, PPID, UID, GID and comm. The bus adds, from `/proc`:
 
-- **cmdline:** full command line of the process
-- **exe_path:** resolved symlink from `/proc/<pid>/exe`
-- **exe_hash:** SHA256 of the executable binary
-- **cgroup_path:** cgroup v2 path (enables container attribution)
-- **container_id:** extracted from cgroup path
-- **ppid:** parent PID for process tree analysis
-- **prog_hash:** for BPF events, SHA256 of the program bytecode itself
+- **cmdline:** the full command line
+- **exe_path:** `/proc/<pid>/exe`, as the process sees it
+- **exe_hash:** `sha256:<hex>` of the executable, cached by (device, inode, mtime, ctime). A container process is hashed through `/proc/<pid>/root`, so the hash is of the container's binary.
+- **cgroup_path:** the cgroup path
+- **container_id:** from the cgroup path, for Docker, cri-containerd, CRI-O and libpod, on cgroup v1 and v2
 
-This enrichment happens in userspace immediately after the event is received, while the process is still alive and `/proc/<pid>/` is accessible.
+Enrichment runs as soon as the bus receives the event. If the process has already exited, these fields are empty. File-sensor events whose writer has exited get UID 4294967295 ("unknown").
 
-## Self-Detection
+## Self-Filtering
 
-HookMon's own sensor bus loads eBPF programs at startup. The sensor bus detects its own BPF loads and reports them. This is expected and should be the first entry in any allowlist. It also serves as a continuous self-test: if the sensor bus stops detecting its own programs, something is wrong.
+The bus loads its own eBPF programs at startup and, every 10 seconds, runs probe processes to check its hooks. It drops every event whose PID or parent PID is its own, so neither shows up as a detection. HookMon's own programs do appear in every BPF_INVENTORY scan, because inventory events carry no PID. An allowlist should expect them there.
 
 ## Test Scenarios
 
-The e2e test suite (`test/e2e/`) exercises the full detection pipeline: sensors fire, events are enriched, and policy evaluation produces the correct action. All tests require root (for eBPF), a built sensor bus binary, and run on Linux.
+The e2e suite (`test/e2e/`, build tag `e2e`) runs real attacks against a real bus. It needs Linux, root, the eBPF toolchain, and a bus binary built for the host. Every test runs the bus with `--console`, so it covers the sensors and enrichment, not the server path (fix plan step 7h). The canary programs are in `test/canary/`.
 
-### BPF Load Detection Tests
+The [claims ledger](claims.md) records which tests were run, on which host, and the results.
 
-These tests use canary eBPF programs (`test/canary/`) to trigger the `bpf_syscall` sensor:
+### Tests by Sensor
 
-- **TestDetectUnknownBPFLoad** — Loads `hello_bpf.o` and verifies a `BPF_LOAD` event fires with the correct `ProgName`, a non-empty `ProgHash`, and severity `WARN` (no allowlist match).
-- **TestDetectSecondApp** — Loads both `hello_bpf.o` and `net_monitor.o`, confirming different programs produce different `ProgHash` values.
-- **TestVersionChangeNewHash** — Loads `hello_bpf.o` v1 and v2, confirming revised bytecode (same function, different code) produces a different hash. This validates that allowlist entries pinned to a specific `ProgHash` will correctly reject modified versions.
-- **TestWhitelistByProgHash** — Captures `hello_bpf`'s hash, builds an ALLOW entry, verifies it matches. Then loads `hello_bpf_v2` against the same allowlist and confirms it gets ALERT (hash mismatch).
-- **TestBlacklistByProgHash** — Creates a DENY entry for `net_monitor`'s hash and verifies the policy engine returns DENY.
-- **TestWhitelistByExeHash** — Allowlists the loader binary itself (by `ExeHash`), trusting *all* programs loaded by that binary regardless of which BPF program it loads.
+| Sensor | Tests |
+|--------|-------|
+| `bpf_syscall` | `TestSensor1_BPFSyscall_DetectLoad`, `TestSensor1_BPFSyscall_DifferentHashPerProgram`, `TestSensor1_BPFSyscall_VersionChangeNewHash`, `TestSensor1_BPFSyscall_SameProgramSameTag`, `TestSensor1_BPFSyscall_ModifiedProgramNewTag`, `TestSensor1_BPFInventory_PreexistingProgram`, `TestSensor1_BPFSyscall_LinkCreateAttach`, `TestSensor1_BPFSyscall_RawTracepointAttach` |
+| `exec_injection` | `TestSensor2_ExecInjection_LDPreload`, `TestExecInj_PreloadAt100th`, `TestExecInj_Execveat`, `TestExecInj_ScanTruncated` |
+| `shm_monitor` | `TestSensor3_SHMMonitor_BpftimePattern`, `TestSensor3_SHMMonitor_BpftimeDefaultName`, `TestSensor3_SHMMonitor_EnvRenamedIsBpftime`, `TestSensor3_SHMMonitor_BpfRelatedIsAlert`, `TestSensor3_SHMMonitor_GenericIsInfo`, `TestSensor3_SHMMonitor_Openat2` |
+| `dlopen_monitor` | `TestSensor4_DlopenMonitor_LoadLibrary`, `TestDlopenW_ContainerLibc`, `TestDlopenW_Dedupe` |
+| `linker_config` | `TestSensor5_LinkerConfig_WriteConfD`, `TestLinkerConfig_PreloadOperations` |
+| `ptrace_monitor` | `TestSensor6_PtraceMonitor_Attach`, `TestSensor6_PtraceMonitor_RegisterWrites`, `TestSensor6_PtraceMonitor_AttachTargetComm`, `TestSensor6_PtraceMonitor_TargetCommInPidNamespace` |
+| `lib_integrity` | `TestSensor7_LibIntegrity_WriteToUsrLib`, `TestLibIntegrity_SoOperations`, `TestLibIntegrity_AptReinstallIsInfo` |
+| `elf_rpath` | `TestSensor8_ElfRpath_SuspiciousPath`, `TestSensor8_ElfRpath_OriginTmpCleanEnv`, `TestRpathW_EmitOncePerBinaryVersion` |
+| Health | `TestHeartbeat_IdleAllAlive`, `TestHeartbeat_LinkDetach`, `TestHeartbeat_KillBusCollectorUnreachable`, `TestHeartbeat_DlopenProbeMissing` |
+| Combined | `TestCombined_BpftimeAttackChain` |
+| Allowlist matching | `TestPolicy_AllowByProgHash`, `TestPolicy_DenyByProgHash` |
 
-### bpftime-go Attack Simulation
+The two `TestPolicy_` tests capture a real event and run it through a matcher in `test/e2e/helpers.go`, a copy of the server's matching logic, not the server itself. Step 7c replaces the copy with the server's matcher.
 
-These tests simulate the full attack chain of a userspace eBPF attack using `bpftime_sim` (`test/canary/bpftime_sim.c`):
+No e2e test sends `PTRACE_SEIZE`, `PTRACE_POKETEXT` or `PTRACE_POKEDATA`, or sets `LD_LIBRARY_PATH`. `LD_AUDIT` and `LD_DEBUG` are covered by the root-only unit test `TestExecInjScanBoundary` in `agent/sensors`.
 
-**Attack chain reproduced:**
-1. `bpftime_sim` calls `shm_open("/bpftime_agent_shm")` — this is how bpftime establishes a shared memory communication channel between its agent and the hooked target process.
-2. `bpftime_sim` forks and execs `/bin/true` with `LD_PRELOAD=libfake_hook.so` — this is how bpftime injects its runtime into target processes.
+### bpftime Attack Simulation
 
-**Expected detections:**
-- `SHM_CREATE` event with `Pattern="bpftime"` at severity `CRITICAL` — the shm_monitor uprobe on `shm_open()` fires and classifies the segment name.
-- `EXEC_INJECTION` event with `LibraryPath` containing `fake_hook` at severity `ALERT` — the exec_injection tracepoint captures the environment variable.
+`TestCombined_BpftimeAttackChain` runs `bpftime_sim` (`test/canary/bpftime_sim.c`), which reproduces the observable footprint of a bpftime attack:
 
-**Why SHM_CREATE is CRITICAL:** Shared memory with bpftime naming is the strongest signal of a userspace eBPF attack. Unlike LD_PRELOAD (which has legitimate uses), bpftime-pattern shared memory has no legitimate purpose outside of the bpftime runtime itself.
+1. `shm_open("/bpftime_agent_shm")`, which glibc turns into an `openat` of `/dev/shm/bpftime_agent_shm` with `O_CREAT`.
+2. A fork and exec of a target with `LD_PRELOAD` set to `libfake_hook.so`.
 
-**Tests:**
-- **TestDetectBpftimeExploit** — Runs the full simulation, waits for both events, asserts correct severity for each. Logs the complete event details including hashes and process context.
-- **TestDenyBpftimeByPolicy** — Captures a bpftime SHM event, builds a DENY entry matching `EventTypes=[SHM_CREATE]` with `LibraryPath="bpftime"` (matched against the SHM name), verifies the policy engine returns DENY. Also confirms the same entry does *not* match a non-bpftime SHM event (e.g., PostgreSQL shared memory).
+Expected detections:
+- `SHM_CREATE` with `Pattern="bpftime"`, from `shm_monitor`'s `openat` tracepoint.
+- `EXEC_INJECTION` with `LibraryPath` containing `fake_hook`, from `exec_injection`.
+
+Shared memory with bpftime's names has no use outside the bpftime runtime, so it is CRITICAL on the bus. The real runtime has not been tested.
 
 ### Running the Tests
 
-**Build canaries (on Linux test host):**
+**Everything:** `make test-e2e` builds the bus, the dlopen helper and the canaries, copies them to `/tmp/hookmon-bus`, `/tmp/hookmon-dlopen-probe` and `/tmp/canary/`, and runs the suite with `sudo`:
+
 ```bash
-cd ~/hookmon/test/canary
-make all
-cp load_canary hello_bpf.o net_monitor.o hello_bpf_v2.o /tmp/
-cp bpftime_sim libfake_hook.so /tmp/
+make test-e2e
 ```
 
-**Build the sensor bus:**
+**One test**, after `make test-e2e` has deployed the binaries once:
+
 ```bash
-cd ~/hookmon
-go build -o /tmp/hookmon-bus ./cmd/hookmon-bus/
+sudo env "PATH=$PATH" go test -tags e2e -v -count=1 -timeout 300s \
+  -run TestCombined_BpftimeAttackChain ./test/e2e/
 ```
 
-**Run all e2e tests:**
+**With Loki and a status port:**
+
 ```bash
-sudo -E go test -tags e2e -v -timeout 120s ./test/e2e/
+sudo env "PATH=$PATH" \
+  HOOKMON_LOKI_URL=http://<stack-host>:3100 \
+  HOOKMON_STATUS_PORT=2112 \
+  go test -tags e2e -v -count=1 -timeout 300s ./test/e2e/
 ```
 
-**Run with Grafana observability (Loki + Prometheus):**
-```bash
-sudo -E env PATH=$PATH \
-  HOOKMON_LOKI_URL=http://raspberrypi:3100 \
-  HOOKMON_PROMETHEUS_PORT=2112 \
-  go test -tags e2e -v -timeout 120s ./test/e2e/
-```
+**The 10-minute idle health test:**
 
-**Run only bpftime tests:**
 ```bash
-sudo -E env PATH=$PATH \
-  HOOKMON_BPFTIME_SIM=/tmp/bpftime_sim \
-  HOOKMON_FAKE_HOOK_LIB=/tmp/libfake_hook.so \
-  go test -tags e2e -v -run TestDetectBpftime -timeout 120s ./test/e2e/
+sudo env "PATH=$PATH" HOOKMON_E2E_LONG=1 \
+  go test -tags e2e -v -count=1 -timeout 900s -run TestHeartbeat_IdleAllAlive ./test/e2e/
 ```
 
 **Environment variables:**
+
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `HOOKMON_AGENT_BIN` | `/tmp/hookmon-bus` | Path to sensor bus binary |
-| `HOOKMON_LOADER_BIN` | `/tmp/load-canary` | Path to BPF canary loader |
-| `HOOKMON_CANARY_DIR` | `/tmp` | Directory containing `.o` canary files |
-| `HOOKMON_BPFTIME_SIM` | `/tmp/bpftime_sim` | Path to bpftime simulator |
-| `HOOKMON_FAKE_HOOK_LIB` | `/tmp/libfake_hook.so` | Path to fake LD_PRELOAD library |
-| `HOOKMON_LOKI_URL` | (disabled) | Loki push URL for test event logging |
-| `HOOKMON_PROMETHEUS_PORT` | (disabled) | Prometheus metrics port |
+| `HOOKMON_BUS_BIN` | `/tmp/hookmon-bus` | Sensor bus binary |
+| `HOOKMON_AGENT_BIN` | (unset) | Older name for `HOOKMON_BUS_BIN`, read only if that is unset |
+| `HOOKMON_CANARY_BIN` | `/tmp/canary/bin` | Directory of canary executables (`load_canary`, `bpftime_sim`, `libfake_hook.so`, ...) |
+| `HOOKMON_CANARY_DIR` | `/tmp/canary` | Directory of canary `.o` files and scripts |
+| `HOOKMON_LOKI_URL` | (unset) | Passed to the bus as `--loki-url` |
+| `HOOKMON_STATUS_PORT` | (unset; the bus uses 2112) | Passed to the bus as `--status-port` |
+| `HOOKMON_E2E_LONG` | (unset) | Set to `1` to run `TestHeartbeat_IdleAllAlive` |
+| `HOOKMON_E2E_IDLE_DURATION` | `10m` | Length of the idle test |
+| `HOOKMON_COLLECTOR_BIN` | `bin/hookmon-collector`, else built on the fly | Collector for `TestHeartbeat_KillBusCollectorUnreachable` |
+| `HOOKMON_E2E_REINSTALL_PKG` | `libmnl0` | Package `TestLibIntegrity_AptReinstallIsInfo` reinstalls |
 
 ## Deterministic Low-Frequency Events
 
 ### Probabilistic vs. Deterministic Detection
 
-Traditional security monitoring operates in probabilistic mode. Network IDS, UEBA, and EDR telemetry produce millions of events per second, and detection relies on statistical models, heuristics, anomaly scores, and machine learning classifiers to separate signal from noise. Every alert carries a confidence score. Every investigation starts with "is this real?" False positive rates dominate operational cost.
+Most security monitoring is probabilistic. Network IDS, UEBA and EDR telemetry produce millions of events per second, and detection relies on statistical models, heuristics, anomaly scores and classifiers to separate signal from noise. Every alert carries a confidence score. Every investigation starts with "is this real?" False positives dominate operational cost.
 
-HookMon operates in a fundamentally different domain. The events it monitors — BPF program loading, library injection, linker configuration changes, ptrace code injection, shared library replacement — are **deterministic binary facts**. A BPF program was either loaded or it wasn't. An `LD_PRELOAD` variable was either present in the execve environment or it wasn't. `/etc/ld.so.preload` was either modified or it wasn't. There is no probability involved in detection. The event either matches the allowlist or it doesn't.
+HookMon works in a different domain. The events it reports (BPF program loading, library injection, linker configuration changes, ptrace code injection, shared library replacement) are **discrete facts**. A BPF program was loaded or it wasn't. An `LD_PRELOAD` variable was in the new process's environment or it wasn't. `/etc/ld.so.preload` was modified or it wasn't. Detection involves no probability. The event matches the allowlist or it doesn't.
+
+Detection is only as complete as the sensors. [threat-model.md](threat-model.md) lists what they miss.
 
 ### Natural Sparsity
 
-This domain is naturally sparse. On a typical production server:
+On a typical production server:
 
-- BPF programs load at boot when the observability stack starts (Cilium, Falco, Datadog) and then not again until the next tool update — weeks or months later.
-- Shared libraries change only during OS package updates.
-- `/etc/ld.so.preload` essentially never exists on a healthy system; its mere presence is notable.
-- Ptrace activity outside of known debuggers (gdb, strace, IDE remote debug) is near-zero.
-- Linker configuration files change only during package manager operations.
-- ELF binaries with non-standard RPATH/RUNPATH entries are rare and change only on software deployment.
+- BPF programs load at boot when the observability stack starts, and then not again until the next tool update.
+- Shared libraries change during OS package updates.
+- `/etc/ld.so.preload` rarely exists on a healthy system; its presence is notable.
+- Ptrace activity outside known debuggers (gdb, strace, IDE remote debug) is near zero.
+- Linker configuration files change during package manager operations.
+- ELF binaries with non-standard RPATH or RUNPATH entries are rare and change on software deployment.
 
-The base rate of legitimate *new* events — events not already in the allowlist — approaches zero in steady-state operation. This is not a property HookMon engineers; it is a property of the domain itself.
+The base rate of legitimate *new* events, those not already in the allowlist, should approach zero in steady state. This is a property of the domain, not something HookMon engineers. It has not yet been measured on real hosts (fix plan step 8).
 
-### Allowlist Self-Population
+### Allowlist Self-Population (not built; fix plan step 7c)
 
-The allowlist does not need to be manually constructed from documentation or vendor lists. The learning mode deployment model observes the actual fleet:
+The plan is that the allowlist does not need to be written by hand from documentation or vendor lists. Learning mode would observe the fleet:
 
-1. Deploy sensor buses across the infrastructure in learning mode.
-2. Over 7-30 days, every BPF load, every LD_PRELOAD exec, every library change is captured with full context (binary hash, program hash, process lineage, host identity).
-3. The server auto-creates candidate allowlist entries for each unique event signature.
-4. Security operations reviews and approves the candidates, adding descriptions ("Cilium CNI loads BPF programs at boot", "Datadog agent uses LD_PRELOAD for instrumentation").
+1. Run the server in learning mode across the infrastructure.
+2. For the learning period, every BPF load, LD_PRELOAD exec and library change is captured with context (exe hash, program tag, library hash, host).
+3. The server creates a PENDING allowlist entry for each unique event signature.
+4. Security operations reviews and approves the entries, adding descriptions ("Cilium CNI loads BPF programs at boot", "Datadog agent uses LD_PRELOAD for instrumentation").
 
-By the time learning mode ends and monitoring mode activates, the complete legitimate event universe for that infrastructure is captured in the allowlist. The allowlist is not a theoretical policy — it is an empirical record of observed reality.
+When learning ends and monitoring starts, the allowlist records what the infrastructure actually does. None of this exists yet. The allowlist guide (`docs/allowlist-guide.md`) will be written after step 7.
 
 ### Operational Consequences
 
-Every unallowlisted event in monitoring mode is a **concrete fact**, not a statistical suspicion. The disposition question changes fundamentally:
+In monitoring mode, every unallowlisted event is a **concrete fact**, not a statistical suspicion. The disposition question changes:
 
-- Traditional SIEM: "Is this alert real? What's the confidence? Should we investigate or is this another false positive?" — a **threat hunting** workflow.
-- HookMon: "A new BPF program was loaded by binary X with hash Y on host Z. Do we approve this change?" — a **change management** workflow.
+- Traditional SIEM: "Is this alert real? What's the confidence? Should we investigate or is this another false positive?" That is a **threat hunting** workflow.
+- HookMon: "A new BPF program was loaded by binary X with tag Y on host Z. Do we approve this change?" That is a **change management** workflow.
 
-The investigation is not "determine whether something happened." The investigation is "determine whether this known-to-have-happened thing is authorized." This is a categorically simpler operational problem.
+The investigation is not "did something happen?" It is "is this thing that happened authorized?" That is a simpler problem.
 
-### No Tuning Required
+### Little Tuning
 
-There are no thresholds to adjust. No sensitivity dials. No model parameters to retrain. No baseline windows to recalibrate. No feature engineering. The allowlist is the complete policy. An event matches it or it doesn't.
+The allowlist is the main policy. An event matches it or it doesn't. There are no anomaly scores or models to retrain.
 
-Alert fatigue is structurally impossible. Every alert describes a specific new event — a specific binary loaded a specific BPF program, or a specific process was exec'd with a specific LD_PRELOAD library — that requires a specific human decision: approve it or investigate it. There is no class of "probably fine, auto-close" alerts because there is no probabilistic classification producing them.
+Every alert describes a specific new event that needs a specific decision: approve it or investigate it. That keeps alert fatigue low, as long as the allowlist covers what the hosts legitimately do. Some sensors are noisier than others: `dlopen_monitor` reports each new (binary, library) pair, at most once an hour, and `shm_monitor` reports every `/dev/shm` creation at INFO. The bus has a few settings (`heartbeat_sensor_interval`, `dead_threshold`), and the alert rules have thresholds.
 
 ## Sensor Health and Anti-Tampering
 
 ### Why Self-Integrity Matters
 
-A sophisticated attacker who discovers HookMon running on a target host will attempt to disable it before proceeding with their actual objective. The most dangerous evasion scenario is **silent disabling** — the sensor bus process is killed or its eBPF programs are unloaded, but no alert fires because the component responsible for generating alerts is the one that was disabled. A monitoring tool that can be silently neutralized provides false assurance, which is worse than no monitoring at all.
+An attacker who finds HookMon on a host will try to disable it before going further. The most dangerous case is **silent disabling**: the bus is killed or its eBPF hooks are removed, and no alert fires because the component that would raise it is the one disabled. A monitor that can be silently neutralized gives false assurance.
 
-### Sensor Heartbeats
+### Active Probes
 
-Each eBPF sensor writes a kernel timestamp to a dedicated BPF map entry every 10 seconds. This heartbeat is independent of event traffic — a sensor that has detected zero events still heartbeats normally. The sensor bus userspace process reads these maps and maintains a liveness registry for every sensor. If a sensor's last heartbeat is older than 35 seconds, the sensor bus marks it dead and emits a sensor health event.
+A heartbeat written by a timer only proves a program is loaded. It keeps ticking after an attacker detaches the hook. So the bus tests each hook by running it. Every 10 seconds (`heartbeat_sensor_interval`), the bus fires every eBPF hook with a harmless call: its own `bpf()` map reads, an `openat` and `openat2` of `/dev/null`, a `ptrace` that the kernel rejects, one `/bin/true` run, and a `dlopen` through `hookmon-dlopen-probe`. Each hook writes a kernel timestamp to its `hookmon_heartbeat_<sensor>` map before any filtering. The bus then reads the maps. A sensor is alive only if its value moved forward since the last check.
 
-The 35-second threshold (3.5x the heartbeat interval) accommodates scheduling jitter under load while catching genuine failures within one minute.
+As a second, independent signal, the bus checks that each sensor's program and link still exist and that the kernel still has the program attached to its hook.
+
+A sensor with no confirmed beat for 15 seconds (`dead_threshold`) is marked dead. With a 10-second cycle, that is two missed cycles, and the worst case is about 20 seconds. A sensor that failed to start is `failed`; one the bus cannot test (for example, the dlopen helper is missing) is `unverifiable`. Both count against the host's overall status.
+
+The two fanotify sensors are marked alive by a timer in the bus. That proves the bus is running, not that the fanotify watch still fires.
+
+Detaching a hook with `bpftool link detach` could not be tested on kernel 5.19, which refuses that for these links (EOPNOTSUPP). The dead path is covered by unit tests.
 
 ### Server-Side Out-of-Band Polling
 
-The sensor bus cannot be trusted to accurately report its own health if it has been compromised. An attacker who controls the sensor bus process can forge heartbeat reports and suppress health alerts. Server-side polling addresses this by inverting the trust model.
+The bus cannot be trusted to report its own health if it has been compromised. The collector inverts that: it reaches out to the bus. It polls each bus's `/status` endpoint every 30 seconds (`poll_interval`). If the bus has been killed, the endpoint stops answering, and that is itself the alert signal.
 
-The collector (server) reaches out to the sensor bus — the sensor bus does not phone home its health. The server polls a health endpoint on each sensor bus at a configurable interval (default: 30 seconds). This is out-of-band relative to the event stream. If the sensor bus process has been killed, the poll endpoint becomes unreachable, which is itself the alert signal. The server does not need to trust any self-report; it observes reachability directly.
+This does not cover an attacker with root on the host, who can stop the bus and serve a fake "alive" `/status`, or write fresh timestamps into a heartbeat map. See [SECURITY.md](../SECURITY.md).
 
 ### Tamper Signal Hierarchy
 
-The combination of heartbeats, polling, and event rate analysis produces a layered tamper detection model:
+| Signal | Interpretation | Prometheus rule | Severity label |
+|--------|---------------|-----------------|----------------|
+| Poll endpoint unreachable | Bus killed, or host network cut | `HookMonHostUnreachable` (for 2m) | critical |
+| Poll succeeds, but sensors report dead | A hook detached or a program unloaded | `HookMonSensorDead` (for 1m) | high |
+| Any host degraded (dead, failed or unverifiable sensors) | As above, or a sensor that never started | `HookMonFleetDegraded` (for 1m) | high |
+| All sensors alive, but no events for 24 h | Events being suppressed between the sensors and the bus | `HookMonNoEvents24h` (for 10m) | warning |
+| Collector has not pushed to Pushgateway for 90 s | Collector killed, or Pushgateway restarted and lost its data | `HookMonCollectorSilent` (for 30s) | critical |
 
-| Signal | Interpretation | Severity |
-|--------|---------------|----------|
-| Poll endpoint unreachable | Sensor bus process killed or host network severed | CRITICAL |
-| Poll succeeds, but specific sensors report dead heartbeats | Targeted sensor unload (e.g., `bpftool prog detach`) | ALERT |
-| Poll succeeds, all sensors alive, but event rate zero for 24h | Events being suppressed in the pipeline | WARN |
-| Collector stops pushing to Pushgateway for 90 s | Collector killed, or Pushgateway restarted and lost its data | CRITICAL |
+The rules are in `deploy/docker/grafana/alerts/hookmon-alerts.yaml`. Prometheus sends firing alerts to Alertmanager.
 
-The third signal — sensors alive but no events — requires combining heartbeat liveness with event rate. A host that genuinely has zero events for 24 hours is unusual but possible (a dormant standby, for example). Context from the host inventory (role, expected activity level) disambiguates. The key point is that heartbeats alone confirm the sensor is running; they cannot confirm events are flowing end-to-end.
+The "no events for 24 h" row combines heartbeat liveness with event rate. A host can genuinely have no events for 24 hours (a dormant standby, for example); the host's role decides. Heartbeats confirm the sensors run; they cannot confirm events flow end to end. `HookMonNoEvents24h` uses the bus's own `/metrics` (`hookmon_sensor_alive` and `hookmon_events_total`), so it needs each bus listed as a scrape target in `prometheus.yml`.
 
-These signals map to Prometheus rules in `deploy/docker/grafana/alerts/hookmon-alerts.yaml`: `HookMonHostUnreachable`, `HookMonSensorDead`, `HookMonNoEvents24h` and `HookMonCollectorSilent`. `HookMonNoEvents24h` uses the bus's own `/metrics` (`hookmon_sensor_alive` and `hookmon_events_total`), so it needs each bus listed as a scrape target in `prometheus.yml`. Prometheus sends firing alerts to Alertmanager.
+Known gap: `hookmon_events_total` also counts BPF_INVENTORY events, which `bpf_syscall` sends every 5 minutes. They come from the bus itself, not from a hook, so on a host where `bpf_syscall` runs, `HookMonNoEvents24h` cannot fire even if every hook's events are lost. This is not fixed.
 
-The last row matters because Pushgateway keeps serving the last values it received. Without that rule, a dead collector would leave the fleet showing "all alive" forever.
+The collector-silence rule matters because Pushgateway keeps serving the last values it received. Without it, a dead collector would leave the fleet showing "all alive" forever.
 
 ### Limitations of Polling
 
-Server-side polling cannot catch attacks that happen between poll intervals where the attacking process has already exited. If an attacker loads a BPF program, kills the sensor bus, and the server's next poll is 25 seconds away, the attack completes in the blind spot. Heartbeats confirm sensor liveness at a point in time; they cannot reconstruct missed events.
+Polling cannot catch an attack that completes between polls. If an attacker loads a BPF program and kills the bus, and the next poll is 25 seconds away, the attack completes in the blind spot. Heartbeats confirm sensor liveness at a point in time; they cannot reconstruct missed events.
 
-However, for **persistent and state-based attacks** — kernel BPF programs that remain loaded, linker configuration changes that persist on disk, replaced shared libraries — the damage outlasts the blind spot. The combination of heartbeat monitoring and independent out-of-band verification can detect these after the fact.
+For **persistent attacks** (kernel BPF programs that stay loaded, linker configuration changes on disk, replaced shared libraries) the damage outlasts the blind spot. When the bus restarts, the BPF inventory lists every loaded program, and the file sensors take a new baseline. A file changed while the bus was down is not reported as a change; its new hash becomes the baseline.
 
-### SSH-Based Independent Verification
+### Independent Verification over SSH (not built)
 
-For maximum assurance, the collector can optionally SSH to monitored hosts and run verification commands that completely bypass the sensor bus:
-
-```bash
-bpftool prog list | grep hookmon
-```
-
-This independently verifies the kernel BPF program inventory — confirming that HookMon's own eBPF programs are still loaded and that no unexpected programs have appeared. The verification uses a separate authentication path (SSH keys managed by the collector), a separate binary (`bpftool`, part of the kernel toolchain), and reads directly from the kernel's BPF subsystem. An attacker would need to compromise both the sensor bus and the SSH-based verification path to evade detection.
-
-Similar independent checks can verify `/etc/ld.so.preload` contents, `/dev/shm` segment inventory, and loaded shared library hashes — all without relying on any HookMon component running on the target host.
+An earlier design had the collector SSH to each host and run checks that bypass the bus entirely, such as `bpftool prog list | grep hookmon`. That is not built, and the fix plan does not add it. The collector's SSH mode runs `curl -s http://localhost:2112/status` on the host, so it returns the same answer the bus gives over HTTP. It does not verify the SSH host key.

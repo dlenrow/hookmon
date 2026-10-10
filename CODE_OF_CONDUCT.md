@@ -8,6 +8,6 @@ In summary: be respectful, constructive, and professional. Harassment, personal 
 
 ## Enforcement
 
-This is a reference implementation with no active maintainer team (see [MAINTAINERS.md](MAINTAINERS.md)). Enforcement is limited. If you experience or witness unacceptable behavior in this repo's issue tracker or discussions, contact the original author at drl@clevercraft.energy.
+This is a reference implementation with no active maintainer team (see [MAINTAINERS.md](MAINTAINERS.md)). Enforcement is limited. If you experience or witness unacceptable behavior in this repo's issue tracker or discussions, contact the original author at david.lenrow@illumio.com.
 
 If you maintain a fork with an active community, establish your own enforcement process.

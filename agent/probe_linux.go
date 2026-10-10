@@ -61,9 +61,9 @@ func (p *hookProber) probe(names []string) map[string]string {
 			// pid 0 never names a tracee, so the kernel returns ESRCH.
 			unix.Syscall6(unix.SYS_PTRACE, ptraceProbeRequest, 0, 0, 0, 0, 0)
 		case "exec_injection", "elf_rpath":
-			// One /bin/true run fires both hooks: sys_enter_execve
-			// (exec_injection) and, once the exec succeeds,
-			// sched_process_exec (elf_rpath).
+			// One /bin/true run fires both hooks: exec_injection and
+			// elf_rpath both attach to sched_process_exec, which fires
+			// once the exec succeeds.
 			//
 			// Every cycle, not once a minute as the fix plan suggested: a
 			// sensor is dead after two missed cycles (15 s threshold), so a

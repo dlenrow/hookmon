@@ -3,7 +3,7 @@ Version: VERSION_PLACEHOLDER
 Section: admin
 Priority: optional
 Architecture: amd64
-Maintainer: Dave Lenrow <drl@clevercraft.energy>
+Maintainer: Dave Lenrow <david.lenrow@illumio.com>
 Description: HookMon Agent - eBPF and LD_PRELOAD security monitor
  HookMon agent monitors eBPF program loading, LD_PRELOAD injection,
  shared memory creation, and dlopen() calls on Linux hosts.
