@@ -13,9 +13,10 @@ import (
 
 // Server holds dependencies for the HTTP API.
 type Server struct {
-	store   Store
-	logger  *zap.Logger
-	eventCh <-chan *event.HookEvent
+	store    Store
+	logger   *zap.Logger
+	eventCh  <-chan *event.HookEvent
+	reloader PolicyReloader
 }
 
 // NewServer creates a new API server.
@@ -49,10 +50,20 @@ func (s *Server) Router(apiTokens []string, dashboard http.Handler) http.Handler
 		r.Get("/api/v1/events", s.handleListEvents)
 		r.Get("/api/v1/events/{id}", s.handleGetEvent)
 
-		// Policies / Allowlist
+		// Policies / Allowlist. Every write reloads the policy engine
+		// before it answers.
 		r.Get("/api/v1/policies", s.handleListPolicies)
 		r.Post("/api/v1/policies", s.handleCreatePolicy)
 		r.Delete("/api/v1/policies/{id}", s.handleDeletePolicy)
+		r.Post("/api/v1/policies/{id}/approve", s.handleApprovePolicy)
+		r.Post("/api/v1/policies/{id}/reject", s.handleRejectPolicy)
+
+		// Learning mode
+		r.Get("/api/v1/learning", s.handleGetLearning)
+		r.Put("/api/v1/learning/fleet", s.handleStartFleetLearning)
+		r.Delete("/api/v1/learning/fleet", s.handleStopFleetLearning)
+		r.Put("/api/v1/learning/hosts/{hostID}", s.handleStartHostLearning)
+		r.Delete("/api/v1/learning/hosts/{hostID}", s.handleStopHostLearning)
 
 		// Hosts
 		r.Get("/api/v1/hosts", s.handleListHosts)

@@ -8,7 +8,7 @@ This guide sets up the observability path, which works today, and then the serve
 2. **Sensor buses:** `hookmon-bus` on each monitored Linux host. Each detects eBPF loads, linker environment injection, ptrace abuse, library tampering and more, and pushes events to Loki.
 3. **Collector:** `hookmon-collector`, run on the stack's host but outside Compose. It polls each host's `/status` endpoint and pushes fleet health to Pushgateway.
 
-[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet, such as SIEM connectors (step 7d) and learning mode (step 7c); see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
+[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet, such as SIEM connectors (step 7d); see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
 
 All sensors are read-only. They observe and report, and cannot block or change anything. There is no enforcement mode.
 
@@ -312,7 +312,7 @@ curl -s http://<bus-host>:2112/status | jq .
 
 ## Server Path
 
-The server path sends events from each bus to `hookmon-server`, which stores them in PostgreSQL and serves the REST API and the dashboard. Every connection uses TLS, from one CA you create. Not working yet: SIEM connectors (step 7d), learning mode and allowlist reload (step 7c), and WebSocket authentication (step 7e).
+The server path sends events from each bus to `hookmon-server`, which stores them in PostgreSQL and serves the REST API and the dashboard. Every connection uses TLS, from one CA you create. Not working yet: SIEM connectors (step 7d), and WebSocket authentication and a dashboard page for PENDING entries (step 7e).
 
 ### Build
 
@@ -390,6 +390,30 @@ curl --cacert /etc/hookmon/tls/ca.crt -H "Authorization: Bearer <api-token>" \
 The host shows `ONLINE` with its sensors' health. If its heartbeats stop for `watchdog.heartbeat_timeout` (default 60 s), the server marks it `UNRESPONSIVE` and stores an AGENT_OFFLINE event.
 
 `hookmon-cli` defaults to `https://localhost:8443`. Pass `--server https://hookmon.internal:8443 --token <api-token> --ca-file ca.crt`, or set `HOOKMON_CA_FILE`.
+
+### Build the Allowlist with Learning Mode
+
+Start learning mode once the buses are enrolled, for the whole fleet or for one host, with an end time (a duration such as `90m`, `36h` or `7d`, or `--until` an RFC 3339 time):
+
+```bash
+hookmon-cli $FLAGS learning start --fleet --for 7d
+hookmon-cli $FLAGS learning start --host <host-id> --until 2026-11-01T00:00:00Z
+hookmon-cli $FLAGS learning                  # windows, and whether each is active
+```
+
+`$FLAGS` stands for `--server`, `--token` and `--ca-file` as above. The windows are stored in PostgreSQL, so a restarted server keeps learning until the end time. While a window is open, each event that matches no allowlist entry becomes a PENDING entry for its tuple (event type, executable hash, BPF tag and type / library hash or path / file path / shared memory pattern, in a container or not), with a count, first and last seen times, and the hosts that saw it. Events are still rated and alerted on as usual.
+
+Review the candidates, then approve or reject each one for the fleet or for one host:
+
+```bash
+hookmon-cli $FLAGS policies pending
+hookmon-cli $FLAGS policies approve <entry-id> --fleet
+hookmon-cli $FLAGS policies approve <entry-id> --host <host-id>
+hookmon-cli $FLAGS policies reject <entry-id> --fleet       # keeps alerting; not proposed again
+hookmon-cli $FLAGS learning stop --fleet                    # end early; PENDING entries stay
+```
+
+An approved entry allows exactly the tuple it was learned from. A change through the API applies to the next event. To apply changes made directly in the database, send the server `SIGHUP` (`sudo kill -HUP $(pidof hookmon-server)`); it rereads the allowlist and learning windows, not the config file.
 
 ### Open the Dashboard
 

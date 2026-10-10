@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -164,17 +167,16 @@ func (s *Server) Run(ctx context.Context) error {
 	// Initialize connectors
 	s.initConnectors()
 
-	// Initialize policy engine
+	// Initialize policy engine. It reads the allowlist and the learning
+	// windows from the database now, after every policy write through the
+	// API, and on SIGHUP; learning mode records candidates in the database.
 	s.policy = policy.NewEngine(s.logger)
-	s.alertMgr = policy.NewAlertManager(s.logger, 5*time.Minute)
-
-	// Load allowlist from DB
-	entries, err := s.store.GetAllowlist(ctx)
-	if err != nil {
-		s.logger.Warn("failed to load allowlist", zap.Error(err))
-	} else {
-		s.policy.LoadAllowlist(entries)
+	s.policy.SetSource(s.store)
+	s.policy.SetCandidateSink(s.store)
+	if err := s.policy.Reload(ctx); err != nil {
+		return fmt.Errorf("load policy: %w", err)
 	}
+	s.alertMgr = policy.NewAlertManager(s.logger, 5*time.Minute)
 
 	// Initialize ingestion server
 	var ingestConnectors []ingestion.Connector
@@ -252,6 +254,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.grpcAddr = grpcLis.Addr().String()
 	s.httpAddr = httpLis.Addr().String()
+
+	// SIGHUP rereads the policy. Registered before Ready, so a SIGHUP sent
+	// once the server is up never takes the default action (exit).
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	close(s.ready)
 
 	// Start subsystems
@@ -281,6 +289,7 @@ func (s *Server) Run(ctx context.Context) error {
 		dashHandler = dashboard
 	}
 	apiSrv := api.NewServer(s.store, s.logger, s.ingestion.GetEventChannel())
+	apiSrv.SetPolicyReloader(s.policy)
 	s.httpServer = &http.Server{Handler: apiSrv.Router(s.cfg.API.Tokens, dashHandler)}
 	wg.Add(1)
 	go func() {
@@ -288,6 +297,12 @@ func (s *Server) Run(ctx context.Context) error {
 		if err := serveHTTP(ctx, s.httpServer, httpLis, httpTLS); err != nil {
 			s.logger.Error("HTTP server error", zap.Error(err))
 		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		reloadOnSignal(ctx, hup, s.policy.Reload, s.logger)
 	}()
 
 	// Watchdog
@@ -314,6 +329,23 @@ func (s *Server) Run(ctx context.Context) error {
 	s.shutdown()
 	wg.Wait()
 	return nil
+}
+
+// reloadOnSignal calls reload for every signal on sig until ctx is done.
+func reloadOnSignal(ctx context.Context, sig <-chan os.Signal, reload func(context.Context) error, logger *zap.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case got := <-sig:
+			if err := reload(ctx); err != nil {
+				logger.Error("policy reload failed; keeping the previous policy",
+					zap.String("signal", got.String()), zap.Error(err))
+				continue
+			}
+			logger.Info("policy reloaded", zap.String("signal", got.String()))
+		}
+	}
 }
 
 // serveGRPC serves srv on lis until ctx is cancelled, then stops it,

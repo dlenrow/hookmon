@@ -246,8 +246,8 @@ The dashboard (`deploy/docker/grafana/dashboards/hookmon.json`, uid `hookmon-mai
 
 - **Ingestion** (`server/ingestion`): the `AgentService` gRPC service on `--grpc-addr` (default `:9443`), with the `StreamEvents` RPC, schema validation and a per-host rate limit. The TLS handshake requires a client certificate signed by `tls.ca_file`. The host ID of every event and heartbeat is the CN of that certificate; the host ID in the message is ignored. Heartbeats update the host's record and its sensor-health snapshot.
 - **Enrollment** (`server/ingestion/enroll.go`) on `--enroll-addr` (default `:9444`); see [Enrollment](#enrollment).
-- **Policy** (`server/policy`): matches events against allowlist entries and built-in rules, and sets severity.
-- **Store** (`server/store`): PostgreSQL (`database.url` or `--db`), with `events`, `allowlist`, `hosts`, `enrollment_token_uses` and `audit_log` tables. Migrations are in `server/store/migrations/` and run at every start. PID, PPID, UID, GID and BPF program type are stored as BIGINT, so the bus's "unknown" UID (4294967295) is stored like any other.
+- **Policy** (`server/policy`): matches events against the allowlist, sets severity, and in learning mode records unmatched events as PENDING entries; see [Policy and Learning Mode](#policy-and-learning-mode).
+- **Store** (`server/store`): PostgreSQL (`database.url` or `--db`), with `events`, `allowlist`, `learning_mode`, `hosts`, `enrollment_token_uses` and `audit_log` tables. Migrations are in `server/store/migrations/` and run at every start. PID, PPID, UID, GID and BPF program type are stored as BIGINT, so the bus's "unknown" UID (4294967295) is stored like any other.
 - **REST API, WebSocket and dashboard** (`server/api`) on `--http-addr` (default `:8443`), over HTTPS with the server certificate (TLS 1.2 or newer). Events, policies, hosts and health are under `/api/v1/`, and a live event feed is at `/api/v1/ws/events`. API tokens come from `api.tokens` or `--api-tokens`; `/api/v1/health` needs none. Paths outside `/api` serve the dashboard (see [Dashboard](#dashboard)). The API reference is written after fix plan step 7.
 - **Connectors** (`server/connectors`): Syslog/CEF, Splunk HEC, Elasticsearch, webhook, Kafka.
 - **Watchdog**: every `watchdog.check_interval` (default 15 s) it marks an ONLINE host UNRESPONSIVE once it has gone `watchdog.heartbeat_timeout` (default 60 s) without a heartbeat, and stores an AGENT_OFFLINE event (CRITICAL). The next heartbeat sets the host ONLINE again. No AGENT_RECOVERED event is sent.
@@ -262,19 +262,39 @@ and exits with status 1, before it connects to the database.
 
 Insecure mode runs gRPC and REST in plaintext and takes each host ID from the message, so any host can report as any other. Enrollment needs TLS, so insecure mode with enrollment tokens configured is a config error. It is for development only.
 
-`hookmon-cli` is a REST client: `events`, `hosts`, `policies` (list, `create` from JSON on stdin, `delete <id>`) and `health`. Its `--server` default is `https://localhost:8443`; `--ca-file` (or `HOOKMON_CA_FILE`) names the CA that signed the server certificate.
+`hookmon-cli` is a REST client: `events`, `hosts`, `policies` (list, `pending`, `create` from JSON on stdin, `delete <id>`, `approve` and `reject <id> --fleet|--host <id>`), `learning` (status, `start --fleet|--host <id> --for <duration>|--until <time>`, `stop`) and `health`. Its `--server` default is `https://localhost:8443`; `--ca-file` (or `HOOKMON_CA_FILE`) names the CA that signed the server certificate.
 
 Not working yet:
 
 | Gap | Fix plan step |
 |-----|---------------|
 | Nothing sets connector configuration, so no connector runs. The alert manager is created but never called; AGENT_OFFLINE goes to an empty connector list. | 7d |
-| The allowlist loads once at startup. | 7c |
-| The server overrides the severity the bus set. | 7c |
-| Learning mode and PENDING entries do not exist. | 7c |
 | The WebSocket accepts any non-empty token and any Origin, and one shared channel splits events across open clients. | 7e |
 | No gRPC recovery interceptor. The rate limiter's table of hosts is never trimmed. | 7f |
 | No automated end-to-end test covers this path. | 7h |
+
+### Policy and Learning Mode
+
+**Matching.** One matcher, `pkg/allowlist`, is used by the server and by the e2e policy tests. An entry matches when it is enabled, not expired, not PENDING, and every criterion it sets matches (AND; an empty criterion matches anything): event types, `exe_hash` and `library_hash` (`sha256:<hex>`; bare hex and any letter case are accepted), `exe_path`, `library_path`, `prog_name` and `host_pattern` (globs), `prog_type`, `prog_hash` (the kernel's BPF program tag, 16 hex digits), `uid_range`, `container_image` (matched against the container ID; the bus reports no image name), `allowed_rpaths`, and `host_id` (one enrolled host; empty for the fleet). Identical instructions of different program types share a tag, so an entry with `prog_hash` should also pin `prog_type`. When several entries match, the most restrictive action wins (DENY, then ALERT, then ALLOW); among equal actions an entry for the host wins over a fleet entry. `POST /api/v1/policies` rejects a hash in any other format, since it could never match.
+
+**Reload.** The engine holds the allowlist and the learning windows in memory. It rereads both from PostgreSQL at startup, after every write through the API (before the API answers, so the next event sees the change), and on `SIGHUP` (for changes made in the database directly). A failed reload keeps the previous policy. SIGHUP does not reread the config file.
+
+**Learning mode.** A learning window is open for the fleet or for one host until its end time; there is always an end time. Windows are rows in `learning_mode`, so they survive a restart. While a window covers an event's host, every event no entry matches is recorded as a PENDING allowlist entry for its key:
+
+| Key part | Value |
+|----------|-------|
+| Event type | as reported |
+| Executable | the acting binary's `sha256:<hex>`, or empty if the bus could not hash it (BPF_INVENTORY has no process) |
+| Subject | BPF events: the program tag and program type (the program name if the kernel gave no tag). EXEC_INJECTION, DLOPEN: the library hash, or its path if it has none. LIB_INTEGRITY: the library path. LINKER_CONFIG: the file path. SHM_CREATE: the pattern the bus gave the segment name (`bpftime`, `bpf_related` or `unknown`), not the name, since browsers name every segment randomly. PTRACE_INJECT, ELF_RPATH: none |
+| Container | whether the process ran in a container. The bus reports a container ID, not an image, and a container ID changes with every container, so it is not used; the exe hash, taken inside the container, identifies the binary |
+
+Each PENDING entry has an occurrence count, first and last seen times, and the IDs of the hosts that saw it. Learning mode records; it does not change severity or suppress alerts. AGENT_OFFLINE and the BPF inventory summary are never recorded.
+
+A PENDING entry matches nothing. Approving it for the fleet makes it APPROVED with action ALLOW; rejecting it makes it REJECTED with action ALERT, so the event keeps alerting and is not proposed again. Approving or rejecting for one host creates a separate entry for that host and takes the host off the PENDING entry, which is deleted when no host is left. A learned entry matches exactly its key: an empty executable hash or "not in a container" is not a wildcard.
+
+REST endpoints (all need an API token): `GET /api/v1/policies` (entries in force; `?status=PENDING`, `REJECTED`, `APPROVED` or `ALL`), `POST /api/v1/policies`, `DELETE /api/v1/policies/{id}`, `POST /api/v1/policies/{id}/approve` and `/reject` with `{"scope": "fleet"}` or `{"scope": "host", "host_id": "..."}`, `GET /api/v1/learning`, and `PUT` / `DELETE` on `/api/v1/learning/fleet` and `/api/v1/learning/hosts/{host_id}`, where PUT takes `{"duration": "7d"}` or `{"ends_at": "<RFC 3339>"}`.
+
+**Severity.** The bus rates each event with context the server lacks (a package manager wrote the file, the shared memory name, who can write an RPATH directory). The server keeps that rating and adds the allowlist and two escalations: an unmatched event from root is CRITICAL, and a WARN event from a binary the bus could not hash is ALERT. Neither escalation applies to an event the bus rated INFO or to ELF_RPATH. The full table is in `CLAUDE.md` ("Severity Classification") and [theory-of-operations.md](theory-of-operations.md#severity).
 
 ### Enrollment
 
@@ -293,7 +313,7 @@ Later starts use the stored identity and ignore `--enroll-token`. A certificate 
 
 `hookmon-server` serves the built files from `dashboard_dir` (`--dashboard-dir`, default `/usr/share/hookmon/dashboard`) on the same HTTPS listener as the API. A request for a file in that directory gets the file. Any other path outside `/api` gets `index.html`, so the dashboard's own routes (such as `/hosts`) load directly. An unknown `/api` path gets a JSON 404, never `index.html`. If the directory has no `index.html`, the server logs a warning and serves the API only; an empty `dashboard_dir` turns the dashboard off. `deploy/docker/Dockerfile.server` copies the build to `/usr/share/hookmon/dashboard`.
 
-Not working yet: the Vite dev server's `/api` proxy lacks `ws: true`, so the live feed does not work under `npm run dev`. The Settings page shows an enrollment command that does not exist. There is no PENDING-approval page and no per-sensor health on Host Inventory. (step 7e)
+Not working yet: the Vite dev server's `/api` proxy lacks `ws: true`, so the live feed does not work under `npm run dev`. The Settings page shows an enrollment command that does not exist. There is no PENDING-approval page (the API above serves what it needs) and no per-sensor health on Host Inventory. (step 7e)
 
 ## Directory Structure
 

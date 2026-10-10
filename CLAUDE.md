@@ -628,32 +628,34 @@ Server-side enrichment (reverse DNS, asset DB lookup) is not built.
 
 ### Severity Classification
 
-This table is the server's intended classification. Today the server replaces the bus's per-sensor severity with its own, so the bus's INFO downgrades (package-manager writes, ordinary shared memory) are lost on the server path, and the root-UID check runs before RPATH classification. Both are fix plan step 7c. On the bus (console, Loki, Prometheus), severity is set per sensor; see `docs/theory-of-operations.md`.
+The bus rates each event when it sees it (per sensor; see `docs/theory-of-operations.md`), with context the server lacks: whether a package manager wrote the file, the shared memory segment's name, who can write an RPATH directory. The server keeps that rating and adds what it knows: the allowlist, and two escalations, for root and for a binary the bus could not hash. Neither escalation applies to an event the bus rated INFO, or to ELF_RPATH, whose severity is the RPATH risk of the binary whatever the UID. The first row that applies wins (`server/policy/severity.go`; one test per row in `TestSeverityTable`). "Not on the allowlist" includes events that match an ALERT or DENY entry, such as a rejected learning-mode candidate.
 
-Events are auto-classified based on allowlist evaluation:
+| # | Condition | Severity | Action |
+|---|-----------|----------|--------|
+| 1 | Host offline: AGENT_OFFLINE raised by the server's watchdog | CRITICAL | Alert SOC, possible tampering |
+| 2 | AGENT_OFFLINE or AGENT_RECOVERED arriving on a bus's event stream | ALERT | Alert SOC |
+| 3 | BPF_INVENTORY (a census of loaded programs; the policy result records whether each is on the allowlist) | INFO | Log only |
+| 4 | Matches an allowlist entry with ALLOW, for the fleet or for this host | INFO | Log only |
+| 5 | The bus rated it INFO: a package manager wrote the library or linker file, or a /dev/shm segment has no BPF pattern | INFO | Log only |
+| 6 | bpftime-pattern shared memory | CRITICAL | Alert SOC, possible active attack |
+| 7 | Linker configuration modified (not by a package manager) | CRITICAL | Alert SOC, system-wide injection vector |
+| 8 | ELF RPATH, by the binary's highest risk: CRITICAL / HIGH / MEDIUM, whatever the UID | CRITICAL / ALERT / WARN | Library search path an attacker or a non-root user can write |
+| 9 | Any other event from root (UID 0) | CRITICAL | Alert SOC, priority |
+| 10 | Exec injection (LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH, LD_DEBUG) | ALERT | Alert SOC |
+| 11 | Ptrace injection | ALERT | Alert SOC, process memory manipulation |
+| 12 | Shared library modified on disk (not by a package manager) | ALERT | Alert SOC, possible trojanized library |
+| 13 | Shared memory with a BPF-related name | ALERT | Alert SOC |
+| 14 | The bus could not hash the binary (BPF load or attach, dlopen) | ALERT | Alert SOC, priority investigation |
+| 15 | BPF program load or attach, or dlopen, not on the allowlist | WARN | Alert SOC |
 
-| Condition | Severity | Action |
-|-----------|----------|--------|
-| Matches allowlist entry with ALLOW | INFO | Log only |
-| No allowlist match, known program type (e.g., BPF_PROG_TYPE_CGROUP_SKB) | WARN | Alert SOC |
-| No allowlist match, unknown binary hash | ALERT | Alert SOC, priority investigation |
-| Exec injection from non-root, non-whitelisted library | ALERT | Alert SOC |
-| Ptrace injection detected | ALERT | Alert SOC, process memory manipulation |
-| Shared library modified on disk | ALERT | Alert SOC, possible trojanized library |
-| ELF RPATH with CRITICAL risk entries | CRITICAL | Attacker-controlled library search path |
-| ELF RPATH with HIGH risk entries | ALERT | Suspicious library search path |
-| ELF RPATH with MEDIUM risk entries | WARN | Library search path a non-root user or group can write |
-| ELF RPATH with only LOW or NONE entries | — | No event (root-only-writable or standard library path) |
-| bpftime-pattern shared memory from non-whitelisted process | CRITICAL | Alert SOC, possible active attack |
-| Linker configuration modified | CRITICAL | Alert SOC, system-wide injection vector |
-| Any event from process with no matching allowlist AND running as root | CRITICAL | Alert SOC, priority |
+ELF RPATH with only LOW or NONE entries produces no event (root-only-writable or standard library path). Before step 7c the server replaced the bus's rating, so rows 5 and 8 did not hold on the server path, and a MEDIUM RPATH from a root process was CRITICAL.
 
 ### Allowlist Bootstrapping
 
 First deployment challenge: you don't know what's "normal" yet. Strategy:
 
-1. **Learning mode** (first 7-30 days) — **not built; fix plan step 7c.** Agent reports all events. Server auto-creates PENDING allowlist entries for everything observed. SOC reviews and approves/rejects.
-2. **Monitoring mode** (steady state): All new events evaluated against approved allowlist. Unknowns generate alerts. No blocking. Today allowlist entries are added by hand (REST API or `hookmon-cli policies create`), and the server reads them only at startup (step 7c).
+1. **Learning mode** (first 7-30 days): `hookmon-cli learning start --fleet --for 7d` (or `--host <id>`, `--until <time>`; there is always an end time, and windows are stored in PostgreSQL). The bus reports all events. Every unmatched unique tuple (event type, exe hash, BPF tag and type / library hash or path / file path / shared memory pattern, in a container or not) becomes a PENDING allowlist entry with an occurrence count, first and last seen times, and the hosts that saw it. SOC reviews (`hookmon-cli policies pending`) and approves or rejects each one for the fleet or one host (`hookmon-cli policies approve|reject <id> --fleet|--host <id>`). See `docs/architecture.md` ("Policy and Learning Mode").
+2. **Monitoring mode** (steady state): All new events evaluated against approved allowlist. Unknowns generate alerts. No blocking. Entries can also be written by hand (REST API or `hookmon-cli policies create`). Every API write reloads the policy before it answers; SIGHUP rereads it from the database.
 3. **Enforcement mode** (optional, advanced) — **does not exist; not in the fix plan.** Agent would prevent BPF program loading or process execution with LD_PRELOAD.
 
 ## SIEM Connector Specifications

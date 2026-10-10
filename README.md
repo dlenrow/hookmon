@@ -29,11 +29,10 @@ Events leave the sensor bus (`hookmon-bus`) on two paths.
 
 **Observability path (works today).** The bus pushes events to Loki and serves `/metrics` and `/status`. `hookmon-collector` polls `/status` on every host and pushes fleet health to Pushgateway. Grafana shows events and health. Prometheus alert rules go to Alertmanager. This path is tested end to end; see [docs/claims.md](docs/claims.md).
 
-**Server path (partly working).** The bus enrolls with `hookmon-server` once, with a token, and gets a client certificate. It then streams events over mutual-TLS gRPC. The server takes each host's ID from its certificate, checks each event against an allowlist, sets its severity, stores it in PostgreSQL, and serves a REST API, a WebSocket feed and the React dashboard over HTTPS. `hookmon-cli` talks to the REST API. The server and the bus refuse to run without TLS unless `--insecure` is given. What doesn't work yet:
+**Server path (partly working).** The bus enrolls with `hookmon-server` once, with a token, and gets a client certificate. It then streams events over mutual-TLS gRPC. The server takes each host's ID from its certificate, checks each event against an allowlist, sets its severity, stores it in PostgreSQL, and serves a REST API, a WebSocket feed and the React dashboard over HTTPS. A policy change through the API applies to the next event, with no restart. Learning mode turns what the hosts do into PENDING allowlist entries for review. `hookmon-cli` talks to the REST API. The server and the bus refuse to run without TLS unless `--insecure` is given. What doesn't work yet:
 
 - SIEM connectors can't be turned on. The connector code exists, but the server config has no section for it. (fix plan step 7d)
-- The allowlist loads once, at startup. A policy added through the API takes effect after a restart. (step 7c)
-- The server replaces the bus's severity with its own. (step 7c)
+- The dashboard has no page for PENDING entries; approve and reject them with `hookmon-cli` or the REST API. (step 7e)
 - The WebSocket feed accepts any non-empty token and splits events across open browser tabs. The dashboard's Settings page shows an enrollment command that does not exist. (step 7e)
 - `hookmon-cli` defaults to `https://localhost:8443`. Pass `--ca-file` (or set `HOOKMON_CA_FILE`) with the HookMon CA.
 - No automated end-to-end test covers the server path. Every e2e test runs the bus with `--console`. (step 7h)
@@ -116,7 +115,7 @@ HookMon watches operations that are rare in production. It does not score probab
 
 Not every sensor is this quiet. `dlopen_monitor` reports each new (binary, library) pair, and interpreters such as Python call `dlopen` often; the bus reports each pair at most once an hour. `shm_monitor` reports every `/dev/shm` creation, at INFO unless the name looks like bpftime or BPF. `bpf_syscall` sends an INFO inventory every 5 minutes.
 
-Each unallowlisted event needs a decision: approve it or investigate it. Learning mode, which would build the allowlist from what the hosts actually do, is not built yet (fix plan step 7c).
+Each unallowlisted event needs a decision: approve it or investigate it. Learning mode builds the first allowlist from what the hosts actually do (see [Allowlist Workflow](#allowlist-workflow)).
 
 The expectation is that most hosts raise no alerts in a typical week. That has not been measured; step 8 of the fix plan records the first minutes on real hosts.
 
@@ -194,8 +193,10 @@ Open `http://<appliance>:3000/d/hookmon-main/hookmon` in your browser.
 
 ## Allowlist Workflow
 
-- **Today.** You create allowlist entries through the REST API or `hookmon-cli policies create` (JSON on stdin). The server matches each event against them. It reads the allowlist only at startup. (fix plan step 7c)
-- **Learning mode: not built.** (step 7c) The plan: during a learning window, the server records each unmatched event as a PENDING entry, with counts and the hosts that saw it. An operator approves or rejects each one through the API, the CLI or the dashboard.
+- **Learning mode.** Turn it on for the fleet or for one host, always with an end time: `hookmon-cli learning start --fleet --for 7d` (or `--host <host-id>`, `--until <RFC 3339 time>`). Until then, the server records each unmatched event as a PENDING allowlist entry, one per unique tuple of event type, executable hash, subject (BPF program tag and type, library hash or path, file path, or the shared memory pattern) and whether it ran in a container. Each entry counts its occurrences and records when it was first and last seen and on which hosts. Learning mode changes no severity and suppresses no alert. The windows are stored in PostgreSQL, so a restarted server keeps learning until the end time.
+- **Review.** `hookmon-cli policies pending` lists the candidates. `hookmon-cli policies approve <id> --fleet` allows the tuple on every host; `--host <host-id>` allows it on that host only. `reject` works the same way: a rejected tuple keeps alerting and is not proposed again. A learned entry matches exactly its tuple; an empty executable hash, for example, is not a wildcard.
+- **Writing entries by hand.** `hookmon-cli policies create` (JSON on stdin) or `POST /api/v1/policies`. File hashes are `sha256:<hex>`. `prog_hash` is the kernel's BPF program tag (16 hex digits, as `bpftool prog show` prints it); pin `prog_type` with it, because identical instructions of different program types share a tag. `host_id` limits an entry to one host. When several entries match an event, the most restrictive action wins (DENY, then ALERT, then ALLOW).
+- **Changes apply at once.** Every write through the API reloads the policy before it answers. `SIGHUP` makes the server reread the allowlist and learning windows from the database, for changes made there directly.
 - **Monitoring mode.** The steady state. Unmatched events raise alerts. Nothing is blocked.
 - **Enforcement mode: does not exist.** No code blocks anything, and the fix plan does not add it.
 

@@ -19,9 +19,19 @@ type Store interface {
 	InsertEvent(ctx context.Context, evt *event.HookEvent) error
 	QueryEvents(ctx context.Context, filter store.EventFilter) ([]*event.HookEvent, error)
 	GetEvent(ctx context.Context, id string) (*event.HookEvent, error)
-	GetAllowlist(ctx context.Context) ([]*event.AllowlistEntry, error)
+	// QueryAllowlist returns the entries with any of the statuses, or every
+	// entry when none is given.
+	QueryAllowlist(ctx context.Context, statuses ...event.EntryStatus) ([]*event.AllowlistEntry, error)
 	CreateAllowlistEntry(ctx context.Context, entry *event.AllowlistEntry) error
+	// DeleteAllowlistEntry and the calls below return store.ErrNotFound
+	// (wrapped) for a missing row.
 	DeleteAllowlistEntry(ctx context.Context, id string) error
+	// DecideCandidate approves or rejects a PENDING entry for the fleet
+	// (hostID "") or one host; store.ErrNotPending if it is not PENDING.
+	DecideCandidate(ctx context.Context, id string, decision event.EntryStatus, hostID string) (*event.AllowlistEntry, error)
+	GetLearningWindows(ctx context.Context) ([]event.LearningWindow, error)
+	SetLearningWindow(ctx context.Context, w event.LearningWindow) error
+	DeleteLearningWindow(ctx context.Context, hostID string) error
 	GetHosts(ctx context.Context) ([]*event.Host, error)
 	GetHost(ctx context.Context, id string) (*event.Host, error)
 }

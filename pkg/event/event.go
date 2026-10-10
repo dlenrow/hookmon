@@ -229,6 +229,22 @@ type UIDRange struct {
 	Max uint32 `json:"max"`
 }
 
+// EntryStatus is an allowlist entry's review state.
+type EntryStatus string
+
+const (
+	// StatusApproved entries are in force. Entries created through the API
+	// are approved when created, and an empty status means approved.
+	StatusApproved EntryStatus = "APPROVED"
+	// StatusPending entries are learning-mode candidates waiting for review.
+	// They never match an event.
+	StatusPending EntryStatus = "PENDING"
+	// StatusRejected entries are candidates an operator rejected. They match
+	// with action ALERT, so the event keeps alerting and learning mode does
+	// not propose it again.
+	StatusRejected EntryStatus = "REJECTED"
+)
+
 // AllowlistEntry defines a single allowlist rule.
 type AllowlistEntry struct {
 	ID          string    `json:"id"`
@@ -237,22 +253,90 @@ type AllowlistEntry struct {
 	Description string    `json:"description"`
 
 	// Match criteria (AND logic for non-empty fields)
-	EventTypes     []EventType `json:"event_types"`
-	ExeHash        string      `json:"exe_hash"`
-	ExePath        string      `json:"exe_path"`
-	LibraryHash    string      `json:"library_hash"`
-	LibraryPath    string      `json:"library_path"`
-	ProgName       string      `json:"prog_name"`
-	ProgType       *uint32     `json:"prog_type"`
-	ProgHash       string      `json:"prog_hash"`
-	HostPattern    string      `json:"host_pattern"`
-	UIDRange       *UIDRange   `json:"uid_range"`
-	ContainerImage string      `json:"container_image"`
-	AllowedRpaths  []string    `json:"allowed_rpaths,omitempty"`
+	EventTypes  []EventType `json:"event_types"`
+	ExeHash     string      `json:"exe_hash"`
+	ExePath     string      `json:"exe_path"`
+	LibraryHash string      `json:"library_hash"`
+	LibraryPath string      `json:"library_path"`
+	ProgName    string      `json:"prog_name"`
+	ProgType    *uint32     `json:"prog_type"`
+	// ProgHash is the kernel program tag (16 hex digits, as BPFDetail.ProgHash
+	// holds it). Identical instructions share a tag across program types, so
+	// pin ProgType alongside it.
+	ProgHash       string    `json:"prog_hash"`
+	HostPattern    string    `json:"host_pattern"`
+	UIDRange       *UIDRange `json:"uid_range"`
+	ContainerImage string    `json:"container_image"`
+	AllowedRpaths  []string  `json:"allowed_rpaths,omitempty"`
+
+	// HostID limits the entry to one enrolled host (the host ID from its
+	// certificate). Empty means the whole fleet.
+	HostID string `json:"host_id,omitempty"`
 
 	Action  PolicyAction `json:"action"`
 	Expires *time.Time   `json:"expires"`
 	Enabled bool         `json:"enabled"`
+
+	// Status is the review state. Only APPROVED (or empty) and REJECTED
+	// entries match events.
+	Status EntryStatus `json:"status,omitempty"`
+
+	// Learned is set on entries learning mode created. Such an entry matches
+	// exactly the events whose key equals Learned.Key, as well as any match
+	// criteria above.
+	Learned *Learned `json:"learned,omitempty"`
+}
+
+// LearnedKey is the learning-mode dedupe key: the tuple a PENDING entry
+// stands for. Every unmatched event with the same key counts toward the
+// same entry, and approving the entry allows exactly those events.
+type LearnedKey struct {
+	EventType EventType `json:"event_type"`
+	// ExeHash is the acting binary's "sha256:<hex>", or "" when the bus could
+	// not hash it (BPF_INVENTORY events have no process).
+	ExeHash string `json:"exe_hash"`
+	// SubjectKind names what Subject holds: "bpf_tag", "bpf_name" (only when
+	// the kernel gave no tag), "library_hash", "library_path", "shm_pattern"
+	// ("shm_name" only when the bus gave no pattern), "file_path", or "" for
+	// event types with no subject (PTRACE_INJECT and ELF_RPATH, where the
+	// exe hash identifies the binary).
+	SubjectKind string `json:"subject_kind,omitempty"`
+	Subject     string `json:"subject,omitempty"`
+	// ProgType is the BPF program type, part of the key for BPF events
+	// because identical instructions of different types share a tag.
+	ProgType uint32 `json:"prog_type,omitempty"`
+	// InContainer stands in for the container image, which the bus does not
+	// report: true when the process ran in a container (the event had a
+	// container ID). The exe hash, taken inside the container, identifies
+	// the binary itself.
+	InContainer bool `json:"in_container"`
+}
+
+// Learned is what learning mode recorded for an allowlist entry.
+type Learned struct {
+	Key LearnedKey `json:"key"`
+	// ExePath is the acting binary's path in the first event seen.
+	ExePath     string    `json:"exe_path,omitempty"`
+	Occurrences int64     `json:"occurrences"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	// Hosts are the IDs of the hosts the key was seen on. On an entry
+	// approved or rejected for one host, it is that host.
+	Hosts []string `json:"hosts"`
+}
+
+// LearningWindow is a period during which unmatched events become PENDING
+// allowlist entries, for the whole fleet (HostID empty) or for one host.
+type LearningWindow struct {
+	HostID    string    `json:"host_id"`
+	StartedAt time.Time `json:"started_at"`
+	EndsAt    time.Time `json:"ends_at"`
+	StartedBy string    `json:"started_by,omitempty"`
+}
+
+// ActiveAt reports whether the window is open at t.
+func (w LearningWindow) ActiveAt(t time.Time) bool {
+	return t.Before(w.EndsAt)
 }
 
 // HostStatus tracks the status of a monitored host.

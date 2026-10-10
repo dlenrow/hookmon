@@ -107,8 +107,6 @@ Compare this with syscall monitoring (millions of events per second) or network 
 
 ### Severity
 
-Severity is set twice today.
-
 **On the bus** (what the console, Loki and Prometheus show), by sensor:
 
 | Event | Severity |
@@ -123,31 +121,35 @@ Severity is set twice today.
 | LIB_INTEGRITY | ALERT; INFO when a package manager is in the writer's ancestry |
 | ELF_RPATH | CRITICAL, ALERT or WARN for a highest risk of CRITICAL, HIGH or MEDIUM |
 
-**On the server**, the policy engine replaces that severity with its own, from allowlist matches and built-in rules. The intended classification:
+**On the server**, the policy engine keeps the bus's rating, because the bus has context the server lacks (a package manager in the writer's ancestry, the segment name, who can write an RPATH directory), and adds what the server knows: the allowlist, and two escalations. The first row that applies wins:
 
 | Condition | Severity | Meaning |
 |-----------|----------|---------|
-| Matches allowlist entry with ALLOW action | INFO | Known good, log for audit |
-| No allowlist match, known BPF program type | WARN | Unusual but possibly legitimate |
-| No allowlist match, unknown binary hash | ALERT | Unknown program, investigate |
-| Exec injection from non-root, non-allowlisted library | ALERT | Possible injection attack |
-| Ptrace injection detected | ALERT | Process memory manipulation |
-| Shared library modified on disk | ALERT | Possible library replacement attack |
-| bpftime-pattern shared memory from unknown process | CRITICAL | Likely active userspace eBPF attack |
-| Linker configuration modified | CRITICAL | System-wide injection vector changed |
-| ELF RPATH with CRITICAL risk entries | CRITICAL | Attacker-controlled library path in binary |
-| ELF RPATH with HIGH risk entries | ALERT | Suspicious library search path |
-| Any unmatched event from root | CRITICAL | Privileged unauthorized activity |
+| Host offline (AGENT_OFFLINE from the watchdog) | CRITICAL | Bus stopped or killed |
+| AGENT_OFFLINE or AGENT_RECOVERED on a bus's event stream | ALERT | Lifecycle report |
+| BPF_INVENTORY | INFO | Census; the policy result says whether each program is on the allowlist |
+| Matches an allowlist entry with ALLOW action | INFO | Known good, log for audit |
+| The bus rated it INFO (package-manager write, ordinary /dev/shm segment) | INFO | Expected change |
+| bpftime-pattern shared memory | CRITICAL | Likely active userspace eBPF attack |
+| Linker configuration modified (not by a package manager) | CRITICAL | System-wide injection vector changed |
+| ELF RPATH, by highest risk (CRITICAL, HIGH, MEDIUM), whatever the UID | CRITICAL, ALERT, WARN | Library search path someone else can write |
+| Any other unmatched event from root | CRITICAL | Privileged unauthorized activity |
+| Exec injection | ALERT | Possible injection attack |
+| Ptrace injection | ALERT | Process memory manipulation |
+| Shared library modified on disk (not by a package manager) | ALERT | Possible library replacement attack |
+| Shared memory with a BPF-related name | ALERT | Possible userspace BPF runtime |
+| The bus could not hash the binary (BPF load or attach, dlopen) | ALERT | Unknown program, investigate |
+| BPF load or attach, or dlopen, not on the allowlist | WARN | Unusual but possibly legitimate |
 
-Because the server overrides the bus, the INFO downgrades for package-manager writes and ordinary shared memory, and the RPATH ranking, don't reach the server path. The root-UID check also runs before RPATH classification, so a MEDIUM RPATH from a root process is rated CRITICAL. Both are fix plan step 7c.
+The root escalation never touches an event the bus rated INFO or an ELF_RPATH event, so a package-manager write by root stays INFO and a MEDIUM RPATH run by root stays WARN. An event that matches an ALERT or DENY entry (such as a rejected learning-mode candidate) is rated like an unmatched one. The same table, numbered, is in `CLAUDE.md`.
 
 ### Operational Workflow
 
-**Phase 1: Learning (not built; fix plan step 7c)**
-The plan: run the server in learning mode for a set period. Each unmatched unique event becomes a PENDING allowlist entry, with its count, first and last time seen, and the hosts that saw it. Operators approve or reject entries. Today nothing creates PENDING entries; you add allowlist entries by hand through the REST API or `hookmon-cli policies create`.
+**Phase 1: Learning**
+Turn on learning mode for the fleet or one host, with an end time: `hookmon-cli learning start --fleet --for 7d`. Until then, each unmatched unique event becomes a PENDING allowlist entry, with its count, first and last time seen, and the hosts that saw it. Operators list them (`hookmon-cli policies pending`) and approve or reject each one for the fleet or for one host. Learning mode does not change severity or hold back alerts; it only records. [architecture.md](architecture.md#policy-and-learning-mode) gives the key and the API.
 
 **Phase 2: Monitoring (steady state)**
-The allowlist is active. Known-good events log at INFO. Anything new raises an alert. Nothing is blocked. Today the server reads the allowlist only at startup (step 7c).
+The allowlist is active. Known-good events log at INFO. Anything new raises an alert. Nothing is blocked. A change through the API applies to the next event; SIGHUP rereads the allowlist from the database.
 
 **Phase 3: Enforcement (does not exist)**
 The idea was that the bus could block unauthorized BPF loads or LD_PRELOAD use. No code for this exists, and the fix plan does not add it. HookMon is read-only.
@@ -198,7 +200,7 @@ The [claims ledger](claims.md) records which tests were run, on which host, and 
 | Combined | `TestCombined_BpftimeAttackChain` |
 | Allowlist matching | `TestPolicy_AllowByProgHash`, `TestPolicy_DenyByProgHash` |
 
-The two `TestPolicy_` tests capture a real event and run it through a matcher in `test/e2e/helpers.go`, a copy of the server's matching logic, not the server itself. Step 7c replaces the copy with the server's matcher.
+The two `TestPolicy_` tests capture a real event and run it through `pkg/allowlist`, the matcher the server uses. Learning mode, approval and reload are tested against PostgreSQL in `test/integration/policy_test.go`, with the real server and bus transport.
 
 No e2e test sends `PTRACE_SEIZE`, `PTRACE_POKETEXT` or `PTRACE_POKEDATA`, or sets `LD_LIBRARY_PATH`. `LD_AUDIT` and `LD_DEBUG` are covered by the root-only unit test `TestExecInjScanBoundary` in `agent/sensors`.
 
@@ -284,16 +286,16 @@ On a typical production server:
 
 The base rate of legitimate *new* events, those not already in the allowlist, should approach zero in steady state. This is a property of the domain, not something HookMon engineers. It has not yet been measured on real hosts (fix plan step 8).
 
-### Allowlist Self-Population (not built; fix plan step 7c)
+### Allowlist Self-Population
 
-The plan is that the allowlist does not need to be written by hand from documentation or vendor lists. Learning mode would observe the fleet:
+The allowlist does not need to be written by hand from documentation or vendor lists. Learning mode observes the fleet:
 
-1. Run the server in learning mode across the infrastructure.
-2. For the learning period, every BPF load, LD_PRELOAD exec and library change is captured with context (exe hash, program tag, library hash, host).
-3. The server creates a PENDING allowlist entry for each unique event signature.
-4. Security operations reviews and approves the entries, adding descriptions ("Cilium CNI loads BPF programs at boot", "Datadog agent uses LD_PRELOAD for instrumentation").
+1. Turn on learning mode for the fleet, or for some hosts, with an end time.
+2. For the learning period, every event that matches no entry is recorded by its key: event type, exe hash, subject (BPF program tag and type, library hash or path, file path, or the shared memory pattern), and whether it ran in a container.
+3. The server keeps one PENDING allowlist entry per key, with its count, first and last time seen, and the hosts that saw it.
+4. Security operations reviews the entries and approves or rejects each one, for the fleet or for one host.
 
-When learning ends and monitoring starts, the allowlist records what the infrastructure actually does. None of this exists yet. The allowlist guide (`docs/allowlist-guide.md`) will be written after step 7.
+When learning ends and monitoring starts, the allowlist records what the infrastructure actually does. An approved entry allows exactly the tuple that was seen, so a new binary version, a changed library or a new BPF program is new again. Descriptions are generated ("learned: BPF_LOAD by /usr/bin/foo: BPF tag …, prog type 8"); there is no way yet to edit them (step 7e adds policy editing). The allowlist guide (`docs/allowlist-guide.md`) will be written after step 7.
 
 ### Operational Consequences
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dlenrow/hookmon/pkg/allowlist"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -494,7 +495,7 @@ func TestPolicy_AllowByProgHash(t *testing.T) {
 	}
 
 	// Allowlist by exact prog_hash
-	allowlist := []*event.AllowlistEntry{
+	entries := []*event.AllowlistEntry{
 		{
 			ID:          "test-allow-prog-hash",
 			Description: "Allow hello_count by prog_hash",
@@ -505,9 +506,10 @@ func TestPolicy_AllowByProgHash(t *testing.T) {
 		},
 	}
 
-	result := EvaluateAgainstAllowlist(evt, allowlist)
-	if result.Action != event.ActionAllow {
-		t.Errorf("expected ALLOW, got %s: %s", result.Action, result.Reason)
+	// The server's matcher (pkg/allowlist), not a copy of it.
+	matched := allowlist.Match(entries, evt)
+	if matched == nil || matched.ID != "test-allow-prog-hash" || matched.Action != event.ActionAllow {
+		t.Errorf("expected ALLOW by test-allow-prog-hash, got %+v", matched)
 	}
 	t.Logf("PASS: prog_hash allowlist matched — hash=%s", evt.BPFDetail.ProgHash)
 }
@@ -544,9 +546,9 @@ func TestPolicy_DenyByProgHash(t *testing.T) {
 		},
 	}
 
-	result := EvaluateAgainstAllowlist(evt, denyList)
-	if result.Action != event.ActionDeny {
-		t.Errorf("expected DENY, got %s", result.Action)
+	matched := allowlist.Match(denyList, evt)
+	if matched == nil || matched.ID != "test-deny-prog-hash" || matched.Action != event.ActionDeny {
+		t.Errorf("expected DENY by test-deny-prog-hash, got %+v", matched)
 	}
 	t.Logf("PASS: prog_hash deny matched — hash=%s", evt.BPFDetail.ProgHash)
 }
