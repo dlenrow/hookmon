@@ -237,6 +237,11 @@ func (a *Agent) Stop() {
 }
 
 func (a *Agent) initSensors() {
+	// elf_rpath starts first: its exec records feed proccache, which the
+	// fanotify sensors use to name writers that exit before /proc is read.
+	if a.cfg.Sensors.ElfRpath {
+		a.sensors = append(a.sensors, sensors.NewElfRpathSensor())
+	}
 	if a.cfg.Sensors.BPFSyscall {
 		a.sensors = append(a.sensors, sensors.NewBPFSyscallSensor())
 	}
@@ -257,9 +262,6 @@ func (a *Agent) initSensors() {
 	}
 	if a.cfg.Sensors.LibIntegrity {
 		a.sensors = append(a.sensors, sensors.NewLibIntegritySensor())
-	}
-	if a.cfg.Sensors.ElfRpath {
-		a.sensors = append(a.sensors, sensors.NewElfRpathSensor())
 	}
 }
 
