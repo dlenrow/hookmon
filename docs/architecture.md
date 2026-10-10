@@ -249,8 +249,8 @@ The dashboard (`deploy/docker/grafana/dashboards/hookmon.json`, uid `hookmon-mai
 - **Policy** (`server/policy`): matches events against the allowlist, sets severity, and in learning mode records unmatched events as PENDING entries; see [Policy and Learning Mode](#policy-and-learning-mode).
 - **Store** (`server/store`): PostgreSQL (`database.url` or `--db`), with `events`, `allowlist`, `learning_mode`, `hosts`, `enrollment_token_uses` and `audit_log` tables. Migrations are in `server/store/migrations/` and run at every start. PID, PPID, UID, GID and BPF program type are stored as BIGINT, so the bus's "unknown" UID (4294967295) is stored like any other.
 - **REST API, WebSocket and dashboard** (`server/api`) on `--http-addr` (default `:8443`), over HTTPS with the server certificate (TLS 1.2 or newer). Events, policies, hosts and health are under `/api/v1/`, and a live event feed is at `/api/v1/ws/events`. API tokens come from `api.tokens` or `--api-tokens`; `/api/v1/health` needs none. Paths outside `/api` serve the dashboard (see [Dashboard](#dashboard)). The API reference is written after fix plan step 7.
-- **Connectors** (`server/connectors`): Syslog/CEF, Splunk HEC, Elasticsearch, webhook, Kafka.
-- **Watchdog**: every `watchdog.check_interval` (default 15 s) it marks an ONLINE host UNRESPONSIVE once it has gone `watchdog.heartbeat_timeout` (default 60 s) without a heartbeat, and stores an AGENT_OFFLINE event (CRITICAL). The next heartbeat sets the host ONLINE again. No AGENT_RECOVERED event is sent.
+- **Connectors** (`server/connectors`): Syslog/CEF, Splunk HEC, Elasticsearch, webhook and Kafka, configured under `connectors:`. Each has its own queue and worker; see [SIEM Connectors](#siem-connectors).
+- **Watchdog**: every `watchdog.check_interval` (default 15 s) it marks an ONLINE host UNRESPONSIVE once it has gone `watchdog.heartbeat_timeout` (default 60 s) without a heartbeat, stores an AGENT_OFFLINE event (CRITICAL), and sends it to every connector. The next heartbeat sets the host ONLINE again. No AGENT_RECOVERED event is sent.
 
 TLS is the default. The server refuses to start without a certificate (`tls.cert_file` or `--tls-cert`) unless `--insecure` (or `tls.insecure: true`) is given. It logs "refusing to start without TLS" with the error:
 
@@ -268,10 +268,9 @@ Not working yet:
 
 | Gap | Fix plan step |
 |-----|---------------|
-| Nothing sets connector configuration, so no connector runs. The alert manager is created but never called; AGENT_OFFLINE goes to an empty connector list. | 7d |
 | The WebSocket accepts any non-empty token and any Origin, and one shared channel splits events across open clients. | 7e |
 | No gRPC recovery interceptor. The rate limiter's table of hosts is never trimmed. | 7f |
-| No automated end-to-end test covers this path. | 7h |
+| Only `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` (step 7d) covers this path end to end, and it skips without `HOOKMON_TEST_PG_DSN` and `HOOKMON_SERVER_BIN`. No test covers the WebSocket. | 7h |
 
 ### Policy and Learning Mode
 
@@ -295,6 +294,50 @@ A PENDING entry matches nothing. Approving it for the fleet makes it APPROVED wi
 REST endpoints (all need an API token): `GET /api/v1/policies` (entries in force; `?status=PENDING`, `REJECTED`, `APPROVED` or `ALL`), `POST /api/v1/policies`, `DELETE /api/v1/policies/{id}`, `POST /api/v1/policies/{id}/approve` and `/reject` with `{"scope": "fleet"}` or `{"scope": "host", "host_id": "..."}`, `GET /api/v1/learning`, and `PUT` / `DELETE` on `/api/v1/learning/fleet` and `/api/v1/learning/hosts/{host_id}`, where PUT takes `{"duration": "7d"}` or `{"ends_at": "<RFC 3339>"}`.
 
 **Severity.** The bus rates each event with context the server lacks (a package manager wrote the file, the shared memory name, who can write an RPATH directory). The server keeps that rating and adds the allowlist and two escalations: an unmatched event from root is CRITICAL, and a WARN event from a binary the bus could not hash is ALERT. Neither escalation applies to an event the bus rated INFO or to ELF_RPATH. The full table is in `CLAUDE.md` ("Severity Classification") and [theory-of-operations.md](theory-of-operations.md#severity).
+
+### SIEM Connectors
+
+Each connector runs when its block is present under `connectors:` in the server config (`syslog`, `splunk`, `elasticsearch`, `webhook`, `kafka`; see `deploy/server.example.yaml`). The server checks the settings when it loads the file. It then starts each connector before it connects to the database: it dials the syslog receiver, connects the Kafka producer, and installs the Elasticsearch ILM policy. If any of these fails, the server exits with status 1.
+
+**What each connector gets.** It depends on the connector's `min_severity`:
+
+| `min_severity` | Kind | Receives |
+|----------------|------|----------|
+| `ALERT` (default), `CRITICAL` | Alert connector | Events at or above that severity whose policy action is not ALLOW: unmatched events, and events that matched an ALERT or DENY entry. An ALLOW match is INFO, so it never reaches an alert connector. Repeats are dropped: the alert manager (`server/policy/alert.go`) admits an alert once per 5 minutes per host, binary path and learning-mode key (event type, exe hash, subject such as the BPF tag or library, in a container or not). Two different BPF programs from the same loader are two alerts. |
+| `INFO`, `WARN` | Event feed | Every stored event at or above that severity, allowed or not, repeats included. |
+
+Both kinds also get AGENT_OFFLINE from the watchdog (CRITICAL). It is never dropped as a repeat, since each one marks a separate outage.
+
+This settles a difference between two earlier descriptions. The fix plan sends unmatched ALERT-and-above events to connectors. The pipeline in CLAUDE.md sends every event. The default connector follows the plan, and `min_severity: INFO` gives the full feed.
+
+**Delivery.** Ingestion calls the dispatcher (`server/connectors/dispatch.go`), and so does the watchdog. Each connector has a bounded queue (`queue_size`, default 1024) and one worker goroutine (`queue.go`). Enqueueing never blocks, so a slow or unreachable sink never holds up a bus's stream. When a queue is full, the event is dropped for that connector only. The drop is counted, and the first drop and every 1000th after it are logged ("connector queue full; dropping events"). The worker sends batches of up to `batch_size` events, or whatever it has after `flush_interval` (default 1 s). A failure marked transient (network error, timeout, HTTP 429 or 5xx, a Kafka produce error) is retried twice, after 0.5 s and 1 s. Other failures (any other 4xx) are not retried. Delivery is at least once, so a retried batch can arrive twice; Elasticsearch documents use the event ID as `_id`, so a retry overwrites them. On shutdown the server stops the streams and the watchdog first. The workers then get 5 s to drain their queues before in-flight requests are cancelled. Each connector logs its sent, dropped and failed counts when it stops. The server has no Prometheus endpoint, so these counts are only in the log.
+
+**Formats.**
+
+- **Syslog** (`syslog.go`, `cef.go`). RFC 5424: `<PRI>1 TIMESTAMP HOSTNAME hookmon - MSGID - CEF:0|HookMon|HookMon|1.0|<event type>|<name>|<0-10>|<extension>`. PRI is facility (default `local0`) × 8 plus the syslog severity (CRITICAL 2, ALERT 3, WARN 4, INFO 6). TIMESTAMP is the detection time in UTC, to the microsecond. HOSTNAME is the monitored host's name, or the server's name for an event without one. MSGID is the event type. Over TCP each message is framed by octet counting (RFC 6587, `<length> <message>`) unless `framing: lf`. Over UDP each message is one datagram. Before each TCP write the connector checks whether the receiver has closed the connection, and redials if so. A failed write is retried once on a new connection.
+- **Splunk HEC** (`splunk.go`). One POST per batch to `url`, holding one envelope per event (`time`, `host`, `source: hookmon`, `sourcetype`, `index`, `event`), with `Authorization: Splunk <token>`.
+- **Elasticsearch** (`elastic.go`). One `_bulk` request per batch. Each event goes to `<index_prefix>-YYYY.MM.DD` for its UTC date, with `_id` set to the event ID. Authentication is basic (`username`, `password`) or `api_key`. A 200 response with failed items is an error, retried only if an item failed with 429 or 5xx. At startup, unless `ilm.setup: false`, the connector PUTs the ILM policy `ilm.policy` (default `hookmon-events`). The policy has one delete phase at `min_age: ilm.delete_after` (default `90d`), counted from each daily index's creation. The connector also PUTs an index template of the same name for `<index_prefix>-*` at priority 200. The template sets `index.lifecycle.name` and maps `timestamp` as a date and `id`, `host_id`, `event_type` and `severity` as keywords. Both PUTs replace what is there, so any changes made in Kibana are lost at the next start; set `ilm.setup: false` to keep them. No rollover is configured, because the indices are daily.
+- **Webhook** (`webhook.go`). POSTs `application/json` to `url` with the configured `headers`. With `batch_size` 1 (the default) the body is one event object. With a larger `batch_size` it is a JSON array.
+- **Kafka** (`kafka.go`). A synchronous producer that waits for every in-sync replica, `ClientID` `hookmon-server`. Each event is a JSON message keyed by host ID.
+
+`ca_file` on the Splunk, Elasticsearch and webhook connectors names a CA for sinks whose certificate a system root does not sign.
+
+**CEF fields.** Every event carries `rt` (detection time, in milliseconds), `externalId` (event ID), `deviceExternalId` (host ID) and `shost` (hostname). It also carries `cs3` ExeHash, `cs4` PolicyResult and `reason` when set. Events with a process also carry `suid`, `spid`, `sproc` (exe path), `flexString1` Cmdline (up to 1023 characters) and `flexString2` ContainerID. Events with no process, such as AGENT_OFFLINE and BPF_INVENTORY, carry no `suid`, so they can't be mistaken for root. Each custom field comes with its `…Label`.
+
+| Event type | Fields |
+|------------|--------|
+| BPF_LOAD, BPF_ATTACH | `cs1` ProgType (number), `cs2` ProgName, `cs5` ProgTag, `cs6` AttachTarget, `cn1` InsnCount, `cn2` ProgID, `cn3` BPFCommand |
+| BPF_INVENTORY | `cs1` ProgType, `cs2` ProgName, `cs5` ProgTag, `cs6` ScanID, `cn2` ProgID, `cn3` ProgCount (summary) |
+| EXEC_INJECTION | `cs1` LibraryPath, `cs2` SetBy, `cs5` EnvVar, `cs6` TargetBinary, `fileHash` (library), `cn1` ScanTruncated, `cn2` ValueTruncated |
+| SHM_CREATE | `cs1` SHMName, `cs2` Pattern, `fsize` |
+| DLOPEN | `cs1` LibraryPath, `fileHash` (library), `cn1` Flags |
+| LINKER_CONFIG | `cs1` FilePath, `cs2` Operation, `oldFileHash`, `fileHash` |
+| LIB_INTEGRITY | `cs1` LibraryPath, `cs2` Operation, `oldFileHash`, `fileHash`, `cn1` InLdCache (0 or 1) |
+| PTRACE_INJECT | `cs1` Request (name), `cs2` TargetComm, `cs5` Addr (hex), `dpid`, `dproc`, `cn1` RequestNum |
+| ELF_RPATH | `cs1` RpathRaw, `cs2` RunpathRaw, `cs5` HighestRisk, `cn1` Setuid (0 or 1) |
+| AGENT_OFFLINE | the common fields; name "Sensor Bus Offline" |
+
+Header fields escape `\` and `|`. Extension values escape `\` and `=`, and CR and LF become `\r` and `\n`, so each message is one line. Only CEF dictionary keys are used: custom strings are `cs1` to `cs6`.
 
 ### Enrollment
 

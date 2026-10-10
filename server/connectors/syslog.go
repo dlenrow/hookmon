@@ -1,263 +1,275 @@
 package connectors
 
 import (
+	"context"
+	"errors"
 	"fmt"
+
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
-// SyslogConnector sends events to a syslog receiver formatted as CEF
-// (ArcSight Common Event Format) messages over TCP or UDP.
-type SyslogConnector struct {
-	conn     net.Conn
-	address  string
-	protocol string // "tcp" or "udp"
-	logger   *zap.Logger
-	mu       sync.Mutex
+const (
+	framingOctetCounting = "octet-counting"
+	framingLF            = "lf"
+
+	syslogDialTimeout  = 10 * time.Second
+	syslogWriteTimeout = 10 * time.Second
+)
+
+var syslogFacilities = map[string]int{
+	"kern": 0, "user": 1, "mail": 2, "daemon": 3, "auth": 4, "syslog": 5,
+	"lpr": 6, "news": 7, "uucp": 8, "cron": 9, "authpriv": 10, "ftp": 11,
+	"local0": 16, "local1": 17, "local2": 18, "local3": 19,
+	"local4": 20, "local5": 21, "local6": 22, "local7": 23,
 }
 
-// NewSyslogConnector creates a connector that sends CEF-formatted events to
-// the syslog receiver at the given address using the specified protocol.
-func NewSyslogConnector(address, protocol string, logger *zap.Logger) (*SyslogConnector, error) {
-	proto := strings.ToLower(protocol)
-	if proto != "tcp" && proto != "udp" {
-		return nil, fmt.Errorf("unsupported syslog protocol %q: must be tcp or udp", protocol)
+// SyslogConnector sends each event as an RFC 5424 syslog message whose MSG
+// is a CEF record (see formatCEF):
+//
+//	<PRI>1 TIMESTAMP HOSTNAME hookmon - MSGID - CEF:0|HookMon|...
+//
+// PRI is facility*8 plus the syslog severity (CRITICAL 2, ALERT 3, WARN 4,
+// INFO 6). TIMESTAMP is the detection time in UTC with microseconds.
+// HOSTNAME is the monitored host, where the hook was seen (the server's
+// own name for an event with none). MSGID is the event type.
+//
+// Over TCP, messages are framed by octet counting (RFC 6587 section
+// 3.4.1: "<length> <message>") or, with framing lf, end in a newline. A
+// broken connection is redialled: before each write the connector checks
+// whether the receiver has closed it, and a failed write is retried once
+// on a new connection. Over UDP, each message is one datagram.
+type SyslogConnector struct {
+	network  string
+	address  string
+	framing  string
+	facility int
+	hostname string
+	logger   *zap.Logger
+
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+// NewSyslogConnector dials the receiver once, so an address that cannot be
+// reached fails startup. Later failures redial.
+func NewSyslogConnector(cfg SyslogConfig, logger *zap.Logger) (*SyslogConnector, error) {
+	network := strings.ToLower(cfg.Protocol)
+	if network == "" {
+		network = "tcp"
 	}
-
-	conn, err := net.Dial(proto, address)
-	if err != nil {
-		return nil, fmt.Errorf("dial syslog %s://%s: %w", proto, address, err)
+	framing := cfg.Framing
+	if network == "tcp" && framing == "" {
+		framing = framingOctetCounting
 	}
-
-	logger.Info("syslog connector established",
-		zap.String("address", address),
-		zap.String("protocol", proto),
-	)
-
-	return &SyslogConnector{
-		conn:     conn,
-		address:  address,
-		protocol: proto,
+	fac := "local0"
+	if cfg.Facility != "" {
+		fac = strings.ToLower(cfg.Facility)
+	}
+	facility, ok := syslogFacilities[fac]
+	if !ok {
+		return nil, fmt.Errorf("unknown facility %q", cfg.Facility)
+	}
+	host, _ := os.Hostname()
+	s := &SyslogConnector{
+		network:  network,
+		address:  cfg.Address,
+		framing:  framing,
+		facility: facility,
+		hostname: headerField(host, 255),
 		logger:   logger,
-	}, nil
+	}
+	if err := s.dial(); err != nil {
+		return nil, err
+	}
+	logger.Info("syslog connector connected",
+		zap.String("address", cfg.Address),
+		zap.String("protocol", network),
+		zap.String("framing", framing),
+		zap.String("facility", fac),
+	)
+	return s, nil
 }
 
 // Name returns the connector identifier.
 func (s *SyslogConnector) Name() string { return "syslog" }
 
-// Send formats the event as a CEF message and writes it to the syslog connection.
-func (s *SyslogConnector) Send(evt *event.HookEvent) error {
-	msg := formatCEF(evt)
-
+// Send writes one message per event.
+func (s *SyslogConnector) Send(ctx context.Context, batch []*event.HookEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Syslog messages are newline-delimited over TCP; UDP sends per-datagram.
-	_, err := fmt.Fprintf(s.conn, "%s\n", msg)
-	if err != nil {
-		s.logger.Error("syslog send failed",
-			zap.String("event_id", evt.ID),
-			zap.Error(err),
-		)
-		return fmt.Errorf("syslog send: %w", err)
+	for _, evt := range batch {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		msg := s.frame(formatRFC5424(evt, s.facility, s.hostname, time.Now()))
+		if err := s.write(ctx, msg); err != nil {
+			return fmt.Errorf("syslog event %s: %w", evt.ID, err)
+		}
 	}
 	return nil
 }
 
-// Close shuts down the syslog connection.
+// frame applies the transport's framing.
+func (s *SyslogConnector) frame(msg string) []byte {
+	switch s.framing {
+	case framingOctetCounting:
+		return []byte(strconv.Itoa(len(msg)) + " " + msg)
+	case framingLF:
+		return []byte(msg + "\n")
+	}
+	return []byte(msg)
+}
+
+// write sends one framed message, redialling once if the connection is
+// gone. Called with s.mu held.
+func (s *SyslogConnector) write(ctx context.Context, msg []byte) error {
+	if s.conn != nil && s.network == "tcp" && peerClosed(s.conn) {
+		s.logger.Warn("syslog receiver closed the connection; reconnecting", zap.String("address", s.address))
+		s.closeConn()
+	}
+	if s.conn == nil {
+		if err := s.dial(); err != nil {
+			return retryable(err)
+		}
+	}
+	err := s.writeConn(ctx, msg)
+	if err == nil {
+		return nil
+	}
+	s.logger.Warn("syslog write failed; reconnecting", zap.String("address", s.address), zap.Error(err))
+	s.closeConn()
+	if err := s.dial(); err != nil {
+		return retryable(err)
+	}
+	if err := s.writeConn(ctx, msg); err != nil {
+		s.closeConn()
+		return retryable(fmt.Errorf("write: %w", err))
+	}
+	return nil
+}
+
+func (s *SyslogConnector) writeConn(ctx context.Context, msg []byte) error {
+	deadline := time.Now().Add(syslogWriteTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	s.conn.SetWriteDeadline(deadline)
+	_, err := s.conn.Write(msg)
+	return err
+}
+
+func (s *SyslogConnector) dial() error {
+	conn, err := net.DialTimeout(s.network, s.address, syslogDialTimeout)
+	if err != nil {
+		return fmt.Errorf("dial syslog %s://%s: %w", s.network, s.address, err)
+	}
+	s.conn = conn
+	return nil
+}
+
+func (s *SyslogConnector) closeConn() {
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+}
+
+// peerClosed reports whether the receiver has closed a TCP connection. A
+// syslog receiver never sends, so a read that returns at once with EOF or
+// an error other than a timeout means the connection is gone. Without
+// this check the first message after the receiver goes away would be
+// accepted by the kernel and lost.
+func peerClosed(c net.Conn) bool {
+	c.SetReadDeadline(time.Now().Add(time.Millisecond))
+	defer c.SetReadDeadline(time.Time{})
+	var b [1]byte
+	_, err := c.Read(b[:])
+	if err == nil {
+		return false // the receiver sent something; ignore it
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return false
+	}
+	return true // io.EOF or a reset
+}
+
+// Close closes the connection.
 func (s *SyslogConnector) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.conn != nil {
-		return s.conn.Close()
+	if s.conn == nil {
+		return nil
 	}
-	return nil
+	err := s.conn.Close()
+	s.conn = nil
+	return err
 }
 
-// severityToNum maps HookMon severity levels to CEF numeric severity.
-// CEF severity ranges from 0 (lowest) to 10 (highest).
-func severityToNum(sev event.Severity) int {
+// syslogSeverity maps HookMon severity to the RFC 5424 severity.
+func syslogSeverity(sev event.Severity) int {
 	switch sev {
-	case event.SeverityInfo:
-		return 1
-	case event.SeverityWarn:
-		return 4
-	case event.SeverityAlert:
-		return 7
 	case event.SeverityCritical:
-		return 10
-	default:
-		return 0
+		return 2 // critical
+	case event.SeverityAlert:
+		return 3 // error
+	case event.SeverityWarn:
+		return 4 // warning
+	case event.SeverityInfo:
+		return 6 // informational
 	}
+	return 5 // notice
 }
 
-// eventDescription returns a human-readable description for the event type.
-func eventDescription(et event.EventType) string {
-	switch et {
-	case event.EventBPFLoad:
-		return "BPF Program Loaded"
-	case event.EventBPFAttach:
-		return "BPF Program Attached"
-	case event.EventExecInjection:
-		return "Exec Injection Detected"
-	case event.EventSHMCreate:
-		return "Suspicious Shared Memory Created"
-	case event.EventDlopen:
-		return "Dynamic Library Loaded via dlopen"
-	case event.EventLinkerConfig:
-		return "Linker Configuration Modified"
-	case event.EventPtraceInject:
-		return "Ptrace Code Injection Detected"
-	case event.EventLibIntegrity:
-		return "Shared Library Modified on Disk"
-	case event.EventElfRpath:
-		return "Suspicious ELF RPATH/RUNPATH Detected"
-	case event.EventBPFInventory:
-		return "BPF Program Inventory"
-	default:
-		return "Unknown Hook Event"
+// formatRFC5424 builds the syslog message (without transport framing).
+// fallbackHost is used when the event has no hostname; now when it has no
+// timestamp.
+func formatRFC5424(evt *event.HookEvent, facility int, fallbackHost string, now time.Time) string {
+	ts := evt.Timestamp
+	if ts.IsZero() {
+		ts = now
 	}
-}
-
-// formatCEF produces an ArcSight Common Event Format string for the event.
-//
-// Format:
-//
-//	CEF:0|HookMon|HookMon|1.0|<event_type>|<description>|<severity>|<extensions>
-func formatCEF(evt *event.HookEvent) string {
-	sevNum := severityToNum(evt.Severity)
-	desc := eventDescription(evt.EventType)
-
-	// Build extension key-value pairs.
-	var ext []string
-
-	// Source host context.
-	if evt.Hostname != "" {
-		ext = append(ext, fmt.Sprintf("shost=%s", cefEscape(evt.Hostname)))
+	host := headerField(evt.Hostname, 255)
+	if host == "-" {
+		host = fallbackHost
 	}
-	ext = append(ext, fmt.Sprintf("suid=%d", evt.UID))
-	if evt.ExePath != "" {
-		ext = append(ext, fmt.Sprintf("sproc=%s", cefEscape(evt.ExePath)))
+	if host == "" {
+		host = "-"
 	}
-
-	// BPF-specific extensions (cs1, cs2).
-	if evt.BPFDetail != nil {
-		ext = append(ext,
-			fmt.Sprintf("cs1Label=ProgType"),
-			fmt.Sprintf("cs1=%d", evt.BPFDetail.ProgType),
-			fmt.Sprintf("cs2Label=ProgName"),
-			fmt.Sprintf("cs2=%s", cefEscape(evt.BPFDetail.ProgName)),
-		)
-	}
-
-	// Exec injection-specific extensions.
-	if evt.ExecInjectionDetail != nil {
-		ext = append(ext,
-			fmt.Sprintf("cs1Label=LibraryPath"),
-			fmt.Sprintf("cs1=%s", cefEscape(evt.ExecInjectionDetail.LibraryPath)),
-			fmt.Sprintf("cs2Label=SetBy"),
-			fmt.Sprintf("cs2=%s", cefEscape(evt.ExecInjectionDetail.SetBy)),
-		)
-	}
-
-	// Executable hash (cs3).
-	if evt.ExeHash != "" {
-		ext = append(ext,
-			fmt.Sprintf("cs3Label=ExeHash"),
-			fmt.Sprintf("cs3=%s", cefEscape(evt.ExeHash)),
-		)
-	}
-
-	// Policy result (cs4).
-	if evt.PolicyResult != nil {
-		ext = append(ext,
-			fmt.Sprintf("cs4Label=PolicyResult"),
-			fmt.Sprintf("cs4=%s", cefEscape(string(evt.PolicyResult.Action))),
-		)
-	}
-
-	// ELF RPATH-specific extensions.
-	if evt.ElfRpathDetail != nil {
-		ext = append(ext,
-			fmt.Sprintf("cs5Label=HighestRisk"),
-			fmt.Sprintf("cs5=%s", cefEscape(string(evt.ElfRpathDetail.HighestRisk))),
-		)
-		if evt.ElfRpathDetail.RpathRaw != "" {
-			ext = append(ext,
-				fmt.Sprintf("cs6Label=RpathRaw"),
-				fmt.Sprintf("cs6=%s", cefEscape(evt.ElfRpathDetail.RpathRaw)),
-			)
-		}
-		if evt.ElfRpathDetail.RunpathRaw != "" {
-			ext = append(ext,
-				fmt.Sprintf("cs7Label=RunpathRaw"),
-				fmt.Sprintf("cs7=%s", cefEscape(evt.ElfRpathDetail.RunpathRaw)),
-			)
-		}
-	}
-
-	// BPF instruction count.
-	if evt.BPFDetail != nil && evt.BPFDetail.InsnCount > 0 {
-		ext = append(ext,
-			fmt.Sprintf("cn1Label=InsnCount"),
-			fmt.Sprintf("cn1=%d", evt.BPFDetail.InsnCount),
-		)
-	}
-
-	// Kernel program identity (cs5 is free on BPF events; cs5-cs7 carry
-	// RPATH data only on ELF_RPATH events).
-	if evt.BPFDetail != nil {
-		if evt.BPFDetail.ProgHash != "" {
-			ext = append(ext,
-				"cs5Label=ProgTag",
-				fmt.Sprintf("cs5=%s", cefEscape(evt.BPFDetail.ProgHash)),
-			)
-		}
-		if evt.BPFDetail.ProgID != 0 {
-			ext = append(ext,
-				"cn2Label=ProgID",
-				fmt.Sprintf("cn2=%d", evt.BPFDetail.ProgID),
-			)
-		}
-	}
-
-	// BPF inventory scan.
-	if evt.BPFInventoryDetail != nil {
-		ext = append(ext,
-			"cs6Label=ScanID",
-			fmt.Sprintf("cs6=%s", cefEscape(evt.BPFInventoryDetail.ScanID)),
-		)
-		if evt.BPFInventoryDetail.Summary {
-			ext = append(ext,
-				"cn3Label=ProgCount",
-				fmt.Sprintf("cn3=%d", evt.BPFInventoryDetail.ProgCount),
-			)
-		}
-	}
-
-	extensions := strings.Join(ext, " ")
-
-	return fmt.Sprintf("CEF:0|HookMon|HookMon|1.0|%s|%s|%d|%s",
-		cefEscape(string(evt.EventType)),
-		cefEscape(desc),
-		sevNum,
-		extensions,
+	return fmt.Sprintf("<%d>1 %s %s hookmon - %s - %s",
+		facility*8+syslogSeverity(evt.Severity),
+		ts.UTC().Format("2006-01-02T15:04:05.000000Z"),
+		host,
+		headerField(string(evt.EventType), 32),
+		formatCEF(evt),
 	)
 }
 
-// cefEscape escapes characters that are special in CEF values.
-// CEF requires escaping backslashes, pipes in headers, and equals/newlines in extensions.
-func cefEscape(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `|`, `\|`)
-	s = strings.ReplaceAll(s, `=`, `\=`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	return s
+// headerField makes s a valid RFC 5424 header field: printable US-ASCII
+// without spaces, at most max characters, or "-" (the NILVALUE) when empty.
+func headerField(s string, max int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= max {
+			break
+		}
+		if r >= 33 && r <= 126 {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "-"
+	}
+	return b.String()
 }

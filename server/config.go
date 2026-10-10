@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
+	"github.com/dlenrow/hookmon/server/connectors"
 )
 
 // DefaultConfigPath is where hookmon-server looks for its config file when
@@ -51,10 +52,10 @@ type Config struct {
 	Enrollment EnrollmentConfig `yaml:"enrollment"`
 	Watchdog   WatchdogConfig   `yaml:"watchdog"`
 
-	// Connectors is not read from the config file yet; fix plan step 7d
-	// adds a connectors section. Until then, a "connectors" key in the file
-	// is an error rather than silently ignored.
-	Connectors ConnectorConfigs `yaml:"-"`
+	// Connectors are the SIEM connectors (Syslog/CEF, Splunk HEC,
+	// Elasticsearch, webhook, Kafka). Each runs only when its block is
+	// present; one that cannot start fails server startup.
+	Connectors connectors.Config `yaml:"connectors"`
 }
 
 // TLSConfig holds server TLS settings.
@@ -172,5 +173,5 @@ func (c *Config) Validate() error {
 	if c.Watchdog.CheckInterval <= 0 || c.Watchdog.HeartbeatTimeout <= 0 {
 		return errors.New("watchdog.check_interval and watchdog.heartbeat_timeout must be positive")
 	}
-	return nil
+	return c.Connectors.Validate()
 }

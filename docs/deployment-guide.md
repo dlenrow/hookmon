@@ -8,7 +8,7 @@ This guide sets up the observability path, which works today, and then the serve
 2. **Sensor buses:** `hookmon-bus` on each monitored Linux host. Each detects eBPF loads, linker environment injection, ptrace abuse, library tampering and more, and pushes events to Loki.
 3. **Collector:** `hookmon-collector`, run on the stack's host but outside Compose. It polls each host's `/status` endpoint and pushes fleet health to Pushgateway.
 
-[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet, such as SIEM connectors (step 7d); see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
+[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet, such as WebSocket authentication (step 7e); see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
 
 All sensors are read-only. They observe and report, and cannot block or change anything. There is no enforcement mode.
 
@@ -312,7 +312,7 @@ curl -s http://<bus-host>:2112/status | jq .
 
 ## Server Path
 
-The server path sends events from each bus to `hookmon-server`, which stores them in PostgreSQL and serves the REST API and the dashboard. Every connection uses TLS, from one CA you create. Not working yet: SIEM connectors (step 7d), and WebSocket authentication and a dashboard page for PENDING entries (step 7e).
+The server path sends events from each bus to `hookmon-server`, which stores them in PostgreSQL and serves the REST API and the dashboard. Every connection uses TLS, from one CA you create. Not working yet: WebSocket authentication and a dashboard page for PENDING entries (step 7e).
 
 ### Build
 
@@ -415,6 +415,40 @@ hookmon-cli $FLAGS learning stop --fleet                    # end early; PENDING
 
 An approved entry allows exactly the tuple it was learned from. A change through the API applies to the next event. To apply changes made directly in the database, send the server `SIGHUP` (`sudo kill -HUP $(pidof hookmon-server)`); it rereads the allowlist and learning windows, not the config file.
 
+### Configure SIEM Connectors
+
+Add a `connectors:` section to `/etc/hookmon/server.yaml`, with a block for each connector you want, and restart the server. `deploy/server.example.yaml` has every setting, commented. For example, CEF over syslog for alerts, and the full event feed to Splunk:
+
+```yaml
+connectors:
+  syslog:
+    address: siem.example.com:514
+    protocol: tcp            # or udp
+    # framing: lf            # newline framing, for receivers that do not
+    #                        # take RFC 6587 octet counting
+  splunk:
+    url: https://splunk.example.com:8088/services/collector/event
+    token: <HEC token>
+    index: security
+    min_severity: INFO       # every event, not only alerts
+```
+
+`min_severity` decides what a connector gets. With `ALERT` (the default) or `CRITICAL`, it gets alerts: events at or above that severity that no allowlist entry allowed, sent once per 5 minutes per host, binary and subject. With `INFO` or `WARN`, it gets every stored event at or above that severity. Every connector also gets AGENT_OFFLINE when a host stops sending heartbeats.
+
+The other connectors:
+
+- `elasticsearch`: `url`, then `api_key`, or `username` and `password`. Events go to `hookmon-events-YYYY.MM.DD`. At startup the server installs an ILM policy that deletes each index after `ilm.delete_after` (default `90d`), and a matching index template. This needs the `manage_ilm` and `manage_index_templates` cluster privileges. On OpenSearch, or if you manage the policy yourself, set `ilm.setup: false`.
+- `webhook`: `url` and optional `headers` (for example `Authorization`). Each POST carries one event as a JSON object. With `batch_size` above 1, each POST carries a JSON array.
+- `kafka`: `brokers` and `topic`. There are no TLS or SASL settings yet.
+
+For a sink with a certificate from a private CA, set `ca_file` (Splunk, Elasticsearch, webhook). The config file now holds connector secrets, so keep it owned by root with mode 0600.
+
+At startup the server logs "connector enabled" for each connector. If a connector can't start, the server exits with status 1 and names the connector, for example `start connectors: connectors.syslog: dial syslog tcp://siem.example.com:514: connection refused`. A bad setting is reported when the file loads (`failed to load config`).
+
+The server never waits for a SIEM. Each connector has its own queue (`queue_size`, default 1024). If a sink is slow or down, its queue fills, and the server logs "connector queue full; dropping events" with the running total. When the server stops, each connector logs how many events it sent, dropped and failed.
+
+To check a connector, load a BPF program that is not on the allowlist, as in [Verification](#verification). It is rated WARN, or CRITICAL as root, so it reaches an alert connector within about a second.
+
 ### Open the Dashboard
 
 Browse to `https://hookmon.internal:8443/` from a machine that trusts `ca.crt`. Enter an API token on the Settings page; the browser keeps it in local storage. The server serves the dashboard from `dashboard_dir` (default `/usr/share/hookmon/dashboard`).
@@ -435,6 +469,7 @@ Browse to `https://hookmon.internal:8443/` from a machine that trusts `ca.crt`. 
 | Sensor bus | Server | 9443 | gRPC, mutual TLS | Server path: events and heartbeats |
 | Sensor bus | Server | 9444 | gRPC, TLS | Server path: enrollment, first start only |
 | Browser, `hookmon-cli` | Server | 8443 | HTTPS | Server path: REST API, WebSocket and dashboard |
+| Server | SIEM | as configured | syslog (TCP/UDP), HTTPS, Kafka | Server path: SIEM connectors |
 
 The status port is unauthenticated. Restrict it with a host firewall or `--status-addr`. Loki pushes are unauthenticated plain HTTP.
 

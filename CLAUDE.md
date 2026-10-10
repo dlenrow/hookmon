@@ -193,12 +193,17 @@ hookmon/
 │   │       ├── ...
 │   │       └── 005_uint32_bigint.sql  # pid, ppid, uid, gid, prog_type to BIGINT
 │   ├── connectors/
-│   │   ├── syslog.go          # Syslog/CEF output
+│   │   ├── connector.go       # Common connector interface (batched Send)
+│   │   ├── config.go          # connectors: section of the server config
+│   │   ├── dispatch.go        # Routes events to connectors (alerts vs. event feed)
+│   │   ├── queue.go           # Per-connector bounded queue, batching, retry
+│   │   ├── syslog.go          # RFC 5424 syslog over TCP/UDP
+│   │   ├── cef.go             # CEF formatting, fields per event type
 │   │   ├── splunk.go          # Splunk HTTP Event Collector
-│   │   ├── elastic.go         # Elasticsearch bulk API
+│   │   ├── elastic.go         # Elasticsearch bulk API, ILM policy and template
 │   │   ├── webhook.go         # Generic JSON webhook
-│   │   ├── kafka.go           # Kafka producer (optional)
-│   │   └── connector.go       # Common connector interface
+│   │   ├── kafka.go           # Kafka producer
+│   │   └── http.go            # Shared HTTP client and status handling
 │   └── api/
 │       ├── router.go          # HTTPS router: REST API, then the dashboard for non-API paths
 │       ├── dashboard.go       # Serves dashboard_dir, index.html fallback for client routes
@@ -620,8 +625,15 @@ Agent gRPC stream
     → store in PostgreSQL
     → fan out to:
         ├── WebSocket feed (dashboard real-time; one shared channel, step 7e)
-        ├── SIEM connectors (Syslog, Splunk, Elastic, webhook, Kafka; none configurable yet, step 7d)
-        └── Alert queue (if ALERT or CRITICAL; created but never called, step 7d)
+        └── SIEM connectors (Syslog, Splunk, Elastic, webhook, Kafka), each
+            through its own bounded queue and worker. Alert connectors
+            (min_severity ALERT or CRITICAL, the default) get events at or
+            above that severity that the allowlist did not allow, with
+            repeats within 5 minutes dropped by the alert manager.
+            Event-feed connectors (min_severity INFO or WARN) get every
+            event at or above it.
+
+Watchdog AGENT_OFFLINE → every connector
 ```
 
 Server-side enrichment (reverse DNS, asset DB lookup) is not built.
@@ -660,48 +672,52 @@ First deployment challenge: you don't know what's "normal" yet. Strategy:
 
 ## SIEM Connector Specifications
 
-**Status:** connector code exists for all five (`server/connectors/`), but `hookmon-server` has no flag or config file that turns one on, so none runs today (fix plan step 7d).
+Configured under `connectors:` in the server config (`deploy/server.example.yaml`). Each connector has `min_severity` (ALERT by default: alerts only, de-duplicated; INFO or WARN: the full event feed), `queue_size`, `batch_size` and `flush_interval`. A connector that cannot start fails server startup. Transient failures (network, 429, 5xx) are retried twice with backoff; a full queue drops and counts events. Details and the full CEF mapping: `docs/architecture.md` ("SIEM Connectors").
 
 ### Syslog/CEF (RFC 5424 + ArcSight CEF)
 
-Standard syslog output for any SIEM that accepts syslog:
+RFC 5424 over TCP (RFC 6587 octet counting, or `framing: lf`) or UDP, with a CEF record as the message:
 
 ```
-CEF:0|HookMon|HookMon|1.0|BPF_LOAD|BPF Program Loaded|7|
-  src=10.1.2.3 shost=web-prod-01 suid=0 sproc=/usr/bin/cilium-agent
-  cs1Label=ProgType cs1=BPF_PROG_TYPE_KPROBE
-  cs2Label=ProgName cs2=trace_tcp_connect
+<130>1 2026-10-10T23:32:16.765467Z web-prod-01 hookmon - BPF_LOAD - CEF:0|HookMon|HookMon|1.0|BPF_LOAD|BPF Program Loaded|10|
+  rt=1791675136765 externalId=<event id> deviceExternalId=<host id> shost=web-prod-01
+  suid=0 spid=4242 sproc=/usr/bin/cilium-agent flexString1Label=Cmdline flexString1=...
   cs3Label=ExeHash cs3=sha256:abcdef...
-  cs4Label=PolicyResult cs4=ALLOW
-  cn1Label=InsnCount cn1=142
+  cs4Label=PolicyResult cs4=ALERT reason=...
+  cs1Label=ProgType cs1=2
+  cs2Label=ProgName cs2=trace_tcp_connect
+  cs5Label=ProgTag cs5=a04f5eef06a7f555
+  cn1Label=InsnCount cn1=142 cn2Label=ProgID cn2=77 cn3Label=BPFCommand cn3=5
 ```
+
+(One line on the wire.) PRI is facility (default local0) × 8 + syslog severity (CRITICAL 2, ALERT 3, WARN 4, INFO 6); HOSTNAME is the monitored host; MSGID is the event type. ProgType is the number, not a name. Every event type has its own fields; custom strings are cs1–cs6 only.
 
 ### Splunk HEC (HTTP Event Collector)
 
-POST JSON events directly to Splunk's HEC endpoint. Configuration:
-- HEC token
-- Splunk URL
+One POST per batch of envelopes (`time`, `host`, `source`, `sourcetype`, `index`, `event`). Configuration:
+- HEC token (`Authorization: Splunk <token>`)
+- Splunk URL (the full HEC endpoint)
 - Index name
 - Source type: `hookmon:event`
 
 ### Elasticsearch
 
-Bulk API to push events. Configuration:
-- Elasticsearch URL
-- Index pattern: `hookmon-events-YYYY.MM.DD`
-- ILM policy for retention — not implemented (step 7d)
+Bulk API, one request per batch, event ID as `_id`. Configuration:
+- Elasticsearch URL, basic auth or API key
+- Index pattern: `hookmon-events-YYYY.MM.DD` (`index_prefix`)
+- ILM policy for retention: installed at startup with an index template for `<prefix>-*` (delete phase at `ilm.delete_after`, default 90d); `ilm.setup: false` skips it
 - Optional: ship via Logstash instead
 
 ### Generic Webhook
 
-POST JSON event to any URL. Supports:
+POST JSON to any URL. Supports:
 - Custom headers (for auth tokens)
-- Retry with exponential backoff
-- Batching (configurable batch size / flush interval) — not implemented; one POST per event
+- Retry with exponential backoff on network errors, 429 and 5xx; no retry on other 4xx
+- Batching (`batch_size` / `flush_interval`): one JSON object per POST at batch size 1, a JSON array above it
 
 ### Kafka
 
-Producer to a configured topic (`server/connectors/kafka.go`).
+Synchronous producer to a configured topic, JSON messages keyed by host ID (`server/connectors/kafka.go`). No TLS or SASL settings yet.
 
 ## Virtual Appliance Build
 
@@ -820,7 +836,7 @@ At this point you have a working standalone agent that detects BPF loads and exe
 6. `agent/transport/grpc.go` — agent-side gRPC client
 7. `cmd/hookmon-server/main.go` — server binary
 
-Status: built, with gaps. Enrollment (7a) and TLS by default (7b) work. The allowlist loads once at startup (7c), connectors can't be configured (7d), and no e2e test covers this path (7h).
+Status: built, with gaps. Enrollment (7a) and TLS by default (7b) work. The allowlist loads once at startup (7c). SIEM connectors work (7d); their e2e test is the only one on this path, and the full-path test is 7h.
 
 ### Phase 3: Dashboard
 
@@ -833,7 +849,7 @@ Status: the five pages build, and `hookmon-server` serves them from `dashboard_d
 
 ### Phase 4: SIEM Connectors
 
-Status: code exists; nothing configures it (step 7d).
+Status: configured from the server config and delivered off the ingestion path (step 7d). Syslog and webhook are tested end to end on a real host; Splunk, Elasticsearch and Kafka against stand-ins.
 
 1. Syslog/CEF
 2. Splunk HEC

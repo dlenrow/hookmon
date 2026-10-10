@@ -83,4 +83,77 @@ watchdog:
   check_interval: 15s
   heartbeat_timeout: 60s
 
-# connectors: SIEM connector settings arrive with fix plan step 7d.
+# SIEM connectors. A connector runs only when its block is present; remove
+# the "# " from the ones you want. A connector that cannot start (a syslog
+# receiver or Kafka broker that cannot be reached, an Elasticsearch cluster
+# that refuses the ILM setup, a bad setting) stops the server at startup.
+#
+# What each connector receives depends on its min_severity:
+#   ALERT (the default) or CRITICAL: alerts. These are events at or above
+#     that severity that no allowlist entry allowed. A repeat of the same
+#     alert (same host, event type, binary and subject, such as the BPF
+#     program tag or the library) within 5 minutes is not sent again.
+#   INFO or WARN: an event feed. Every stored event at or above that
+#     severity, allowed or not, repeats included.
+# Every connector also receives AGENT_OFFLINE (CRITICAL) when a host stops
+# sending heartbeats.
+#
+# Delivery settings every connector takes:
+#   min_severity    see above (default ALERT)
+#   queue_size      events waiting for this connector (default 1024). When
+#                   the queue is full, new events for it are dropped and
+#                   counted in the log; ingestion never waits for a sink.
+#   batch_size      most events per request (default 1 for syslog and
+#                   webhook, 100 for splunk, elasticsearch and kafka)
+#   flush_interval  longest a partial batch waits (default 1s)
+# A failed request is retried twice, after 0.5 s and 1 s, when the failure
+# may pass (network error, HTTP 429 or 5xx). Delivery is at least once, so
+# a retried batch can arrive twice.
+connectors:
+  # RFC 5424 syslog with a CEF message. TCP uses octet-counting framing
+  # (RFC 6587) unless framing is lf; UDP sends one message per datagram.
+  # syslog:
+  #   address: siem.example.com:514
+  #   protocol: tcp          # tcp or udp
+  #   framing: octet-counting
+  #   facility: local0
+  #   min_severity: ALERT
+
+  # Splunk HTTP Event Collector.
+  # splunk:
+  #   url: https://splunk.example.com:8088/services/collector/event
+  #   token: REPLACE-WITH-HEC-TOKEN
+  #   index: security        # empty: the token's default index
+  #   source_type: hookmon:event
+  #   ca_file: /etc/hookmon/tls/splunk-ca.crt   # if not a system-trusted CA
+  #   min_severity: INFO     # the full event feed
+
+  # Elasticsearch _bulk API, one index per day: <index_prefix>-YYYY.MM.DD.
+  # At startup the server installs an ILM policy that deletes each daily
+  # index delete_after its creation, and an index template that applies it
+  # (needs the manage_ilm and manage_index_templates privileges). Set
+  # ilm.setup to false to manage them yourself, or on OpenSearch.
+  # elasticsearch:
+  #   url: https://es.example.com:9200
+  #   api_key: REPLACE-WITH-BASE64-ID:KEY   # or username and password
+  #   index_prefix: hookmon-events
+  #   ca_file: /etc/hookmon/tls/es-ca.crt
+  #   ilm:
+  #     setup: true
+  #     policy: hookmon-events
+  #     delete_after: 90d
+  #   min_severity: INFO
+
+  # JSON POST. With batch_size 1 each request carries one event as a JSON
+  # object; with a larger batch_size, a JSON array of events.
+  # webhook:
+  #   url: https://hooks.example.com/hookmon
+  #   headers:
+  #     Authorization: Bearer REPLACE-ME
+  #   min_severity: ALERT
+
+  # Kafka, JSON messages keyed by host ID. No TLS or SASL options yet.
+  # kafka:
+  #   brokers: [kafka1.example.com:9092, kafka2.example.com:9092]
+  #   topic: hookmon-events
+  #   min_severity: INFO

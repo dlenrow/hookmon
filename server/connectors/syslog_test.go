@@ -8,23 +8,48 @@ import (
 )
 
 // --- CEF escaping ---
+//
+// CEF escapes differently in the header and in extensions. The header
+// escapes backslash and pipe; extensions escape backslash and equals sign,
+// and a pipe in an extension value is written as is. (This test used to
+// expect one escaper for both, escaping pipes and equals signs everywhere,
+// which put "\|" into extension values where a CEF parser reads it
+// literally.)
 
-func TestCefEscape(t *testing.T) {
+func TestCefExtEscape(t *testing.T) {
+	tests := []struct {
+		input, expected string
+	}{
+		{"hello", "hello"},
+		{`back\slash`, `back\\slash`},
+		{"pipe|char", "pipe|char"},
+		{"eq=sign", `eq\=sign`},
+		{"new\nline", `new\nline`},
+		{"cr\rreturn", `cr\rreturn`},
+		{`all\|=` + "\n\r", `all\\|\=\n\r`},
+	}
+	for _, tt := range tests {
+		got := cefExtEscape(tt.input)
+		if got != tt.expected {
+			t.Errorf("cefExtEscape(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestCefHeaderEscape(t *testing.T) {
 	tests := []struct {
 		input, expected string
 	}{
 		{"hello", "hello"},
 		{`back\slash`, `back\\slash`},
 		{"pipe|char", `pipe\|char`},
-		{"eq=sign", `eq\=sign`},
+		{"eq=sign", "eq=sign"},
 		{"new\nline", `new\nline`},
-		{"cr\rreturn", `cr\rreturn`},
-		{`all\|=` + "\n\r", `all\\\|\=\n\r`},
 	}
 	for _, tt := range tests {
-		got := cefEscape(tt.input)
+		got := cefHeaderEscape(tt.input)
 		if got != tt.expected {
-			t.Errorf("cefEscape(%q) = %q, want %q", tt.input, got, tt.expected)
+			t.Errorf("cefHeaderEscape(%q) = %q, want %q", tt.input, got, tt.expected)
 		}
 	}
 }
@@ -67,6 +92,8 @@ func TestEventDescription_AllTypes(t *testing.T) {
 		{event.EventLibIntegrity, "Shared Library Modified on Disk"},
 		{event.EventElfRpath, "Suspicious ELF RPATH/RUNPATH Detected"},
 		{event.EventBPFInventory, "BPF Program Inventory"},
+		{event.EventAgentOffline, "Sensor Bus Offline"},
+		{event.EventAgentRecovered, "Sensor Bus Recovered"},
 	}
 	for _, tt := range types {
 		got := eventDescription(tt.et)
@@ -212,6 +239,10 @@ func TestFormatCEF_PolicyResult(t *testing.T) {
 	}
 }
 
+// TestFormatCEF_ElfRpathExtensions: the risk and both raw paths. This test
+// used to expect RunpathRaw in cs7, which is not a CEF key (custom strings
+// are cs1 to cs6), so a CEF parser dropped it. The raw paths are now in
+// cs1 and cs2, which ELF_RPATH events do not otherwise use.
 func TestFormatCEF_ElfRpathExtensions(t *testing.T) {
 	evt := &event.HookEvent{
 		EventType: event.EventElfRpath,
@@ -223,17 +254,17 @@ func TestFormatCEF_ElfRpathExtensions(t *testing.T) {
 		},
 	}
 	cef := formatCEF(evt)
-	if !strings.Contains(cef, "cs5Label=HighestRisk") {
-		t.Error("missing cs5Label=HighestRisk")
+	for _, want := range []string{
+		"cs5Label=HighestRisk", "cs5=CRITICAL",
+		"cs1Label=RpathRaw", "cs1=/tmp/evil",
+		"cs2Label=RunpathRaw", "cs2=$ORIGIN/../lib",
+	} {
+		if !strings.Contains(cef, want) {
+			t.Errorf("missing %q: %s", want, cef)
+		}
 	}
-	if !strings.Contains(cef, "cs5=CRITICAL") {
-		t.Error("missing cs5=CRITICAL")
-	}
-	if !strings.Contains(cef, "cs6Label=RpathRaw") {
-		t.Error("missing cs6Label=RpathRaw")
-	}
-	if !strings.Contains(cef, "cs7Label=RunpathRaw") {
-		t.Error("missing cs7Label=RunpathRaw")
+	if strings.Contains(cef, "cs7") {
+		t.Errorf("cs7 is not a CEF key: %s", cef)
 	}
 }
 
@@ -245,8 +276,9 @@ func TestFormatCEF_EscapingInValues(t *testing.T) {
 		ExePath:   "/path=with=equals",
 	}
 	cef := formatCEF(evt)
-	if !strings.Contains(cef, `shost=host\|with\|pipes`) {
-		t.Errorf("pipes should be escaped in hostname: %s", cef)
+	// Pipes are not escaped in extension values (see TestCefExtEscape).
+	if !strings.Contains(cef, `shost=host|with|pipes`) {
+		t.Errorf("pipes should be written as is in an extension value: %s", cef)
 	}
 	if !strings.Contains(cef, `sproc=/path\=with\=equals`) {
 		t.Errorf("equals should be escaped in exe path: %s", cef)

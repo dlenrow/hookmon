@@ -29,13 +29,12 @@ Events leave the sensor bus (`hookmon-bus`) on two paths.
 
 **Observability path (works today).** The bus pushes events to Loki and serves `/metrics` and `/status`. `hookmon-collector` polls `/status` on every host and pushes fleet health to Pushgateway. Grafana shows events and health. Prometheus alert rules go to Alertmanager. This path is tested end to end; see [docs/claims.md](docs/claims.md).
 
-**Server path (partly working).** The bus enrolls with `hookmon-server` once, with a token, and gets a client certificate. It then streams events over mutual-TLS gRPC. The server takes each host's ID from its certificate, checks each event against an allowlist, sets its severity, stores it in PostgreSQL, and serves a REST API, a WebSocket feed and the React dashboard over HTTPS. A policy change through the API applies to the next event, with no restart. Learning mode turns what the hosts do into PENDING allowlist entries for review. `hookmon-cli` talks to the REST API. The server and the bus refuse to run without TLS unless `--insecure` is given. What doesn't work yet:
+**Server path (partly working).** The bus enrolls with `hookmon-server` once, with a token, and gets a client certificate. It then streams events over mutual-TLS gRPC. The server takes each host's ID from its certificate, checks each event against an allowlist, sets its severity, stores it in PostgreSQL, and serves a REST API, a WebSocket feed and the React dashboard over HTTPS. It sends alerts, or the full event feed, to SIEM connectors. A policy change through the API applies to the next event, with no restart. Learning mode turns what the hosts do into PENDING allowlist entries for review. `hookmon-cli` talks to the REST API. The server and the bus refuse to run without TLS unless `--insecure` is given. What doesn't work yet:
 
-- SIEM connectors can't be turned on. The connector code exists, but the server config has no section for it. (fix plan step 7d)
 - The dashboard has no page for PENDING entries; approve and reject them with `hookmon-cli` or the REST API. (step 7e)
 - The WebSocket feed accepts any non-empty token and splits events across open browser tabs. The dashboard's Settings page shows an enrollment command that does not exist. (step 7e)
 - `hookmon-cli` defaults to `https://localhost:8443`. Pass `--ca-file` (or set `HOOKMON_CA_FILE`) with the HookMon CA.
-- No automated end-to-end test covers the server path. Every e2e test runs the bus with `--console`. (step 7h)
+- Only one e2e test covers the server path: `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` (step 7d) runs a root bus, enrolled, against the server binary and PostgreSQL. It needs `HOOKMON_TEST_PG_DSN` and `HOOKMON_SERVER_BIN` and skips without them. Every other e2e test runs the bus with `--console`. The full-path test through the WebSocket is step 7h.
 
 ## Why This Exists
 
@@ -204,15 +203,19 @@ The allowlist guide (`docs/allowlist-guide.md`) and the API reference (`docs/api
 
 ## SIEM Integration
 
-Connector code exists for:
+`hookmon-server` sends events to SIEM systems. Each connector runs when its block is present under `connectors:` in the server config (see `deploy/server.example.yaml` and the [deployment guide](docs/deployment-guide.md#configure-siem-connectors)):
 
-- **Syslog/CEF** (RFC 5424 + ArcSight Common Event Format)
-- **Splunk** HTTP Event Collector (HEC)
-- **Elasticsearch** bulk API
-- **Webhook**: JSON POST to any endpoint
-- **Kafka**
+- **Syslog/CEF**: RFC 5424 messages whose body is an ArcSight CEF record, over TCP (octet-counting or newline framing) or UDP. Each event type has its own CEF fields; the mapping is in [architecture.md](docs/architecture.md#siem-connectors).
+- **Splunk** HTTP Event Collector (HEC), batched, with the HEC token.
+- **Elasticsearch** `_bulk` API, batched, into one index per day (`hookmon-events-YYYY.MM.DD`), with basic or API-key authentication. At startup the server installs an ILM policy that deletes each daily index 90 days after it is created (`ilm.delete_after`), and an index template that applies the policy. Set `ilm.setup: false` to manage both yourself, or on OpenSearch, which has no ILM.
+- **Webhook**: JSON POST to any URL, with custom headers and optional batching.
+- **Kafka**: JSON messages keyed by host ID. There are no TLS or SASL settings yet.
 
-**Not working yet:** `hookmon-server` has no flag or config file that turns a connector on, so none runs. Elasticsearch index lifecycle (ILM) is not implemented. (fix plan step 7d)
+A connector gets alerts or the full event feed, depending on its `min_severity`. With `ALERT` (the default) or `CRITICAL`, it gets events at or above that severity that no allowlist entry allowed. A repeat of the same alert within 5 minutes is not sent again. With `INFO` or `WARN`, it gets every stored event at or above that severity. Every connector gets AGENT_OFFLINE when a host stops sending heartbeats.
+
+Delivery never holds up ingestion. Each connector has its own bounded queue and worker. Transient failures (network errors, HTTP 429 and 5xx) are retried with backoff. When a queue is full, new events for that connector are dropped and counted in the log. If a connector can't start, the server stops at startup.
+
+The syslog and webhook connectors are tested end to end: a real bus and server send a BPF canary load to receivers in containers. Splunk HEC, Elasticsearch and Kafka are tested only against stand-ins (Go `httptest` servers and sarama's mock producer), not real clusters.
 
 ## What HookMon Is Not
 

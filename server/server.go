@@ -17,7 +17,6 @@ import (
 
 	hookmonv1 "github.com/dlenrow/hookmon/gen/hookmon/v1"
 	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
-	"github.com/dlenrow/hookmon/pkg/event"
 	"github.com/dlenrow/hookmon/server/api"
 	"github.com/dlenrow/hookmon/server/connectors"
 	"github.com/dlenrow/hookmon/server/ingestion"
@@ -29,40 +28,13 @@ import (
 // streams never end on their own, so GracefulStop alone would wait forever.
 const stopGrace = 5 * time.Second
 
-// ConnectorConfigs holds SIEM connector configurations.
-type ConnectorConfigs struct {
-	Syslog  *SyslogConfig
-	Splunk  *SplunkConfig
-	Elastic *ElasticConfig
-	Webhook *WebhookConfig
-	Kafka   *KafkaConfig
-}
+// alertDedupWindow is how long a repeat of an alert is kept from the alert
+// connectors.
+const alertDedupWindow = 5 * time.Minute
 
-type SyslogConfig struct {
-	Address  string
-	Protocol string
-}
-
-type SplunkConfig struct {
-	URL   string
-	Token string
-	Index string
-}
-
-type ElasticConfig struct {
-	URL          string
-	IndexPattern string
-}
-
-type WebhookConfig struct {
-	URL     string
-	Headers map[string]string
-}
-
-type KafkaConfig struct {
-	Brokers []string
-	Topic   string
-}
+// connectorDrainTimeout bounds how long shutdown waits for the connector
+// queues to drain.
+const connectorDrainTimeout = 5 * time.Second
 
 // Server is the hookmon central server.
 type Server struct {
@@ -75,8 +47,7 @@ type Server struct {
 	policy     *policy.Engine
 	alertMgr   *policy.AlertManager
 	watchdog   *Watchdog
-	connList   []connectors.Connector
-	eventCh    chan *event.HookEvent
+	dispatcher *connectors.Dispatcher
 
 	// ready is closed once every listener is bound; the addresses below are
 	// set by then.
@@ -89,10 +60,9 @@ type Server struct {
 // New creates a new hookmon server.
 func New(cfg Config, logger *zap.Logger) *Server {
 	return &Server{
-		cfg:     cfg,
-		logger:  logger,
-		eventCh: make(chan *event.HookEvent, 1024),
-		ready:   make(chan struct{}),
+		cfg:    cfg,
+		logger: logger,
+		ready:  make(chan struct{}),
 	}
 }
 
@@ -153,6 +123,25 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
+	// SIEM connectors, before the database, so one that cannot start (a
+	// syslog receiver or Kafka broker that cannot be reached, a failed
+	// Elasticsearch ILM setup) fails startup at once. Each has its own
+	// queue and worker; ingestion and the watchdog only enqueue.
+	s.alertMgr = policy.NewAlertManager(s.logger, alertDedupWindow)
+	s.dispatcher, err = connectors.New(ctx, s.cfg.Connectors, s.alertMgr, s.logger)
+	if err != nil {
+		return fmt.Errorf("start connectors: %w", err)
+	}
+	// Run returns only after every stream and the watchdog have stopped,
+	// so this drains the queues once nothing can add to them.
+	defer func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), connectorDrainTimeout)
+		defer cancel()
+		if err := s.dispatcher.Close(drainCtx); err != nil {
+			s.logger.Warn("connector close error", zap.Error(err))
+		}
+	}()
+
 	// Initialize store
 	s.store, err = store.NewStore(ctx, s.cfg.Database.URL, s.logger)
 	if err != nil {
@@ -164,9 +153,6 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("run migrations: %w", err)
 	}
 
-	// Initialize connectors
-	s.initConnectors()
-
 	// Initialize policy engine. It reads the allowlist and the learning
 	// windows from the database now, after every policy write through the
 	// API, and on SIGHUP; learning mode records candidates in the database.
@@ -176,18 +162,14 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.policy.Reload(ctx); err != nil {
 		return fmt.Errorf("load policy: %w", err)
 	}
-	s.alertMgr = policy.NewAlertManager(s.logger, 5*time.Minute)
 
-	// Initialize ingestion server
-	var ingestConnectors []ingestion.Connector
-	for _, c := range s.connList {
-		ingestConnectors = append(ingestConnectors, c)
-	}
+	// Initialize ingestion server. Every stored event goes to the
+	// dispatcher, which routes it to the connectors that take it.
 	s.ingestion = ingestion.NewIngestionServer(ingestion.IngestionConfig{
 		Store:        s.store,
 		PolicyEngine: s.policy,
 		Logger:       s.logger,
-		Connectors:   ingestConnectors,
+		Connectors:   []ingestion.Connector{s.dispatcher},
 		RateLimiter:  ingestion.NewRateLimiter(100, 200),
 		Insecure:     !useTLS,
 	})
@@ -305,8 +287,8 @@ func (s *Server) Run(ctx context.Context) error {
 		reloadOnSignal(ctx, hup, s.policy.Reload, s.logger)
 	}()
 
-	// Watchdog
-	s.watchdog = NewWatchdog(s.cfg.Watchdog, s.store, &connectorAlertSink{connectors: s.connList}, s.logger)
+	// Watchdog: AGENT_OFFLINE goes to every connector.
+	s.watchdog = NewWatchdog(s.cfg.Watchdog, s.store, s.dispatcher, s.logger)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -323,10 +305,10 @@ func (s *Server) Run(ctx context.Context) error {
 		zap.String("http", s.httpAddr),
 		zap.Bool("tls", useTLS),
 		zap.String("dashboard", dashDir),
+		zap.Int("connectors", s.dispatcher.Len()),
 	)
 
 	<-ctx.Done()
-	s.shutdown()
 	wg.Wait()
 	return nil
 }
@@ -392,47 +374,4 @@ func serveHTTP(ctx context.Context, srv *http.Server, lis net.Listener, tlsCfg *
 		return err
 	}
 	return nil
-}
-
-func (s *Server) initConnectors() {
-	if c := s.cfg.Connectors.Syslog; c != nil {
-		conn, err := connectors.NewSyslogConnector(c.Address, c.Protocol, s.logger)
-		if err == nil {
-			s.connList = append(s.connList, conn)
-		}
-	}
-	if c := s.cfg.Connectors.Splunk; c != nil {
-		s.connList = append(s.connList, connectors.NewSplunkConnector(c.URL, c.Token, c.Index, s.logger))
-	}
-	if c := s.cfg.Connectors.Elastic; c != nil {
-		s.connList = append(s.connList, connectors.NewElasticConnector(c.URL, c.IndexPattern, s.logger))
-	}
-	if c := s.cfg.Connectors.Webhook; c != nil {
-		s.connList = append(s.connList, connectors.NewWebhookConnector(c.URL, c.Headers, s.logger))
-	}
-	if c := s.cfg.Connectors.Kafka; c != nil {
-		conn, err := connectors.NewKafkaConnector(c.Brokers, c.Topic, s.logger)
-		if err == nil {
-			s.connList = append(s.connList, conn)
-		}
-	}
-}
-
-func (s *Server) shutdown() {
-	for _, c := range s.connList {
-		if err := c.Close(); err != nil {
-			s.logger.Warn("connector close error", zap.Error(err))
-		}
-	}
-}
-
-// connectorAlertSink dispatches events to all connectors.
-type connectorAlertSink struct {
-	connectors []connectors.Connector
-}
-
-func (c *connectorAlertSink) Dispatch(evt *event.HookEvent) {
-	for _, conn := range c.connectors {
-		conn.Send(evt)
-	}
 }
