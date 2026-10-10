@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +21,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/google/uuid"
 
+	"github.com/dlenrow/hookmon/agent/enrichment"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -41,8 +44,8 @@ type rpathExecEvent struct {
 // successful exec (execve and execveat). A sched_process_exec tracepoint
 // program reports the filename passed to exec and the kernel's identity of
 // the loaded binary; Go analyzes each binary version once, through an LRU
-// cache keyed by that identity, and emits an ELF_RPATH event for every exec
-// of a binary whose highest risk is MEDIUM or above.
+// cache keyed by that identity, and emits one ELF_RPATH event per binary
+// version whose highest risk is MEDIUM or above, on its first exec.
 type ElfRpathSensor struct {
 	eventCh chan *event.HookEvent
 	tp      link.Link
@@ -147,47 +150,70 @@ func (s *ElfRpathSensor) readLoop() {
 		select {
 		case s.eventCh <- hookEvt:
 		default:
+			// Dropped: let the next exec of this binary report it.
+			s.cache.unclaimEmit(execFileID(&raw))
 		}
 	}
 }
 
-// handleExec returns the ELF_RPATH event for one exec, or nil if the loaded
-// binary's highest risk is below MEDIUM or the binary could not be read.
-func (s *ElfRpathSensor) handleExec(raw *rpathExecEvent) *event.HookEvent {
-	if raw.Ino == 0 {
-		return nil // the kernel reported no executable file
-	}
-	key := FileID{
+// execFileID is the identity of the binary the kernel loaded for an exec.
+func execFileID(raw *rpathExecEvent) FileID {
+	return FileID{
 		Dev:     raw.Dev,
 		Ino:     raw.Ino,
 		MtimeNs: raw.MtimeSec*int64(time.Second) + int64(raw.MtimeNsec),
 		Mode:    raw.Mode,
 	}
+}
 
+// handleExec returns the ELF_RPATH event for one exec, or nil if the loaded
+// binary's highest risk is below MEDIUM, the binary could not be read, or
+// this version of the binary was already reported. Each binary version is
+// reported once, on its first exec, not on every exec.
+func (s *ElfRpathSensor) handleExec(raw *rpathExecEvent) *event.HookEvent {
+	if raw.Ino == 0 {
+		return nil // the kernel reported no executable file
+	}
+	key := execFileID(raw)
+
+	var f *os.File
 	result, cached := s.cache.Get(key)
 	if !cached {
-		f, path := openExecuted(raw)
+		var path string
+		f, path = openExecuted(raw)
 		if f == nil {
 			// Not cached, so a later exec of the same binary can try again.
 			return nil
 		}
+		defer f.Close()
 		result = RpathResult{Detail: safeAnalyze(f, path, raw.Mode&(syscall.S_ISUID|syscall.S_ISGID) != 0), Path: path}
-		f.Close()
 		s.cache.Put(key, result)
 	}
 
 	if result.Detail == nil || RiskBelow(result.Detail.HighestRisk, event.RpathRiskMedium) {
 		return nil
 	}
+	if !s.cache.claimEmit(key) {
+		return nil
+	}
 
 	path := result.Path
-	if cached {
-		// Name the binary as it was executed this time, if it can still be
+	if f == nil {
+		// Analyzed on an earlier exec whose event was not delivered. Name
+		// the binary as it was executed this time, if it can still be
 		// found; it may have been renamed since it was analyzed.
-		if f, p := openExecuted(raw); f != nil {
-			f.Close()
-			path = p
+		if g, p := openExecuted(raw); g != nil {
+			defer g.Close()
+			f, path = g, p
 		}
+	}
+
+	// Hash the file the kernel loaded, already verified by inode and mtime,
+	// so the hash matches ExePath even for a process in a container or one
+	// that has exited.
+	var hash string
+	if f != nil {
+		hash = enrichment.SHA256Reader(io.NewSectionReader(f, 0, math.MaxInt64))
 	}
 
 	detail := *result.Detail
@@ -202,6 +228,7 @@ func (s *ElfRpathSensor) handleExec(raw *rpathExecEvent) *event.HookEvent {
 		GID:            raw.GID,
 		Comm:           nullTermStr(raw.Comm[:]),
 		ExePath:        path,
+		ExeHash:        hash,
 		ElfRpathDetail: &detail,
 	}
 }

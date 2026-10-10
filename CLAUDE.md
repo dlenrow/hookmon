@@ -525,13 +525,13 @@ When an exec event fires and `cfg.Sensors.ElfRpath` is enabled, the agent:
 1. Checks an LRU cache (keyed by path+inode+mtime, max 10k entries)
 2. If uncached, opens the binary with `debug/elf` and reads `DT_RPATH`/`DT_RUNPATH` via `f.DynString()`
 3. Classifies each path entry by risk (CRITICAL/HIGH/MEDIUM/LOW/NONE)
-4. If highest risk >= MEDIUM, emits a supplementary `ELF_RPATH` event with full process context
+4. If highest risk >= MEDIUM, emits a supplementary `ELF_RPATH` event with full process context, once per binary version (device, inode, mtime, mode), on its first exec, not on every exec
 
-Risk classification:
-- CRITICAL: relative paths, `/tmp/*`, `/home/*`, `/dev/shm/*`, `$ORIGIN` in SUID binary
+Risk classification (`$ORIGIN`, `$LIB` and `$PLATFORM`, also written `${NAME}`, are expanded first, as ld.so expands them):
+- CRITICAL: relative paths; `/tmp`, `/var/tmp`, `/dev/shm`, `/home` and anything under them; `$ORIGIN` in SUID binary; `$ORIGIN` resolving into one of those directories
 - HIGH: empty entries (`::`), non-existent directories, world-writable directories
-- MEDIUM: non-standard but existing directories
-- LOW: `$ORIGIN` in non-SUID binary
+- MEDIUM: non-standard existing directory owned by a non-root user, or writable by its group
+- LOW (no event): non-standard existing directory owned by root and not group- or world-writable; `$ORIGIN` in non-SUID binary
 - NONE: standard system library paths (`/usr/lib`, `/lib`, etc.)
 
 DT_RPATH (deprecated) bumps severity one level vs DT_RUNPATH.
@@ -583,7 +583,8 @@ Events are auto-classified based on allowlist evaluation:
 | Shared library modified on disk | ALERT | Alert SOC, possible trojanized library |
 | ELF RPATH with CRITICAL risk entries | CRITICAL | Attacker-controlled library search path |
 | ELF RPATH with HIGH risk entries | ALERT | Suspicious library search path |
-| ELF RPATH with MEDIUM risk entries | WARN | Non-standard library search path |
+| ELF RPATH with MEDIUM risk entries | WARN | Library search path a non-root user or group can write |
+| ELF RPATH with only LOW or NONE entries | — | No event (root-only-writable or standard library path) |
 | bpftime-pattern shared memory from non-whitelisted process | CRITICAL | Alert SOC, possible active attack |
 | Linker configuration modified | CRITICAL | Alert SOC, system-wide injection vector |
 | Any event from process with no matching allowlist AND running as root | CRITICAL | Alert SOC, priority |

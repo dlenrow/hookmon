@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -31,12 +32,13 @@ var standardLibDirs = map[string]bool{
 	"/usr/local/lib64": true,
 }
 
-// Writable/attacker-controlled directories.
-var dangerousPrefixes = []string{
-	"/tmp/",
-	"/var/tmp/",
-	"/dev/shm/",
-	"/home/",
+// Writable/attacker-controlled directories. Each one, and everything under
+// it, is dangerous.
+var dangerousDirs = []string{
+	"/tmp",
+	"/var/tmp",
+	"/dev/shm",
+	"/home",
 }
 
 // rpathCacheCap bounds the sensor's analysis cache, one entry per binary
@@ -63,8 +65,9 @@ type RpathResult struct {
 }
 
 type rpathCacheEntry struct {
-	key    FileID
-	result RpathResult
+	key     FileID
+	result  RpathResult
+	emitted bool // an event for this binary version has been sent
 }
 
 // RpathCache is a thread-safe LRU cache of RPATH analysis results. It also
@@ -109,7 +112,9 @@ func (c *RpathCache) Put(key FileID, result RpathResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.entries[key]; ok {
-		el.Value.(*rpathCacheEntry).result = result
+		e := el.Value.(*rpathCacheEntry)
+		e.result = result
+		e.emitted = false
 		c.order.MoveToFront(el)
 		return
 	}
@@ -119,6 +124,34 @@ func (c *RpathCache) Put(key FileID, result RpathResult) {
 		delete(c.entries, oldest.Value.(*rpathCacheEntry).key)
 	}
 	c.entries[key] = c.order.PushFront(&rpathCacheEntry{key: key, result: result})
+}
+
+// claimEmit marks the binary version key as reported and returns true if
+// it had not been reported yet. A key not in the cache is always reported.
+// An entry evicted from the cache is reported again on its next exec.
+func (c *RpathCache) claimEmit(key FileID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.entries[key]
+	if !ok {
+		return true
+	}
+	e := el.Value.(*rpathCacheEntry)
+	if e.emitted {
+		return false
+	}
+	e.emitted = true
+	return true
+}
+
+// unclaimEmit undoes claimEmit for an event that could not be delivered,
+// so the next exec of the binary reports it.
+func (c *RpathCache) unclaimEmit(key FileID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.entries[key]; ok {
+		el.Value.(*rpathCacheEntry).emitted = false
+	}
 }
 
 // Len returns the number of cached entries.
@@ -196,7 +229,7 @@ func analyzeElfRpath(r io.ReaderAt, exePath string, isSetuid bool) *event.ElfRpa
 		for _, p := range strings.Split(rpath[0], ":") {
 			entry := classifyEntry(p, binaryDir, true, isSetuid)
 			detail.Entries = append(detail.Entries, entry)
-			if strings.Contains(p, "$ORIGIN") {
+			if _, origin := expandDST(p, binaryDir); origin {
 				detail.UsesOrigin = true
 			}
 		}
@@ -207,7 +240,7 @@ func analyzeElfRpath(r io.ReaderAt, exePath string, isSetuid bool) *event.ElfRpa
 		for _, p := range strings.Split(runpath[0], ":") {
 			entry := classifyEntry(p, binaryDir, false, isSetuid)
 			detail.Entries = append(detail.Entries, entry)
-			if strings.Contains(p, "$ORIGIN") {
+			if _, origin := expandDST(p, binaryDir); origin {
 				detail.UsesOrigin = true
 			}
 		}
@@ -224,6 +257,8 @@ func analyzeElfRpath(r io.ReaderAt, exePath string, isSetuid bool) *event.ElfRpa
 }
 
 // classifyEntry evaluates a single RPATH/RUNPATH path entry and assigns a risk level.
+// Dynamic string tokens ($ORIGIN, $LIB, $PLATFORM, also as ${NAME}) are
+// expanded first, as ld.so expands them.
 func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEntry {
 	entry := event.RpathEntry{
 		Path:    path,
@@ -237,13 +272,15 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 		return entry
 	}
 
-	// Check if $ORIGIN is used. An $ORIGIN path is only as safe as the
-	// directory it resolves to, so one that resolves into a writable
-	// location is flagged like that absolute path would be.
-	if strings.Contains(path, "$ORIGIN") {
-		resolved := filepath.Clean(strings.ReplaceAll(path, "$ORIGIN", binaryDir))
+	expanded, usesOrigin := expandDST(path, binaryDir)
+
+	// An $ORIGIN path is only as safe as the directory it resolves to, so
+	// one that resolves into a writable location is flagged like that
+	// absolute path would be.
+	if usesOrigin {
+		resolved := filepath.Clean(expanded)
 		entry.Exists = dirExists(resolved)
-		prefix := dangerousPrefix(resolved + "/")
+		prefix := dangerousPrefix(resolved)
 		switch {
 		case isSetuid:
 			entry.Risk = event.RpathRiskCritical
@@ -263,27 +300,27 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	}
 
 	// Relative path (no leading /).
-	if !filepath.IsAbs(path) {
+	if !filepath.IsAbs(expanded) {
 		entry.Risk = event.RpathRiskCritical
 		entry.Reason = "relative path allows attacker-controlled library loading"
-		entry.Exists = dirExists(path)
+		entry.Exists = dirExists(expanded)
 		entry = bumpIfDeprecated(entry)
 		return entry
 	}
 
 	// Check dangerous prefixes.
-	if prefix := dangerousPrefix(path); prefix != "" {
+	cleaned := filepath.Clean(expanded)
+	if prefix := dangerousPrefix(cleaned); prefix != "" {
 		entry.Risk = event.RpathRiskCritical
 		entry.Reason = fmt.Sprintf("writable/attacker-controlled directory: %s", prefix)
-		entry.Exists = dirExists(path)
+		entry.Exists = dirExists(cleaned)
 		entry = bumpIfDeprecated(entry)
 		return entry
 	}
 
 	// Check if this is a standard system library path first (before exists check).
-	cleaned := filepath.Clean(path)
 	if standardLibDirs[cleaned] {
-		entry.Exists = dirExists(path)
+		entry.Exists = dirExists(cleaned)
 		entry.Risk = event.RpathRiskNone
 		entry.Reason = "standard system library directory"
 		entry = bumpIfDeprecated(entry)
@@ -291,7 +328,7 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	}
 
 	// Check if directory exists.
-	entry.Exists = dirExists(path)
+	entry.Exists = dirExists(cleaned)
 
 	if !entry.Exists {
 		entry.Risk = event.RpathRiskHigh
@@ -301,19 +338,125 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	}
 
 	// Check for world-writable directory.
-	if isWorldWritable(path) {
+	if isWorldWritable(cleaned) {
 		entry.Risk = event.RpathRiskHigh
 		entry.Reason = "world-writable directory"
 		entry = bumpIfDeprecated(entry)
 		return entry
 	}
 
-	// Non-standard but exists and not obviously dangerous.
-	entry.Risk = event.RpathRiskMedium
-	entry.Reason = "non-standard library directory"
+	// Non-standard but existing: ranked by who can write to it. Only
+	// root: LOW, no event. A non-root owner or a writing group: MEDIUM.
+	uid, gid, perm, ok := dirOwner(cleaned)
+	switch {
+	case !ok:
+		entry.Risk = event.RpathRiskMedium
+		entry.Reason = "non-standard library directory, owner unknown"
+	case uid != 0:
+		entry.Risk = event.RpathRiskMedium
+		entry.Reason = fmt.Sprintf("non-standard library directory owned by uid %d", uid)
+	case perm&0o020 != 0:
+		entry.Risk = event.RpathRiskMedium
+		entry.Reason = fmt.Sprintf("non-standard library directory writable by gid %d", gid)
+	default:
+		entry.Risk = event.RpathRiskLow
+		entry.Reason = "non-standard library directory, writable only by root"
+	}
 	entry = bumpIfDeprecated(entry)
 	return entry
 }
+
+// expandDST expands the dynamic string tokens ld.so substitutes in an
+// RPATH/RUNPATH entry: $ORIGIN (the binary's directory, binaryDir), $LIB
+// and $PLATFORM, each also written ${NAME}. As in glibc, a bare name
+// followed by an identifier character is not a token, and a "$" that does
+// not start a token is kept as is. It reports whether $ORIGIN was used.
+func expandDST(path, binaryDir string) (string, bool) {
+	if !strings.Contains(path, "$") {
+		return path, false
+	}
+	var b strings.Builder
+	usesOrigin := false
+	for i := 0; i < len(path); {
+		if path[i] != '$' {
+			b.WriteByte(path[i])
+			i++
+			continue
+		}
+		name, n := dstAt(path[i+1:])
+		switch name {
+		case "ORIGIN":
+			b.WriteString(binaryDir)
+			usesOrigin = true
+		case "LIB":
+			b.WriteString(hostDST().lib)
+		case "PLATFORM":
+			b.WriteString(hostDST().platform)
+		default:
+			b.WriteByte('$')
+			i++
+			continue
+		}
+		i += 1 + n
+	}
+	return b.String(), usesOrigin
+}
+
+// dstAt returns the token name at the start of s, which follows a "$", and
+// the length it takes up in s, or "" if there is none.
+func dstAt(s string) (string, int) {
+	for _, name := range []string{"ORIGIN", "LIB", "PLATFORM"} {
+		if strings.HasPrefix(s, "{"+name+"}") {
+			return name, len(name) + 2
+		}
+		if strings.HasPrefix(s, name) && (len(s) == len(name) || !isIdentByte(s[len(name)])) {
+			return name, len(name)
+		}
+	}
+	return "", 0
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// dstValues are this host's expansions of $LIB and $PLATFORM.
+type dstValues struct {
+	lib      string
+	platform string
+}
+
+// hostDST works out $LIB and $PLATFORM for native binaries on this host.
+// $LIB is compiled into ld.so: "lib/<multiarch>" on Debian and Ubuntu,
+// "lib64" on Fedora, RHEL and SUSE, "lib" on Arch. $PLATFORM is the
+// kernel's AT_PLATFORM, the machine name for native binaries.
+var hostDST = sync.OnceValue(func() dstValues {
+	machine, multiarch := runtime.GOARCH, ""
+	switch runtime.GOARCH {
+	case "amd64":
+		machine, multiarch = "x86_64", "x86_64-linux-gnu"
+	case "arm64":
+		machine, multiarch = "aarch64", "aarch64-linux-gnu"
+	case "386":
+		machine, multiarch = "i686", "i386-linux-gnu"
+	case "arm":
+		machine, multiarch = "v7l", "arm-linux-gnueabihf"
+	case "ppc64le":
+		multiarch = "powerpc64le-linux-gnu"
+	case "s390x":
+		multiarch = "s390x-linux-gnu"
+	case "riscv64":
+		multiarch = "riscv64-linux-gnu"
+	}
+	v := dstValues{lib: "lib", platform: machine}
+	if multiarch != "" && (dirExists("/usr/lib/"+multiarch) || dirExists("/lib/"+multiarch)) {
+		v.lib = "lib/" + multiarch
+	} else if fi, err := os.Lstat("/usr/lib64"); err == nil && fi.IsDir() {
+		// A real directory, not Arch's lib64 -> lib symlink.
+		v.lib = "lib64"
+	}
+	return v
+})
 
 // bumpIfDeprecated raises the risk one level if the entry uses DT_RPATH (deprecated).
 func bumpIfDeprecated(entry event.RpathEntry) event.RpathEntry {
@@ -338,12 +481,14 @@ func bumpIfDeprecated(entry event.RpathEntry) event.RpathEntry {
 	return entry
 }
 
-// dangerousPrefix returns the entry of dangerousPrefixes that path starts
-// with, or "".
+// dangerousPrefix returns the entry of dangerousDirs that path, once
+// cleaned, is or is under, or "". The match is by whole path component:
+// /tmp and /tmp/x match, /tmpfoo does not.
 func dangerousPrefix(path string) string {
-	for _, prefix := range dangerousPrefixes {
-		if strings.HasPrefix(path, prefix) {
-			return prefix
+	cleaned := filepath.Clean(path)
+	for _, dir := range dangerousDirs {
+		if cleaned == dir || strings.HasPrefix(cleaned, dir+"/") {
+			return dir
 		}
 	}
 	return ""

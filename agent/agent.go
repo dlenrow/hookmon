@@ -96,6 +96,8 @@ type Agent struct {
 
 	loki    *observability.LokiPusher
 	metrics *observability.Metrics
+
+	enricher *enrichment.Enricher
 }
 
 // New creates a new Agent with the given configuration.
@@ -130,6 +132,7 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 		registry:   reg,
 		filter:     probeFilter{self: uint32(os.Getpid())},
 		healthDone: make(chan struct{}),
+		enricher:   enrichment.NewEnricher(),
 	}
 	prober := newHookProber(dlopenProbePath(cfg), logger)
 	a.health = newHealthChecker(reg, prober.probe, monotonicNow, logger)
@@ -276,18 +279,8 @@ func (a *Agent) forwardEvents(ctx context.Context, s sensors.Sensor) {
 			evt.HostID = a.cfg.HostID
 			evt.Hostname = a.hostname
 
-			exePath := evt.ExePath
-			enrichment.EnrichProcess(evt)
-			if evt.EventType == event.EventElfRpath && exePath != "" {
-				// elf_rpath names the binary the kernel loaded for this
-				// exec; /proc/<pid>/exe may already name a later exec.
-				evt.ExePath = exePath
-			}
-
-			// Hash the binary if we have the path
-			if evt.ExePath != "" && evt.ExeHash == "" {
-				evt.ExeHash = enrichment.SHA256File(evt.ExePath)
-			}
+			// Process context and the exe hash, cached by file version.
+			a.enricher.Enrich(evt)
 
 			// eBPF sensors beat only from the heartbeat map check in the
 			// health loop. Go-side sensors also beat on event receipt.
