@@ -94,6 +94,12 @@ message ExecInjectionDetail {
   string target_binary = 3;
   string set_by = 4;
   string env_var = 5;
+  // The sensor stopped before the end of the environment; the event names
+  // no variable.
+  bool scan_truncated = 6;
+  // The value was longer than the sensor captures; library_path holds its
+  // start and library_hash is empty.
+  bool value_truncated = 7;
 }
 
 message LinkerConfigDetail {

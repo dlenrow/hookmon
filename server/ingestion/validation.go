@@ -18,6 +18,7 @@ var (
 
 	ErrMissingInventoryDetail = errors.New("BPF_INVENTORY event requires bpf_inventory_detail with a scan_id")
 	ErrMissingInventoryProg   = errors.New("BPF_INVENTORY program event requires bpf_detail with a prog_id")
+	ErrMissingExecInjection   = errors.New("EXEC_INJECTION event requires exec_injection_detail naming an env_var or with scan_truncated set")
 )
 
 // ValidateEvent checks that a HookEvent contains all required fields.
@@ -48,6 +49,12 @@ func ValidateEvent(evt *event.HookEvent) error {
 			errs = append(errs, ErrMissingInventoryDetail.Error())
 		case !inv.Summary && (evt.BPFDetail == nil || evt.BPFDetail.ProgID == 0):
 			errs = append(errs, ErrMissingInventoryProg.Error())
+		}
+	}
+	if evt.EventType == event.EventExecInjection {
+		d := evt.ExecInjectionDetail
+		if d == nil || (d.EnvVar == "" && !d.ScanTruncated) {
+			errs = append(errs, ErrMissingExecInjection.Error())
 		}
 	}
 

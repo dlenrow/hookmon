@@ -436,11 +436,13 @@ func eventToProto(evt *event.HookEvent) *hookmonv1.HookEvent {
 
 	if evt.ExecInjectionDetail != nil {
 		pe.ExecInjectionDetail = &hookmonv1.ExecInjectionDetail{
-			LibraryPath:  evt.ExecInjectionDetail.LibraryPath,
-			LibraryHash:  evt.ExecInjectionDetail.LibraryHash,
-			TargetBinary: evt.ExecInjectionDetail.TargetBinary,
-			SetBy:        evt.ExecInjectionDetail.SetBy,
-			EnvVar:       evt.ExecInjectionDetail.EnvVar,
+			LibraryPath:    evt.ExecInjectionDetail.LibraryPath,
+			LibraryHash:    evt.ExecInjectionDetail.LibraryHash,
+			TargetBinary:   evt.ExecInjectionDetail.TargetBinary,
+			SetBy:          evt.ExecInjectionDetail.SetBy,
+			EnvVar:         evt.ExecInjectionDetail.EnvVar,
+			ScanTruncated:  evt.ExecInjectionDetail.ScanTruncated,
+			ValueTruncated: evt.ExecInjectionDetail.ValueTruncated,
 		}
 	}
 

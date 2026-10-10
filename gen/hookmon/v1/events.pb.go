@@ -599,14 +599,20 @@ func (x *BPFInventoryDetail) GetByType() map[string]uint32 {
 }
 
 type ExecInjectionDetail struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	LibraryPath   string                 `protobuf:"bytes,1,opt,name=library_path,json=libraryPath,proto3" json:"library_path,omitempty"`
-	LibraryHash   string                 `protobuf:"bytes,2,opt,name=library_hash,json=libraryHash,proto3" json:"library_hash,omitempty"`
-	TargetBinary  string                 `protobuf:"bytes,3,opt,name=target_binary,json=targetBinary,proto3" json:"target_binary,omitempty"`
-	SetBy         string                 `protobuf:"bytes,4,opt,name=set_by,json=setBy,proto3" json:"set_by,omitempty"`
-	EnvVar        string                 `protobuf:"bytes,5,opt,name=env_var,json=envVar,proto3" json:"env_var,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	LibraryPath  string                 `protobuf:"bytes,1,opt,name=library_path,json=libraryPath,proto3" json:"library_path,omitempty"`
+	LibraryHash  string                 `protobuf:"bytes,2,opt,name=library_hash,json=libraryHash,proto3" json:"library_hash,omitempty"`
+	TargetBinary string                 `protobuf:"bytes,3,opt,name=target_binary,json=targetBinary,proto3" json:"target_binary,omitempty"`
+	SetBy        string                 `protobuf:"bytes,4,opt,name=set_by,json=setBy,proto3" json:"set_by,omitempty"`
+	EnvVar       string                 `protobuf:"bytes,5,opt,name=env_var,json=envVar,proto3" json:"env_var,omitempty"`
+	// The sensor stopped before the end of the environment; the event names
+	// no variable.
+	ScanTruncated bool `protobuf:"varint,6,opt,name=scan_truncated,json=scanTruncated,proto3" json:"scan_truncated,omitempty"`
+	// The value was longer than the sensor captures; library_path holds its
+	// start and library_hash is empty.
+	ValueTruncated bool `protobuf:"varint,7,opt,name=value_truncated,json=valueTruncated,proto3" json:"value_truncated,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ExecInjectionDetail) Reset() {
@@ -672,6 +678,20 @@ func (x *ExecInjectionDetail) GetEnvVar() string {
 		return x.EnvVar
 	}
 	return ""
+}
+
+func (x *ExecInjectionDetail) GetScanTruncated() bool {
+	if x != nil {
+		return x.ScanTruncated
+	}
+	return false
+}
+
+func (x *ExecInjectionDetail) GetValueTruncated() bool {
+	if x != nil {
+		return x.ValueTruncated
+	}
+	return false
 }
 
 type LinkerConfigDetail struct {
@@ -1260,13 +1280,15 @@ const file_hookmon_v1_events_proto_rawDesc = "" +
 	"\aby_type\x18\x04 \x03(\v2*.hookmon.v1.BPFInventoryDetail.ByTypeEntryR\x06byType\x1a9\n" +
 	"\vByTypeEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\rR\x05value:\x028\x01\"\xb0\x01\n" +
+	"\x05value\x18\x02 \x01(\rR\x05value:\x028\x01\"\x80\x02\n" +
 	"\x13ExecInjectionDetail\x12!\n" +
 	"\flibrary_path\x18\x01 \x01(\tR\vlibraryPath\x12!\n" +
 	"\flibrary_hash\x18\x02 \x01(\tR\vlibraryHash\x12#\n" +
 	"\rtarget_binary\x18\x03 \x01(\tR\ftargetBinary\x12\x15\n" +
 	"\x06set_by\x18\x04 \x01(\tR\x05setBy\x12\x17\n" +
-	"\aenv_var\x18\x05 \x01(\tR\x06envVar\"\x85\x01\n" +
+	"\aenv_var\x18\x05 \x01(\tR\x06envVar\x12%\n" +
+	"\x0escan_truncated\x18\x06 \x01(\bR\rscanTruncated\x12'\n" +
+	"\x0fvalue_truncated\x18\a \x01(\bR\x0evalueTruncated\"\x85\x01\n" +
 	"\x12LinkerConfigDetail\x12\x1b\n" +
 	"\tfile_path\x18\x01 \x01(\tR\bfilePath\x12\x1c\n" +
 	"\toperation\x18\x02 \x01(\tR\toperation\x12\x19\n" +

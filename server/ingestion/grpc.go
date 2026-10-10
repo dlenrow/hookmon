@@ -495,11 +495,13 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 	}
 	if pe.ExecInjectionDetail != nil {
 		evt.ExecInjectionDetail = &event.ExecInjectionDetail{
-			LibraryPath:  pe.ExecInjectionDetail.LibraryPath,
-			LibraryHash:  pe.ExecInjectionDetail.LibraryHash,
-			TargetBinary: pe.ExecInjectionDetail.TargetBinary,
-			SetBy:        pe.ExecInjectionDetail.SetBy,
-			EnvVar:       pe.ExecInjectionDetail.EnvVar,
+			LibraryPath:    pe.ExecInjectionDetail.LibraryPath,
+			LibraryHash:    pe.ExecInjectionDetail.LibraryHash,
+			TargetBinary:   pe.ExecInjectionDetail.TargetBinary,
+			SetBy:          pe.ExecInjectionDetail.SetBy,
+			EnvVar:         pe.ExecInjectionDetail.EnvVar,
+			ScanTruncated:  pe.ExecInjectionDetail.ScanTruncated,
+			ValueTruncated: pe.ExecInjectionDetail.ValueTruncated,
 		}
 	}
 	if pe.ShmDetail != nil {

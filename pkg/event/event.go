@@ -120,6 +120,18 @@ type ExecInjectionDetail struct {
 	TargetBinary string `json:"target_binary"`
 	SetBy        string `json:"set_by"`
 	EnvVar       string `json:"env_var,omitempty"` // which env var triggered: LD_PRELOAD, LD_AUDIT, etc.
+
+	// ScanTruncated marks an event that names no variable: the sensor
+	// stopped before the end of the process's environment (more variables
+	// than it scans, a read that failed, or too many matches), so an LD_*
+	// variable may be in the part it did not scan. It is a separate event;
+	// variables found before the scan stopped have their own events.
+	ScanTruncated bool `json:"scan_truncated,omitempty"`
+
+	// ValueTruncated is set when the variable's value was longer than the
+	// sensor captures. LibraryPath then holds only its start, and
+	// LibraryHash is empty.
+	ValueTruncated bool `json:"value_truncated,omitempty"`
 }
 
 // SHMDetail contains details specific to shared memory events.

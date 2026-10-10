@@ -54,6 +54,12 @@ $(OUT)/bpftime_sim: bpftime_sim.c | $(OUT)
 $(OUT)/libfake_hook.so: fake_hook.c | $(OUT)
 	$(CC) -shared -fPIC -o $@ $<
 
+# exec through execveat(AT_EMPTY_PATH) with LD_PRELOAD set
+$(OUT)/execveat_canary: execveat_canary.c | $(OUT)
+	$(CC) -o $@ $<
+
+all canaries-noebpf: $(OUT)/execveat_canary
+
 # Sensor-specific canaries
 $(OUT)/dlopen_canary: dlopen_canary.c | $(OUT)
 	$(CC) -o $@ $< -ldl
@@ -131,6 +137,10 @@ run-lib-integrity: $(OUT)/libfake_hook.so
 
 run-exec-injection: $(OUT)/libfake_hook.so
 	bash exec_injection_canary.sh $(OUT)/libfake_hook.so
+
+.PHONY: run-execveat
+run-execveat: $(OUT)/execveat_canary $(OUT)/libfake_hook.so
+	$(OUT)/execveat_canary $(OUT)/libfake_hook.so /bin/true
 
 run-rpath: $(OUT)/test_rpath
 	$(OUT)/test_rpath
