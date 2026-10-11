@@ -1,12 +1,24 @@
-Package: hookmon-agent
+Package: hookmon-bus
 Version: VERSION_PLACEHOLDER
 Section: admin
 Priority: optional
-Architecture: amd64
+Architecture: ARCH_PLACEHOLDER
+Installed-Size: SIZE_PLACEHOLDER
 Maintainer: Dave Lenrow <david.lenrow@illumio.com>
-Description: HookMon Agent - eBPF and LD_PRELOAD security monitor
- HookMon agent monitors eBPF program loading, LD_PRELOAD injection,
- shared memory creation, and dlopen() calls on Linux hosts.
- Events are streamed to a central HookMon server for policy
- evaluation and alerting.
-Depends: libc6
+Depends: DEPENDS_PLACEHOLDER
+Homepage: https://github.com/dlenrow/hookmon
+Description: HookMon sensor bus: detects code entering Linux processes
+ hookmon-bus runs on each monitored host. Its eight sensors are read-only
+ and watch the ways code enters a process:
+  bpf_syscall     eBPF program loads and attaches (bpf() syscall)
+  exec_injection  LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH, LD_DEBUG at exec
+  shm_monitor     /dev/shm segments of userspace eBPF runtimes (bpftime)
+  dlopen_monitor  libraries loaded at run time with dlopen()
+  linker_config   changes to /etc/ld.so.preload and ld.so.conf
+  ptrace_monitor  ptrace attach and memory or register writes
+  lib_integrity   shared libraries changed on disk
+  elf_rpath       risky RPATH and RUNPATH in executed binaries
+ .
+ Events stream over mutual TLS to hookmon-server. The hookmon-bus service
+ starts once an enrollment token is in /etc/hookmon/enroll-token or the
+ host has enrolled.

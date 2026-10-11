@@ -8,7 +8,7 @@ This guide sets up the observability path, which works today, and then the serve
 2. **Sensor buses:** `hookmon-bus` on each monitored Linux host. Each detects eBPF loads, linker environment injection, ptrace abuse, library tampering and more, and pushes events to Loki.
 3. **Collector:** `hookmon-collector`, run on the stack's host but outside Compose. It polls each host's `/status` endpoint and pushes fleet health to Pushgateway.
 
-[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet; see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
+[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet; see [architecture.md](architecture.md#server). For the server path, the bus can be installed from a DEB or RPM package or with an Ansible role ([Install the Sensor Bus from a Package](#install-the-sensor-bus-from-a-package)). The server is built from source.
 
 All sensors are read-only. They observe and report, and cannot block or change anything. There is no enforcement mode.
 
@@ -192,6 +192,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 ```
+
+This unit is for a bus built from source. The DEB and RPM packages install their own `hookmon-bus.service` for the server path; see [Install the Sensor Bus from a Package](#install-the-sensor-bus-from-a-package).
 
 Install `hookmon-dlopen-probe` to `/usr/local/bin/` too. With `--console`, events also go to the journal. If you run `hookmon-server`, drop `--console` and enroll the bus first (see [Server Path](#server-path)); the unit then needs no token.
 
@@ -400,12 +402,12 @@ no TLS certificate configured: set tls.cert_file, tls.key_file and tls.ca_file (
 
 ### Enroll Each Sensor Bus
 
-Copy `ca.crt` (not `ca.key`) to the host, put the enrollment token in a root-only file, then start the bus once with it:
+With the DEB or RPM, see [Install the Sensor Bus from a Package](#install-the-sensor-bus-from-a-package). With a bus built from source, copy `ca.crt` (not `ca.key`) to the host, put the enrollment token in a root-only file, then start the bus once with it:
 
 ```bash
-sudo install -m 0600 /dev/null /etc/hookmon/enroll.token
-sudo sh -c 'cat > /etc/hookmon/enroll.token'    # paste the secret, then Ctrl-D
-sudo hookmon-bus --enroll-token-file /etc/hookmon/enroll.token \
+sudo install -m 0600 /dev/null /etc/hookmon/enroll-token
+sudo sh -c 'cat > /etc/hookmon/enroll-token'    # paste the secret, then Ctrl-D
+sudo hookmon-bus --enroll-token-file /etc/hookmon/enroll-token \
   --server-addr hookmon.internal:9443 \
   --ca-file /path/to/ca.crt \
   --loki-url http://<stack-host>:3100
@@ -431,6 +433,88 @@ curl --cacert /etc/hookmon/tls/ca.crt -H "Authorization: Bearer <api-token>" \
 The host shows `ONLINE` with its sensors' health. If its heartbeats stop for `watchdog.heartbeat_timeout` (default 60 s), the server marks it `UNRESPONSIVE` and stores an AGENT_OFFLINE event. When the bus heartbeats again the host goes back to `ONLINE` and the server stores an AGENT_RECOVERED event. Both appear in the dashboard's live feed and go to every connector.
 
 `hookmon-cli` defaults to `https://localhost:8443`. Pass `--server https://hookmon.internal:8443 --token <api-token> --ca-file ca.crt`, or set `HOOKMON_CA_FILE`.
+
+### Install the Sensor Bus from a Package
+
+The DEB and RPM install the bus for the server path. Build them on a Linux host of the target architecture, with the tools from [Step 2](#step-2-build-the-sensor-bus):
+
+```bash
+make package-deb     # bin/hookmon-bus_<version>_<arch>.deb (needs dpkg-deb)
+make package-rpm     # bin/hookmon-bus-<version>-1.<arch>.rpm (needs rpmbuild)
+```
+
+Each target builds the eBPF objects from the build host's kernel BTF, then the dlopen helper with `$(CC)`, then a static `hookmon-bus`, and packs them. Objects built on 5.19 have loaded unchanged on 6.17 (see [claims.md](claims.md)). To build the RPM on a host that has `rpmbuild` but no eBPF toolchain, copy `bin/hookmon-bus` and `bin/hookmon-dlopen-probe` from a build host and run `PREBUILT=1 scripts/build-agent.sh rpm`. The package version comes from `git describe`; `PKG_VERSION` overrides it.
+
+What the package installs:
+
+| Path | Purpose |
+|------|---------|
+| `/usr/bin/hookmon-bus`, `/usr/bin/hookmon-dlopen-probe` | The bus, and the dlopen helper it finds next to itself |
+| `/lib/systemd/system/hookmon-bus.service` (DEB), `/usr/lib/systemd/system/hookmon-bus.service` (RPM) | The service |
+| `/etc/hookmon/bus.yaml` | The default configuration. It is a conffile (DEB) or `%config(noreplace)` (RPM), so upgrades keep your edits |
+| `/var/lib/hookmon` (0700), `/var/log/hookmon` (0750) | The enrolled key and certificates, and the fallback log |
+
+**When the service runs.** Installing enables `hookmon-bus.service`, but the service starts only once the host is configured, meaning one of these files exists:
+
+- `/etc/hookmon/enroll-token`: an enrollment token, mode 0600. While it exists, the unit passes it with `--enroll-token-file`.
+- `/var/lib/hookmon/bus.crt`: the certificate from an earlier enrollment.
+
+The unit's `ConditionPathExists=` lines apply this rule at boot and on `systemctl start`: an unconfigured host skips the service ("start condition unmet") instead of leaving it failing. An upgrade restarts a configured bus.
+
+**Configure and enroll:**
+
+```bash
+sudo dpkg -i hookmon-bus_<version>_amd64.deb    # or: sudo dnf install ./hookmon-bus-<version>-1.el9.x86_64.rpm
+sudo sed -i 's|^server_addr: .*|server_addr: "hookmon.internal:9443"|' /etc/hookmon/bus.yaml
+sudo install -m 0644 ca.crt /etc/hookmon/ca.crt  # the CA that signed the server's certificate (tls.ca_file)
+sudo install -m 0600 /dev/null /etc/hookmon/enroll-token
+sudo sh -c 'cat > /etc/hookmon/enroll-token'     # paste the secret, then Ctrl-D
+sudo systemctl start hookmon-bus
+sudo ls -l /var/lib/hookmon                      # bus.key, bus.crt and ca.crt, mode 0600
+sudo rm /etc/hookmon/enroll-token                # once enrolled; later starts use the certificate
+```
+
+A rejected token or a wrong CA shows in `journalctl -u hookmon-bus`, and the unit retries every 10 seconds. The host then appears in the inventory as described above.
+
+**Hardening.** The bus runs as root, limited to the capabilities it uses: CAP_BPF, CAP_PERFMON and CAP_SYS_ADMIN for the eBPF programs, the inventory and fanotify; CAP_DAC_READ_SEARCH for fanotify's file handles; CAP_SYS_PTRACE for other processes' `/proc` entries; CAP_SYS_RESOURCE for the memlock limit on older kernels. It also runs with `NoNewPrivileges` and a seccomp filter: native system calls only, no mount, module, clock, reboot, swap or raw I/O calls, no new namespaces, no realtime scheduling, and only Unix, IPv4, IPv6 and netlink sockets. The unit uses no option that gives the service its own mount namespace (`ProtectSystem`, `ProtectHome`, `PrivateTmp` and the like): the bus compares each process's mount namespace with its own to decide where an executable's path resolves, and it must see `/tmp`, `/home` and `/dev/shm` as the processes it watches do. `RestrictSUIDSGID` is left out too, because it makes `openat2()` fail, and both the shm_monitor health probe and the bus's safe opens inside a process's root use it. The packaged unit runs the bus in server mode only; for console mode, run the bus as in [Step 3](#step-3-run-the-sensor-bus).
+
+**Remove and purge.** `dpkg -r hookmon-bus` stops and disables the service, and keeps the configuration and the enrolled identity, so a reinstall reconnects as the same host. `dpkg --purge hookmon-bus` and `rpm -e hookmon-bus` also remove the token, `/etc/hookmon/ca.crt`, the identity in `/var/lib/hookmon` and the fallback log, then those directories if nothing else is in them; files that belong to `hookmon-server` or `hookmon-collector` stay. RPM keeps an edited `bus.yaml` as `bus.yaml.rpmsave`.
+
+### Install the Sensor Bus with Ansible
+
+The role `deploy/ansible/roles/hookmon-agent` installs the DEB or RPM, writes `/etc/hookmon/bus.yaml`, `/etc/hookmon/ca.crt` and the token file, starts the service, waits until the host has enrolled, and then deletes the token. A host that has already enrolled is not given the token again, so a second run changes nothing. It supports apt (Debian, Ubuntu) and dnf (RHEL family) hosts. `deploy/ansible/hookmon-bus.yml` applies it to the `hookmon_buses` group.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `hookmon_agent_package_file` | `""` | The `.deb` or `.rpm` on the controller (an absolute path, or relative to the playbook). It is copied to `hookmon_agent_package_cache_dir` (`/var/cache/hookmon`) and installed from there |
+| `hookmon_agent_package_url` | `""` | A URL the host downloads the package from. Set exactly one of the two |
+| `hookmon_agent_server_addr` | required | `server_addr`, e.g. `hookmon.internal:9443` |
+| `hookmon_agent_ca_cert_file` | required | The server's CA certificate on the controller; installed as `/etc/hookmon/ca.crt` |
+| `hookmon_agent_enroll_token` | `""` | The enrollment secret. Required until the host has enrolled. Keep it in Ansible Vault |
+| `hookmon_agent_enroll_addr`, `hookmon_agent_tls_server_name` | `""` | `enroll_addr` and `tls.server_name` |
+| `hookmon_agent_enroll_timeout` | `120` | Seconds to wait for `/var/lib/hookmon/bus.crt` |
+| `hookmon_agent_remove_token` | `true` | Delete `/etc/hookmon/enroll-token` once the host has enrolled |
+| `hookmon_agent_loki_url`, `hookmon_agent_status_port` (2112), `hookmon_agent_status_addr`, `hookmon_agent_log_level`, `hookmon_agent_sensors` | see `defaults/main.yml` | The other `bus.yaml` settings |
+
+A change to `bus.yaml` or the CA certificate restarts the bus.
+
+```ini
+# inventory
+[hookmon_buses]
+web-01
+web-02
+
+[hookmon_buses:vars]
+hookmon_agent_package_file=/srv/hookmon/hookmon-bus_1.0.0_amd64.deb
+hookmon_agent_server_addr=hookmon.internal:9443
+hookmon_agent_ca_cert_file=/srv/hookmon/ca.crt
+```
+
+```bash
+ansible-playbook -i inventory deploy/ansible/hookmon-bus.yml -e @vault.yml --ask-vault-pass
+```
+
+`vault.yml` sets `hookmon_agent_enroll_token`.
 
 ### Build the Allowlist with Learning Mode
 

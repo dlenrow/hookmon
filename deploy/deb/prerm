@@ -1,0 +1,15 @@
+#!/bin/sh
+# hookmon-bus prerm. On removal, stops and disables the service while its
+# unit file still exists. An upgrade leaves it running; postinst restarts it.
+set -e
+
+case "$1" in
+remove|deconfigure)
+    if [ -d /run/systemd/system ]; then
+        systemctl stop hookmon-bus.service || true
+    fi
+    systemctl disable hookmon-bus.service >/dev/null 2>&1 || true
+    ;;
+esac
+
+exit 0

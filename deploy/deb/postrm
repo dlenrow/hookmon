@@ -1,0 +1,29 @@
+#!/bin/sh
+# hookmon-bus postrm. "dpkg -r" keeps the configuration and the enrolled
+# identity, so a reinstall reconnects as the same host. "dpkg --purge" also
+# removes the token, the CA certificate, the identity and the fallback log.
+# Only the bus's own files are removed: /etc/hookmon and /var/lib/hookmon
+# may also hold hookmon-server or hookmon-collector files.
+set -e
+
+case "$1" in
+purge)
+    rm -f /etc/hookmon/enroll-token /etc/hookmon/ca.crt
+    for f in bus.key bus.crt ca.crt; do
+        rm -f "/var/lib/hookmon/$f" /var/lib/hookmon/."$f".tmp-*
+    done
+    rm -f /var/log/hookmon/fallback.jsonl
+    rmdir --ignore-fail-on-non-empty /var/lib/hookmon /var/log/hookmon /etc/hookmon 2>/dev/null || true
+    ;;
+esac
+
+case "$1" in
+remove|purge)
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        systemctl reset-failed hookmon-bus.service >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0

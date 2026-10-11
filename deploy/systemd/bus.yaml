@@ -1,0 +1,47 @@
+# hookmon-bus configuration (/etc/hookmon/bus.yaml).
+#
+# Before the first start, set server_addr, put the CA certificate that
+# signed the server's certificate in /etc/hookmon/ca.crt, and write the
+# enrollment token to /etc/hookmon/enroll-token (mode 0600). Then
+# "systemctl start hookmon-bus". The bus enrolls, stores its key and
+# certificate in state_dir, and needs no token after that.
+#
+# Package upgrades keep your edits to this file. Every key is optional;
+# docs/deployment-guide.md describes them all.
+
+# hookmon-server's gRPC address (host:port). The name must be in the
+# server's certificate (or set tls.server_name).
+server_addr: "localhost:9443"
+
+# Enrollment address. Empty: the server_addr host on port 9444.
+enroll_addr: ""
+
+# bus.key, bus.crt and ca.crt from enrollment, each mode 0600.
+state_dir: "/var/lib/hookmon"
+
+tls:
+  # The CA that signed the server's certificate.
+  ca_file: "/etc/hookmon/ca.crt"
+  server_name: ""
+
+# Loki base URL (e.g. http://stack-host:3100). Empty: no Loki push.
+loki_url: ""
+
+# /status and /metrics, polled by hookmon-collector and scraped by
+# Prometheus. The port is unauthenticated; restrict it with a firewall or
+# bind it to one address.
+status_port: 2112
+status_addr: ""
+
+log_level: "info"
+fallback_log_path: "/var/log/hookmon/fallback.jsonl"
+
+sensors:
+  bpf_syscall: true
+  exec_injection: true
+  shm_monitor: true
+  dlopen_monitor: true
+  linker_config: true
+  ptrace_monitor: true
+  lib_integrity: true
+  elf_rpath: true

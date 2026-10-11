@@ -1,0 +1,29 @@
+#!/bin/sh
+# hookmon-bus postinst. Creates the state and log directories and enables
+# the service. The service is started only when the host is configured:
+# /etc/hookmon/enroll-token or /var/lib/hookmon/bus.crt exists (the unit's
+# ConditionPathExists lines apply the same rule at boot).
+set -e
+
+case "$1" in
+configure)
+    install -d -m 0700 /var/lib/hookmon
+    chmod 0700 /var/lib/hookmon
+    install -d -m 0750 /var/log/hookmon
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+    fi
+    systemctl enable hookmon-bus.service >/dev/null 2>&1 || true
+    if [ -e /etc/hookmon/enroll-token ] || [ -e /var/lib/hookmon/bus.crt ]; then
+        if [ -d /run/systemd/system ]; then
+            systemctl restart hookmon-bus.service || true
+        fi
+    else
+        echo "hookmon-bus: installed but not started. Set server_addr in /etc/hookmon/bus.yaml,"
+        echo "  copy the server's CA certificate to /etc/hookmon/ca.crt, write the enrollment"
+        echo "  token to /etc/hookmon/enroll-token (mode 0600), then: systemctl start hookmon-bus"
+    fi
+    ;;
+esac
+
+exit 0

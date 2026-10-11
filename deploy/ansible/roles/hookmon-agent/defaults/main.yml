@@ -1,0 +1,35 @@
+---
+# The hookmon-bus package to install: a .deb or .rpm built with
+# make package-deb / make package-rpm. Set one of the two.
+hookmon_agent_package_file: ""   # path on the Ansible controller; copied to the host
+hookmon_agent_package_url: ""    # URL the host downloads it from
+hookmon_agent_package_cache_dir: /var/cache/hookmon
+
+# hookmon-server. The CA certificate is the one that signed the server's
+# certificate (the server's tls.ca_file); it is copied to /etc/hookmon/ca.crt.
+hookmon_agent_server_addr: ""        # host:port of the gRPC listener, e.g. hookmon.internal:9443
+hookmon_agent_enroll_addr: ""        # empty: the server_addr host on port 9444
+hookmon_agent_tls_server_name: ""    # empty: the host in server_addr
+hookmon_agent_ca_cert_file: ""       # path on the Ansible controller
+
+# Enrollment secret (one of the server's enrollment.tokens). Keep it in
+# Ansible Vault. Needed only until the host has enrolled: a host that has
+# /var/lib/hookmon/bus.crt is not given the token again.
+hookmon_agent_enroll_token: ""
+hookmon_agent_enroll_timeout: 120    # seconds to wait for the certificate
+hookmon_agent_remove_token: true     # delete /etc/hookmon/enroll-token once enrolled
+
+# /etc/hookmon/bus.yaml
+hookmon_agent_loki_url: ""
+hookmon_agent_status_port: 2112
+hookmon_agent_status_addr: ""
+hookmon_agent_log_level: info
+hookmon_agent_sensors:
+  bpf_syscall: true
+  exec_injection: true
+  shm_monitor: true
+  dlopen_monitor: true
+  linker_config: true
+  ptrace_monitor: true
+  lib_integrity: true
+  elf_rpath: true

@@ -54,7 +54,7 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
 │  │    └── local fallback log (if server unreachable)            │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                     │
-│  Deployed today: built from source. DEB/RPM/Ansible: step 7g        │
+│  Deployed via: DEB/RPM, the Ansible role, or built from source      │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │ gRPC (port 9443, mutual TLS; enrollment on 9444)
                            │ HTTP /status (port 2112) ← polled by collector
@@ -274,8 +274,9 @@ hookmon/
 │       └── roles/hookmon/     # Referenced roles and templates — missing (step 7g)
 │
 ├── deploy/                    # Agent deployment artifacts
-│   ├── deb/                   # Debian package build (ships hookmon-agent; step 7g)
-│   ├── rpm/                   # RPM package build (ships hookmon-agent; step 7g)
+│   ├── deb/                   # hookmon-bus DEB: control, conffiles, maintainer scripts
+│   ├── rpm/                   # hookmon-bus RPM spec
+│   ├── systemd/               # hookmon-bus.service and the default bus.yaml, shared by both packages
 │   ├── docker/
 │   │   ├── docker-compose.grafana.yml  # Observability stack (Loki, Prometheus, Pushgateway, Alertmanager, Grafana)
 │   │   ├── prometheus.yml, alertmanager.yml
@@ -285,7 +286,7 @@ hookmon/
 │   ├── server.example.yaml    # hookmon-server config example
 │   └── ansible/
 │       └── roles/
-│           └── hookmon-agent/ # Agent deployment role (tasks only; its files and templates are missing; step 7g)
+│           └── hookmon-agent/ # Installs the DEB/RPM, writes bus.yaml and the token, enrolls (playbook: deploy/ansible/hookmon-bus.yml)
 │
 ├── pkg/                       # Shared packages
 │   ├── event/
@@ -317,7 +318,7 @@ hookmon/
 │
 └── scripts/
     ├── generate.sh            # buf generate + make bpf
-    ├── build-agent.sh         # Agent binary, .deb and .rpm
+    ├── build-agent.sh         # Static hookmon-bus, then the .deb or .rpm (make package-deb / package-rpm)
     ├── build-server.sh
     ├── dev-setup.sh           # Local dev environment
     ├── pre-push               # Git hook: runs the smoketests
@@ -777,7 +778,7 @@ The `/enroll` script and `curl` command above do not exist (fix plan step 7g). A
 
 ### Agent Enrollment Protocol
 
-**Status: working (fix plan step 7a).** There is no enrollment script or package install yet (step 7g); the operator installs the bus and runs it once with a token.
+**Status: working (fix plan step 7a).** There is no enrollment script. The DEB and RPM install `hookmon-bus.service`, which enrolls on first start with `/etc/hookmon/enroll-token` (`--enroll-token-file`); the Ansible role writes that file and waits for the certificate. A bus built from source is run once with a token.
 
 1. The server config (`/etc/hookmon/server.yaml`) lists enrollment tokens: name, secret (at least 32 characters), expiry, optional `single_use`. With tokens configured, the server listens for enrollment on 9444 (TLS, server authentication only, `Enroll` RPC only).
 2. On first start, `hookmon-bus --enroll-token-file <file> --server-addr <host>:9443 --ca-file ca.crt` generates an ECDSA P-256 keypair and sends a CSR to `--enroll-addr` (default: the server host on 9444), verifying the server against `--ca-file`. The token can also come from `HOOKMON_ENROLL_TOKEN` or `--enroll-token` (visible in the process list). A server certificate that does not verify against `--ca-file` stops the bus with an error instead of a retry loop.
@@ -820,8 +821,8 @@ make test-e2e          # End-to-end tests (Linux, sudo; deploys to /tmp)
 make ci                # build-all + test-unit + go vet
 make test-integration  # Broken: test/integration does not exist
 
-make package-deb       # Build .deb for agent (ships hookmon-agent; step 7g)
-make package-rpm       # Build .rpm for agent (ships hookmon-agent; step 7g)
+make package-deb       # hookmon-bus .deb: eBPF objects, dlopen helper, static bus, systemd unit, bus.yaml
+make package-rpm       # hookmon-bus .rpm, the same (PREBUILT=1 scripts/build-agent.sh rpm packs prebuilt binaries)
 make docker-agent      # Build agent container image
 make docker-server     # Build server container image
 
@@ -918,7 +919,7 @@ The sensor bus runs as root (eBPF, fanotify). This makes it a high-value target.
 Mitigations, with their status today:
 - Sensor bus binary is statically compiled Go. It runs two helpers every 10 s (`/bin/true`, `hookmon-dlopen-probe`), which must be root-owned.
 - Sensor bus talks to the central server over mutual-TLS gRPC. Without a certificate or enrollment token it refuses to connect; `--insecure` allows plaintext for development. It also pushes to Loki (plain HTTP) and serves `/status` and `/metrics` (unauthenticated HTTP; `status_addr` limits the bind address).
-- Config file is root-readable only (operator's job; no package sets it yet).
+- The packages install `bus.yaml` root-owned, mode 0644 (it holds no secret); the enrollment token goes in `/etc/hookmon/enroll-token`, mode 0600. `server.yaml` (mode 0600) is the operator's job.
 - Private key is root-readable only: enrollment writes `bus.key`, `bus.crt` and `ca.crt` with mode 0600.
 - The server refuses to start without a TLS certificate unless `--insecure`. REST, the WebSocket and the dashboard are served over HTTPS on 8443.
 - Server API requires a token on every endpoint except `/api/v1/health`. The WebSocket checks the same tokens, sent as a subprotocol or an Authorization header, and refuses pages from other origins. Writes are limited to 64 KiB and validate the action.
@@ -949,7 +950,7 @@ A sophisticated attacker will attempt to disable HookMon before proceeding. The 
 | Dashboard | React + TypeScript | Standard, large component ecosystem |
 | Appliance base | Ubuntu Server 24.04 LTS | Enterprise acceptance, 10-year support window |
 | Image build | Packer | Multi-format output (OVA, QCOW2, VHD, ISO) from single template (only a qcow2 source exists; step 7g) |
-| Agent deployment | DEB/RPM + Ansible | Standard enterprise Linux deployment patterns (not working; step 7g) |
+| Agent deployment | DEB/RPM + Ansible | Standard enterprise Linux deployment patterns (`make package-deb`/`package-rpm`, `deploy/ansible/roles/hookmon-agent`) |
 
 ## Non-Goals (Explicitly Out of Scope)
 

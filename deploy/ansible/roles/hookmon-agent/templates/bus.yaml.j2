@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+# hookmon-bus configuration. docs/deployment-guide.md describes every key.
+
+server_addr: "{{ hookmon_agent_server_addr }}"
+enroll_addr: "{{ hookmon_agent_enroll_addr }}"
+state_dir: "/var/lib/hookmon"
+
+tls:
+  ca_file: "/etc/hookmon/ca.crt"
+  server_name: "{{ hookmon_agent_tls_server_name }}"
+
+loki_url: "{{ hookmon_agent_loki_url }}"
+status_port: {{ hookmon_agent_status_port | int }}
+status_addr: "{{ hookmon_agent_status_addr }}"
+log_level: "{{ hookmon_agent_log_level }}"
+fallback_log_path: "/var/log/hookmon/fallback.jsonl"
+
+sensors:
+{% for name, enabled in hookmon_agent_sensors | dictsort %}
+  {{ name }}: {{ enabled | bool | lower }}
+{% endfor %}

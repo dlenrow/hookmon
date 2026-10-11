@@ -1,0 +1,18 @@
+---
+# Installs the HookMon sensor bus on every host in the hookmon_buses group
+# and enrolls it with hookmon-server. Set the role's variables in the
+# inventory or group_vars (see roles/hookmon-agent/defaults/main.yml), for
+# example:
+#
+#   hookmon_agent_package_file: ../../bin/hookmon-bus_1.0.0_amd64.deb
+#   hookmon_agent_server_addr: hookmon.internal:9443
+#   hookmon_agent_ca_cert_file: files/hookmon-ca.crt
+#   hookmon_agent_enroll_token: "{{ vault_hookmon_enroll_token }}"
+#
+#   ansible-playbook -i inventory deploy/ansible/hookmon-bus.yml
+
+- name: Install and enroll the HookMon sensor bus
+  hosts: hookmon_buses
+  become: true
+  roles:
+    - role: hookmon-agent

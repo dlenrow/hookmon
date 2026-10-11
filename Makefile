@@ -131,13 +131,14 @@ ci: build-all test-unit
 
 ## Packaging
 
-package-deb:
-	@echo "Building Debian package..."
-	./scripts/build-agent.sh deb
+# hookmon-bus packages for this host's architecture (Linux only): the eBPF
+# objects first, then the dlopen helper with $(CC), then the static bus and
+# the package (scripts/build-agent.sh; needs dpkg-deb or rpmbuild).
+package-deb: $(BPF_DEPS) build-dlopen-probe
+	VERSION=$(VERSION) COMMIT=$(COMMIT) DATE=$(DATE) ./scripts/build-agent.sh deb
 
-package-rpm:
-	@echo "Building RPM package..."
-	./scripts/build-agent.sh rpm
+package-rpm: $(BPF_DEPS) build-dlopen-probe
+	VERSION=$(VERSION) COMMIT=$(COMMIT) DATE=$(DATE) ./scripts/build-agent.sh rpm
 
 docker-agent:
 	docker build -f deploy/docker/Dockerfile.agent --build-arg VERSION=$(VERSION) -t hookmon-bus:$(VERSION) .

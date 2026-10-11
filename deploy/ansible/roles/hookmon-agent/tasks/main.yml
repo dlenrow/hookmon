@@ -1,70 +1,119 @@
 ---
-- name: Create hookmon group
-  group:
-    name: hookmon
-    system: true
+# Installs the hookmon-bus package, configures it, enrolls the host with
+# hookmon-server and leaves the service running. Idempotent: a second run
+# changes nothing.
 
-- name: Create hookmon user
-  user:
-    name: hookmon
-    group: hookmon
-    system: true
-    shell: /usr/sbin/nologin
-    home: /var/lib/hookmon
-    create_home: false
+- name: Check the role variables
+  ansible.builtin.assert:
+    that:
+      - hookmon_agent_server_addr | length > 0
+      - hookmon_agent_ca_cert_file | length > 0
+      - (hookmon_agent_package_file | length > 0) != (hookmon_agent_package_url | length > 0)
+      - ansible_facts['os_family'] in ['Debian', 'RedHat']
+    fail_msg: >-
+      Set hookmon_agent_server_addr, hookmon_agent_ca_cert_file, and exactly one
+      of hookmon_agent_package_file and hookmon_agent_package_url. Debian and
+      Red Hat family hosts only.
+    quiet: true
 
-- name: Create directories
-  file:
-    path: "{{ item }}"
-    state: directory
-    owner: root
-    group: hookmon
-    mode: "0750"
-  loop:
-    - /etc/hookmon
-    - /var/log/hookmon
+- name: Copy the package to the host
+  when: hookmon_agent_package_file | length > 0
+  block:
+    - name: Create the package cache directory
+      ansible.builtin.file:
+        path: "{{ hookmon_agent_package_cache_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
 
-- name: Copy agent binary
-  copy:
-    src: hookmon-agent
-    dest: /usr/bin/hookmon-agent
-    owner: root
-    group: root
-    mode: "0755"
-  notify: restart hookmon-agent
+    - name: Copy the package
+      ansible.builtin.copy:
+        src: "{{ hookmon_agent_package_file }}"
+        dest: "{{ hookmon_agent_package_cache_dir }}/{{ hookmon_agent_package_file | basename }}"
+        owner: root
+        group: root
+        mode: "0644"
 
-- name: Deploy agent config
-  template:
-    src: agent.yaml.j2
-    dest: /etc/hookmon/agent.yaml
-    owner: root
-    group: hookmon
-    mode: "0640"
-  notify: restart hookmon-agent
+- name: Choose the package source
+  ansible.builtin.set_fact:
+    hookmon_agent_package_src: >-
+      {{ (hookmon_agent_package_cache_dir ~ '/' ~ (hookmon_agent_package_file | basename))
+         if hookmon_agent_package_file | length > 0 else hookmon_agent_package_url }}
 
-- name: Install systemd unit
-  copy:
-    src: hookmon-agent.service
-    dest: /etc/systemd/system/hookmon-agent.service
+- name: Install hookmon-bus (DEB)
+  when: ansible_facts['os_family'] == 'Debian'
+  ansible.builtin.apt:
+    deb: "{{ hookmon_agent_package_src }}"
+
+- name: Install hookmon-bus (RPM)
+  when: ansible_facts['os_family'] == 'RedHat'
+  ansible.builtin.dnf:
+    name: "{{ hookmon_agent_package_src }}"
+    state: present
+    disable_gpg_check: true
+
+- name: Install the server's CA certificate
+  ansible.builtin.copy:
+    src: "{{ hookmon_agent_ca_cert_file }}"
+    dest: /etc/hookmon/ca.crt
     owner: root
     group: root
     mode: "0644"
-  notify:
-    - daemon-reload
-    - restart hookmon-agent
+  notify: Restart hookmon-bus
 
-- name: Enable and start hookmon-agent
-  systemd:
-    name: hookmon-agent
+- name: Write /etc/hookmon/bus.yaml
+  ansible.builtin.template:
+    src: bus.yaml.j2
+    dest: /etc/hookmon/bus.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart hookmon-bus
+
+- name: Check whether the host has enrolled
+  ansible.builtin.stat:
+    path: /var/lib/hookmon/bus.crt
+  register: hookmon_agent_cert
+
+- name: Write the enrollment token
+  when: not hookmon_agent_cert.stat.exists
+  block:
+    - name: Check that a token is set
+      ansible.builtin.assert:
+        that: hookmon_agent_enroll_token | length > 0
+        fail_msg: The host has not enrolled yet; set hookmon_agent_enroll_token.
+        quiet: true
+
+    - name: Write /etc/hookmon/enroll-token
+      ansible.builtin.copy:
+        content: "{{ hookmon_agent_enroll_token }}\n"
+        dest: /etc/hookmon/enroll-token
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify: Restart hookmon-bus
+
+- name: Apply configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start hookmon-bus
+  ansible.builtin.systemd_service:
+    name: hookmon-bus
     enabled: true
     state: started
 
-handlers:
-  - name: daemon-reload
-    systemd:
-      daemon_reload: true
+- name: Wait for the host to enroll
+  ansible.builtin.wait_for:
+    path: /var/lib/hookmon/bus.crt
+    timeout: "{{ hookmon_agent_enroll_timeout }}"
+    msg: >-
+      hookmon-bus did not enroll within {{ hookmon_agent_enroll_timeout }} s;
+      see journalctl -u hookmon-bus
 
-  - name: restart hookmon-agent
-    systemd:
-      name: hookmon-agent
-      state: restarted
+- name: Delete the enrollment token
+  when: hookmon_agent_remove_token | bool
+  ansible.builtin.file:
+    path: /etc/hookmon/enroll-token
+    state: absent

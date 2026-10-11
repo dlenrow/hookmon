@@ -196,12 +196,26 @@ The collector polls each host's `/status` every 30 seconds. It can also reach a 
 
 Open `http://<appliance>:3000/d/hookmon-main/hookmon` in your browser.
 
-### Not Working Yet: Appliance Images and Packages
+### Install the Sensor Bus from a Package (Server Path)
+
+`make package-deb` or `make package-rpm` builds `hookmon-bus` for the build host's architecture. Its eBPF objects are compiled against that host's kernel BTF; objects built on 5.19 have loaded unchanged on 6.17 ([claims](docs/claims.md)). The package installs `hookmon-bus` and `hookmon-dlopen-probe` in `/usr/bin`, a hardened `hookmon-bus.service`, and `/etc/hookmon/bus.yaml`, which upgrades keep. The service is enabled but stays stopped until the host is configured: an enrollment token in `/etc/hookmon/enroll-token`, or a certificate from an earlier enrollment in `/var/lib/hookmon`.
+
+```bash
+sudo dpkg -i bin/hookmon-bus_<version>_amd64.deb      # or: sudo dnf install ./bin/hookmon-bus-<version>-1.el9.x86_64.rpm
+sudo sed -i 's|^server_addr: .*|server_addr: "hookmon.internal:9443"|' /etc/hookmon/bus.yaml
+sudo install -m 0644 ca.crt /etc/hookmon/ca.crt       # the CA that signed the server's certificate
+sudo install -m 0600 /dev/null /etc/hookmon/enroll-token
+sudo sh -c 'cat > /etc/hookmon/enroll-token'          # paste the token, then Ctrl-D
+sudo systemctl start hookmon-bus                      # enrolls; the token file can be deleted afterwards
+```
+
+The Ansible role `deploy/ansible/roles/hookmon-agent` does the same on many hosts and leaves each one enrolled; see the [deployment guide](docs/deployment-guide.md#install-the-sensor-bus-from-a-package). Purging the package (`dpkg --purge`, `rpm -e`) removes the bus's binaries, unit, configuration, token and enrolled identity.
+
+### Not Working Yet: Appliance Images
 
 - **Appliance images (ISO, OVA, QCOW2, VHD).** None of them builds a working image. The Packer template defines only a QEMU (qcow2) build, `make appliance-ova` names a VMware build that does not exist, and the ISO's `appliance/iso/user-data.yaml` is missing. Today the only "appliance" is the compose stack above. (fix plan step 7g)
-- **DEB and RPM packages.** They ship `hookmon-agent`, not `hookmon-bus`, with no systemd unit, default config or dlopen helper. (step 7g)
-- **Ansible.** The agent role (`deploy/ansible/roles/hookmon-agent`) and the appliance playbook (`appliance/ansible/playbook.yml`) refer to templates and files that do not exist. (step 7g)
-- **Enrollment script.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists. A bus enrolls with `hookmon-bus --enroll-token-file` instead (see the [deployment guide](docs/deployment-guide.md#server-path)). Installing the bus from a package is step 7g.
+- **Appliance Ansible.** The appliance playbook (`appliance/ansible/playbook.yml`) refers to roles and templates that do not exist. (step 7g)
+- **Enrollment script.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists. A bus enrolls with `hookmon-bus --enroll-token-file` instead (see the [deployment guide](docs/deployment-guide.md#server-path)); the packages pass it the token file.
 
 ## Allowlist Workflow
 
@@ -259,6 +273,8 @@ HookMon monitors the monitors. It provides an authorization and inventory layer 
 # libbpf headers, bpftool and a C compiler. Node.js 20+ for the dashboard.
 make build-all        # eBPF objects, then hookmon-bus, -agent, -server, -cli, -collector and hookmon-dlopen-probe, into bin/
 make build-dashboard  # dashboard/dist, which hookmon-server serves from dashboard_dir
+make package-deb      # bin/hookmon-bus_<version>_<arch>.deb (needs dpkg-deb)
+make package-rpm      # bin/hookmon-bus-<version>-1.<arch>.rpm (needs rpmbuild)
 ```
 
 On macOS the Go binaries build with stub sensors. No sensor works there.

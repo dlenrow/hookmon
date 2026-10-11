@@ -1,0 +1,53 @@
+# HookMon sensor bus, as installed by the hookmon-bus DEB and RPM.
+#
+# The service starts only once the host is configured: an enrollment token
+# in /etc/hookmon/enroll-token, or the certificate from an earlier
+# enrollment in /var/lib/hookmon. Until then "systemctl start" skips it
+# ("start condition unmet"), at boot too. Set server_addr in
+# /etc/hookmon/bus.yaml and put the server's CA certificate in
+# /etc/hookmon/ca.crt before writing the token. The token file is passed
+# only while it exists, so it can be deleted once the host has enrolled.
+#
+# Hardening. The bus runs as root: it loads eBPF programs (CAP_BPF,
+# CAP_PERFMON, and CAP_SYS_ADMIN to list every program and link), opens
+# fanotify groups (CAP_SYS_ADMIN) and resolves their file handles
+# (CAP_DAC_READ_SEARCH), and reads other processes' /proc entries
+# (CAP_SYS_PTRACE; map_files needs CAP_SYS_ADMIN). The bounding set keeps
+# those and drops the rest. The bus must share the host's mount namespace:
+# it compares a process's mount namespace with its own to decide where an
+# executable's path resolves, and it has to see /tmp, /home and /dev/shm as
+# the processes it watches do. So no option that gives the service its own
+# mount namespace is used (ProtectSystem, ProtectHome, PrivateTmp,
+# PrivateDevices, ProtectKernel*, ReadWritePaths and the like). The others
+# below are seccomp and prctl settings. RestrictSUIDSGID is left out too: it
+# makes openat2() fail with ENOSYS, and the bus needs openat2 to probe
+# shm_monitor's hook and to open files inside a process's root safely.
+
+[Unit]
+Description=HookMon sensor bus
+Documentation=https://github.com/dlenrow/hookmon/blob/main/docs/deployment-guide.md
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=|/etc/hookmon/enroll-token
+ConditionPathExists=|/var/lib/hookmon/bus.crt
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'if [ -e /etc/hookmon/enroll-token ]; then exec /usr/bin/hookmon-bus --config /etc/hookmon/bus.yaml --enroll-token-file /etc/hookmon/enroll-token; fi; exec /usr/bin/hookmon-bus --config /etc/hookmon/bus.yaml'
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+LimitMEMLOCK=infinity
+
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_SYS_RESOURCE
+NoNewPrivileges=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @module @mount @obsolete @raw-io @reboot @swap
+
+[Install]
+WantedBy=multi-user.target
