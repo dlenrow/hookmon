@@ -376,3 +376,15 @@ Ran on infinichat-u9 under compose project `hookmon-7g`, with an override that m
 Unit hardening: the capability bounding set is limited to what the bus needs, with `NoNewPrivileges` and a seccomp filter. Two kinds of option are left out on purpose:
 - Options that give the service its own mount namespace (`ProtectSystem`, `PrivateTmp` and the like). The bus resolves other processes' executables against its own mount namespace.
 - `RestrictSUIDSGID`. On the NUC it made `openat2()` return ENOSYS, which killed shm_monitor.
+
+### Step 7g: Cross-host acceptance (2026-10-11)
+
+Compose appliance on infinichat-u9 at 4f2989a, under project `hookmon-xhost` with alternate ports. DEB built from the same tree and installed on drl-nuc8i3bek. Checks ran from the Mac over the tailnet. Both sides were torn down afterwards.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| The appliance comes up | `hookmon-init.sh --mode compose --hostname infinichat-u9 --ip 100.95.196.103`, then `docker compose up --build --wait` | All 8 services healthy. `/api/v1/health` returns `{"status":"ok"}` from the Mac, with the generated CA. | Verified |
+| A bus installed from the DEB on a second host enrolls | `make package-deb` and `dpkg -i` on the NUC; token file plus CA; `systemctl start hookmon-bus` | The unit stayed inactive until configured. Once configured, the bus enrolled and wrote `bus.key`, `bus.crt` and `ca.crt` with mode 0600. The token never appeared in `ps`. | Verified |
+| Its events show in the dashboard | REST API; Playwright `every page renders the server data` | The host `drl-NUC8i3BEK` is ONLINE with 8 of 8 sensors alive, and 233 events arrived (169 SHM_CREATE, 33 DLOPEN, 31 BPF_INVENTORY). In Playwright, the event feed, investigation, allowlist-from-event and hosts pages rendered that data. Fleet learning produced 46 PENDING entries. | Verified |
+| The full smoke test on a fresh appliance | Playwright | 2 of 3 tests passed. The page walk stopped at Policies: the test assumed an approved entry already exists, which is true of a seeded server but not of a fresh appliance. The test now creates a temporary entry when there is none and deletes it afterwards; 7h runs it in CI against a fresh appliance. | Verified |
+| Clean removal | `dpkg --purge`; `docker compose down -v --rmi all` | The unit, `/var/lib/hookmon` and `/etc/hookmon` are gone from the NUC. The stack, its volumes and its images are gone from u9. The user's own containers and images on both hosts are untouched. | Verified |

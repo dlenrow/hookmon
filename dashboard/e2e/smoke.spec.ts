@@ -207,7 +207,22 @@ test('every page renders the server data', async () => {
     console.log(`Hosts: ${h.hostname} (${h.id}), sensors ${sensors.map((s) => `${s.name}=${s.status}`).join(' ')}`);
   }
 
-  // Policies: every entry in force; the enable toggle round-trips.
+  // Policies: every entry in force; the enable toggle round-trips. A fresh
+  // server (the compose appliance, say) has no entries yet, so make one
+  // that matches nothing and delete it when the step is done.
+  let seeded: string | undefined;
+  if ((await apiGet<Entry[]>('/api/v1/policies')).length === 0) {
+    const res = await api<Entry>('POST', '/api/v1/policies', {
+      description: 'smoke test: temporary entry',
+      event_types: ['BPF_LOAD'],
+      exe_path: '/nonexistent/hookmon-smoke-test',
+      action: 'ALERT',
+      enabled: true,
+    });
+    expect(res.status, 'POST /api/v1/policies').toBe(201);
+    seeded = res.data.id;
+  }
+  try {
   const policies = await apiGet<Entry[]>('/api/v1/policies');
   expect(policies.length).toBeGreaterThan(0);
   await nav(page, /Policies/);
@@ -221,6 +236,12 @@ test('every page renders the server data', async () => {
   await row.locator('label.toggle').click();
   await expect.poll(async () => (await apiGet<Entry[]>('/api/v1/policies')).find((e) => e.id === first.id)?.enabled).toBe(first.enabled);
   console.log(`Policies: ${policies.length} rows; toggled "${first.description}" off and on`);
+  } finally {
+    if (seeded) {
+      const res = await api('DELETE', `/api/v1/policies/${seeded}`);
+      expect([200, 204], 'DELETE the temporary entry').toContain(res.status);
+    }
+  }
 
   // Pending approval: every PENDING candidate.
   const pending = await apiGet<Entry[]>('/api/v1/policies?status=PENDING');
