@@ -8,7 +8,7 @@ This guide sets up the observability path, which works today, and then the serve
 2. **Sensor buses:** `hookmon-bus` on each monitored Linux host. Each detects eBPF loads, linker environment injection, ptrace abuse, library tampering and more, and pushes events to Loki.
 3. **Collector:** `hookmon-collector`, run on the stack's host but outside Compose. It polls each host's `/status` endpoint and pushes fleet health to Pushgateway.
 
-[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet, such as WebSocket authentication (step 7e); see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
+[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet; see [architecture.md](architecture.md#server). Packages (DEB, RPM) and Ansible roles don't work yet either (step 7g). Until they do, you build the bus and the server from source.
 
 All sensors are read-only. They observe and report, and cannot block or change anything. There is no enforcement mode.
 
@@ -312,7 +312,7 @@ curl -s http://<bus-host>:2112/status | jq .
 
 ## Server Path
 
-The server path sends events from each bus to `hookmon-server`, which stores them in PostgreSQL and serves the REST API and the dashboard. Every connection uses TLS, from one CA you create. Not working yet: WebSocket authentication and a dashboard page for PENDING entries (step 7e).
+The server path sends events from each bus to `hookmon-server`, which stores them in PostgreSQL and serves the REST API and the dashboard. Every connection uses TLS, from one CA you create.
 
 ### Build
 
@@ -353,6 +353,7 @@ sudo install -m 0600 deploy/server.example.yaml /etc/hookmon/server.yaml
 Edit `/etc/hookmon/server.yaml`:
 - `database.url`: your PostgreSQL connection string.
 - `api.tokens`: one or more bearer tokens for the REST API and the dashboard.
+- `api.allowed_origins`: leave it empty when browsers load the dashboard from this server. The live event feed accepts a WebSocket only from the server's own origin and from origins listed here (`https://host[:port]`), such as a dashboard served by another host or the Vite dev server (`http://localhost:5173`).
 - `enrollment.tokens`: replace the example secret with the output of `openssl rand -hex 32`, and set `expires`. Set `single_use: true` for a token that should enroll one host.
 - `tls`: the paths above are the defaults in the example.
 
@@ -451,7 +452,18 @@ To check a connector, load a BPF program that is not on the allowlist, as in [Ve
 
 ### Open the Dashboard
 
-Browse to `https://hookmon.internal:8443/` from a machine that trusts `ca.crt`. Enter an API token on the Settings page; the browser keeps it in local storage. The server serves the dashboard from `dashboard_dir` (default `/usr/share/hookmon/dashboard`).
+Browse to `https://hookmon.internal:8443/` from a machine that trusts `ca.crt`. Enter an API token on the Settings page and reload; the browser keeps it in local storage. The server serves the dashboard from `dashboard_dir` (default `/usr/share/hookmon/dashboard`).
+
+- **Settings** shows the enrollment command for this server (its gRPC and enrollment ports, `--enroll-token`, `--ca-file`, `--state-dir`), the enrollment tokens by name and expiry, and each connector's sent, failed and dropped counts. No secret is shown.
+- **Events** is live: the sidebar shows "Live" while the WebSocket is connected. Every open tab gets every event. A tab that falls more than 256 events behind is disconnected and reconnects by itself, reloading recent events.
+- **Allowlist** on an event (in the feed or on its Investigation page) allows exactly that kind of event on its host or on every host.
+- **Pending Approval** lists learning-mode candidates; approve or reject each for the fleet or for one host.
+- **Hosts** shows each sensor's health from the host's latest heartbeat.
+- **Policies** edits, disables and deletes entries.
+
+If the sidebar says "Disconnected, retrying", check the token, and that the address in the browser is the server's own (or is listed in `api.allowed_origins`); the server logs "websocket refused: origin not allowed" for a wrong origin.
+
+To work on the dashboard, run `npm run dev` in `dashboard/` with `HOOKMON_API_URL` (default `https://localhost:8443`) and `HOOKMON_CA_FILE` set, add `http://localhost:5173` to `api.allowed_origins`, and open `http://localhost:5173`. The Playwright smoke test runs against a seeded server: `HOOKMON_E2E_URL=https://hookmon.internal:8443 HOOKMON_E2E_CA=ca.crt HOOKMON_E2E_TOKEN=<api-token> npm run test:e2e` (after `npx playwright install chromium`).
 
 ### Development Without TLS
 

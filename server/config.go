@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
+	"github.com/dlenrow/hookmon/server/api"
 	"github.com/dlenrow/hookmon/server/connectors"
 )
 
@@ -83,6 +84,12 @@ type DatabaseConfig struct {
 // APIConfig holds REST API settings.
 type APIConfig struct {
 	Tokens []string `yaml:"tokens"`
+	// AllowedOrigins are the browser origins ("https://host[:port]"),
+	// besides the server's own, whose pages may open the WebSocket event
+	// feed. The server's own origin is always allowed; a page from any
+	// other origin is refused. Add one for a dashboard served from another
+	// host, such as the Vite dev server without its proxy.
+	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
 // EnrollmentConfig holds enrollment settings.
@@ -172,6 +179,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Watchdog.CheckInterval <= 0 || c.Watchdog.HeartbeatTimeout <= 0 {
 		return errors.New("watchdog.check_interval and watchdog.heartbeat_timeout must be positive")
+	}
+	if _, err := api.ParseOrigins(c.API.AllowedOrigins); err != nil {
+		return fmt.Errorf("api.allowed_origins: %w", err)
 	}
 	return c.Connectors.Validate()
 }

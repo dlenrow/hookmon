@@ -28,6 +28,8 @@ type polStore struct {
 	queried   [][]event.EntryStatus
 	decisions []string
 	decideErr error
+	events    map[string]*event.HookEvent
+	updates   int
 }
 
 func newPolStore() *polStore {
@@ -38,8 +40,45 @@ func (s *polStore) InsertEvent(context.Context, *event.HookEvent) error { return
 func (s *polStore) QueryEvents(context.Context, store.EventFilter) ([]*event.HookEvent, error) {
 	return nil, nil
 }
-func (s *polStore) GetEvent(context.Context, string) (*event.HookEvent, error) {
+func (s *polStore) GetEvent(_ context.Context, id string) (*event.HookEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.events[id]; ok {
+		return e, nil
+	}
 	return nil, store.ErrNotFound
+}
+
+func (s *polStore) GetAllowlistEntry(_ context.Context, id string) (*event.AllowlistEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.ID == id {
+			c := *e
+			return &c, nil
+		}
+	}
+	return nil, fmt.Errorf("allowlist entry %s: %w", id, store.ErrNotFound)
+}
+
+// UpdateAllowlistEntry writes the editable fields, as the real store does.
+func (s *polStore) UpdateAllowlistEntry(_ context.Context, e *event.AllowlistEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, cur := range s.entries {
+		if cur.ID != e.ID {
+			continue
+		}
+		if cur.Status == event.StatusPending {
+			return fmt.Errorf("allowlist entry %s: %w", e.ID, store.ErrPending)
+		}
+		c := *e
+		c.CreatedAt, c.CreatedBy, c.Status, c.Learned = cur.CreatedAt, cur.CreatedBy, cur.Status, cur.Learned
+		s.entries[i] = &c
+		s.updates++
+		return nil
+	}
+	return fmt.Errorf("allowlist entry %s: %w", e.ID, store.ErrNotFound)
 }
 func (s *polStore) GetHosts(context.Context) ([]*event.Host, error) { return nil, nil }
 func (s *polStore) GetHost(_ context.Context, id string) (*event.Host, error) {

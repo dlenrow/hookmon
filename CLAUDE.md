@@ -208,30 +208,41 @@ hookmon/
 │       ├── router.go          # HTTPS router: REST API, then the dashboard for non-API paths
 │       ├── dashboard.go       # Serves dashboard_dir, index.html fallback for client routes
 │       ├── events.go          # Event query endpoints
-│       ├── policies.go        # Policy CRUD endpoints
+│       ├── allowlist_event.go # POST /events/{id}/allowlist: an entry from an event's learning key
+│       ├── policies.go        # Policy CRUD, PUT/PATCH edits, approve/reject
+│       ├── learning.go        # Learning-mode windows
 │       ├── hosts.go           # Host inventory endpoints
-│       ├── websocket.go       # Live event feed
+│       ├── settings.go        # GET /settings: ports, enrollment, connector counts (no secrets)
+│       ├── body.go            # JSON write bodies: 64 KiB limit, unknown fields refused
+│       ├── hub.go             # WebSocket fan-out: a bounded buffer per client
+│       ├── websocket.go       # Live event feed: token (subprotocol or header), Origin check
 │       └── auth.go            # API authentication (token-based)
 │
 ├── dashboard/                 # Web dashboard (React + TypeScript)
 │   ├── package.json
 │   ├── tsconfig.json
+│   ├── vite.config.ts         # Dev server on 5173; https /api proxy with ws: true
+│   ├── playwright.config.ts
+│   ├── e2e/smoke.spec.ts      # Playwright smoke test against a seeded server (env-gated)
 │   ├── src/
 │   │   ├── App.tsx
 │   │   ├── pages/
 │   │   │   ├── EventFeed.tsx       # Real-time event stream
-│   │   │   ├── PolicyManager.tsx   # Allowlist / rule management
-│   │   │   ├── HostInventory.tsx   # Monitored host status
+│   │   │   ├── PolicyManager.tsx   # Allowlist entries: create, edit, enable/disable, delete
+│   │   │   ├── PendingApproval.tsx # Learning-mode candidates: approve/reject, fleet or host
+│   │   │   ├── HostInventory.tsx   # Host status and per-sensor health
 │   │   │   ├── Investigation.tsx   # Event detail + investigation
-│   │   │   └── Settings.tsx        # Connector config, users
+│   │   │   └── Settings.tsx        # API token, enrollment command, ports, connector status
 │   │   ├── components/
 │   │   │   ├── EventCard.tsx
+│   │   │   ├── AllowlistEventButton.tsx  # "Allowlist this event"
 │   │   │   ├── SeverityBadge.tsx
 │   │   │   ├── HostStatus.tsx
 │   │   │   ├── AllowlistEditor.tsx
 │   │   │   └── TimelineView.tsx
 │   │   └── api/
-│   │       └── client.ts           # API client
+│   │       ├── client.ts           # API client and WebSocket (token as a subprotocol)
+│   │       └── types.ts            # Mirrors pkg/event and server/api types
 │   └── public/
 │       └── index.html
 │
@@ -624,7 +635,10 @@ Agent gRPC stream
     → classify severity (replaces the bus's severity; fix plan step 7c)
     → store in PostgreSQL
     → fan out to:
-        ├── WebSocket feed (dashboard real-time; one shared channel, step 7e)
+        ├── WebSocket feed (dashboard real-time). A hub gives each client
+        │   its own buffer of 256 events, so every tab gets every event;
+        │   a client that falls behind is closed (1013) and reconnects.
+        │   Ingestion never waits for a client.
         └── SIEM connectors (Syslog, Splunk, Elastic, webhook, Kafka), each
             through its own bounded queue and worker. Alert connectors
             (min_severity ALERT or CRITICAL, the default) get events at or
@@ -840,12 +854,14 @@ Status: built, with gaps. Enrollment (7a), TLS by default (7b), learning mode wi
 
 ### Phase 3: Dashboard
 
-Status: the five pages build, and `hookmon-server` serves them from `dashboard_dir` over HTTPS (step 7b). The WebSocket, the Settings page and the dev proxy have known bugs (step 7e).
+Status: built (steps 7b and 7e). `hookmon-server` serves six pages from `dashboard_dir` over HTTPS. The WebSocket checks the API token (sent as the `hookmon.bearer.<base64url>` subprotocol, never in the URL) and the Origin (the server's own, plus `api.allowed_origins`). A Playwright smoke test (`dashboard/e2e/`) opens every page against a seeded server.
 
-1. Event feed page (WebSocket real-time)
-2. Host inventory page
-3. Allowlist/policy management page
-4. Investigation detail page
+1. Event feed page (WebSocket real-time; "Allowlist this event")
+2. Host inventory page (per-sensor health from the heartbeat)
+3. Allowlist/policy management page (create, PUT edit, PATCH enable/disable, delete)
+4. Investigation detail page ("Allowlist this event")
+5. Pending approval page (learning-mode candidates; approve/reject for the fleet or one host)
+6. Settings (enrollment command with the real ports, connector status)
 
 ### Phase 4: SIEM Connectors
 
@@ -902,7 +918,7 @@ Mitigations, with their status today:
 - Config file is root-readable only (operator's job; no package sets it yet).
 - Private key is root-readable only: enrollment writes `bus.key`, `bus.crt` and `ca.crt` with mode 0600.
 - The server refuses to start without a TLS certificate unless `--insecure`. REST, the WebSocket and the dashboard are served over HTTPS on 8443.
-- Server API requires a token on every endpoint except `/api/v1/health`. The WebSocket accepts any non-empty token (step 7e).
+- Server API requires a token on every endpoint except `/api/v1/health`. The WebSocket checks the same tokens, sent as a subprotocol or an Authorization header, and refuses pages from other origins. Writes are limited to 64 KiB and validate the action.
 - Appliance firewall rules (only ports 9443 gRPC, 443 HTTPS, 2112 status) — not built (step 7g).
 - All inter-component communication TLS-encrypted — bus to server and REST, yes; Loki pushes, `/status`, `/metrics` and the default PostgreSQL connection (`sslmode=disable`) are not.
 - PostgreSQL listens only on localhost — the default connection string, not enforced.

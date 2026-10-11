@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -78,10 +80,24 @@ func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entries)
 }
 
+// validateEntry checks the parts of an entry an operator writes: the action
+// and the hash formats, which it normalizes. A REJECTED entry exists to keep
+// an event alerting, so its action stays ALERT.
+func validateEntry(e *event.AllowlistEntry) error {
+	switch e.Action {
+	case event.ActionAllow, event.ActionAlert, event.ActionDeny:
+	default:
+		return fmt.Errorf("action must be ALLOW, ALERT or DENY, not %q", e.Action)
+	}
+	if e.Status == event.StatusRejected && e.Action != event.ActionAlert {
+		return errors.New("a REJECTED entry keeps action ALERT; delete it instead")
+	}
+	return allowlist.Normalize(e)
+}
+
 func (s *Server) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 	var entry event.AllowlistEntry
-	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &entry, true, "invalid request body") {
 		return
 	}
 
@@ -95,11 +111,11 @@ func (s *Server) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "learned is set by learning mode only")
 		return
 	}
-	if err := allowlist.Normalize(&entry); err != nil {
+	entry.Status = event.StatusApproved
+	if err := validateEntry(&entry); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	entry.Status = event.StatusApproved
 
 	if entry.ID == "" {
 		entry.ID = uuid.New().String()
@@ -117,6 +133,148 @@ func (s *Server) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, entry)
+}
+
+// editableFields are the entry fields PUT replaces and PATCH may set. The
+// rest (id, created_at, created_by, status, learned) belong to the server.
+var editableFields = map[string]bool{
+	"description": true, "event_types": true,
+	"exe_hash": true, "exe_path": true,
+	"library_hash": true, "library_path": true,
+	"prog_name": true, "prog_type": true, "prog_hash": true,
+	"host_pattern": true, "uid_range": true, "container_image": true,
+	"allowed_rpaths": true, "host_id": true,
+	"action": true, "expires": true, "enabled": true,
+}
+
+// editableEntry loads the entry a PUT or PATCH names. It answers the
+// request itself (404, 409 for a PENDING candidate, 500) and returns false
+// when the entry cannot be edited.
+func (s *Server) editableEntry(w http.ResponseWriter, r *http.Request, id string) (*event.AllowlistEntry, bool) {
+	cur, err := s.store.GetAllowlistEntry(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+		return nil, false
+	case err != nil:
+		s.logger.Error("get allowlist entry failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return nil, false
+	case cur.Status == event.StatusPending:
+		writeError(w, http.StatusConflict, fmt.Sprintf("entry %s is PENDING: approve or reject it first", id))
+		return nil, false
+	}
+	return cur, true
+}
+
+// handleReplacePolicy replaces an entry's criteria, action, expiry,
+// description and enabled flag (PUT). The body is a whole entry, such as
+// one from GET with fields changed; omitted fields become empty. The id,
+// created_at, created_by and learned fields are kept from the stored entry,
+// and status cannot change here (PENDING entries are decided with approve
+// and reject, and are not editable).
+func (s *Server) handleReplacePolicy(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var next event.AllowlistEntry
+	if !decodeBody(w, r, &next, true, "invalid request body") {
+		return
+	}
+	if next.ID != "" && next.ID != id {
+		writeError(w, http.StatusBadRequest, "id in the body does not match the URL")
+		return
+	}
+	cur, ok := s.editableEntry(w, r, id)
+	if !ok {
+		return
+	}
+	if next.Status != "" && next.Status != cur.Status {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("status cannot change from %s with PUT", cur.Status))
+		return
+	}
+	next.ID, next.CreatedAt, next.CreatedBy, next.Status, next.Learned = cur.ID, cur.CreatedAt, cur.CreatedBy, cur.Status, cur.Learned
+	s.saveEntry(w, r, &next)
+}
+
+// handlePatchPolicy changes some of an entry's editable fields (PATCH),
+// such as {"enabled": false}. A field set to null is cleared. Any field
+// outside editableFields is refused.
+func (s *Server) handlePatchPolicy(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var patch map[string]json.RawMessage
+	if !decodeBody(w, r, &patch, false, `invalid request body: want a JSON object such as {"enabled": false}`) {
+		return
+	}
+	if len(patch) == 0 {
+		writeError(w, http.StatusBadRequest, `empty patch: give the fields to change, such as {"enabled": false}`)
+		return
+	}
+	keys := make([]string, 0, len(patch))
+	for k := range patch {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !editableFields[k] {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("%q cannot be changed with PATCH", k))
+			return
+		}
+	}
+	cur, ok := s.editableEntry(w, r, id)
+	if !ok {
+		return
+	}
+	next, err := applyPatch(cur, patch)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid patch: "+err.Error())
+		return
+	}
+	s.saveEntry(w, r, next)
+}
+
+// applyPatch returns a copy of cur with the patch's fields decoded over it.
+func applyPatch(cur *event.AllowlistEntry, patch map[string]json.RawMessage) (*event.AllowlistEntry, error) {
+	base, err := json.Marshal(cur)
+	if err != nil {
+		return nil, err
+	}
+	var next event.AllowlistEntry
+	if err := json.Unmarshal(base, &next); err != nil {
+		return nil, err
+	}
+	p, err := json.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(p))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&next); err != nil {
+		return nil, err
+	}
+	return &next, nil
+}
+
+// saveEntry validates an edited entry, stores it and reloads the policy.
+func (s *Server) saveEntry(w http.ResponseWriter, r *http.Request, e *event.AllowlistEntry) {
+	if err := validateEntry(e); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	switch err := s.store.UpdateAllowlistEntry(r.Context(), e); {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	case errors.Is(err, store.ErrPending):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		s.logger.Error("update allowlist entry failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "failed to update policy")
+		return
+	}
+	if !s.reload(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
 }
 
 func (s *Server) handleDeletePolicy(w http.ResponseWriter, r *http.Request) {
@@ -184,8 +342,7 @@ func (s *Server) handleRejectPolicy(w http.ResponseWriter, r *http.Request) {
 // decide approves or rejects a PENDING entry, for the fleet or one host.
 func (s *Server) decide(w http.ResponseWriter, r *http.Request, decision event.EntryStatus) {
 	var req scopeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, `invalid request body: want {"scope": "fleet"} or {"scope": "host", "host_id": "..."}`)
+	if !decodeBody(w, r, &req, true, `invalid request body: want {"scope": "fleet"} or {"scope": "host", "host_id": "..."}`) {
 		return
 	}
 	hostID, ok := s.hostScope(w, r, req)

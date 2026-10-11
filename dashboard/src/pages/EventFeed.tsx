@@ -6,11 +6,14 @@ import { EventCard } from '../components/EventCard';
 interface EventFeedProps {
   liveEvents: HookEvent[];
   wsConnected: boolean;
+  /** Changes each time the live feed (re)connects, so history is reloaded to cover any gap. */
+  resync: number;
 }
 
 const EVENT_TYPES: EventType[] = [
   'BPF_LOAD',
   'BPF_ATTACH',
+  'BPF_INVENTORY',
   'EXEC_INJECTION',
   'SHM_CREATE',
   'DLOPEN',
@@ -24,7 +27,7 @@ const EVENT_TYPES: EventType[] = [
 
 const SEVERITIES: Severity[] = ['INFO', 'WARN', 'ALERT', 'CRITICAL'];
 
-export function EventFeed({ liveEvents, wsConnected }: EventFeedProps) {
+export function EventFeed({ liveEvents, wsConnected, resync }: EventFeedProps) {
   const [historicalEvents, setHistoricalEvents] = useState<HookEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -35,7 +38,7 @@ export function EventFeed({ liveEvents, wsConnected }: EventFeedProps) {
   const [filterSeverity, setFilterSeverity] = useState<string>('');
   const [filterHost, setFilterHost] = useState('');
 
-  const tableEndRef = useRef<HTMLDivElement>(null);
+  const feedTopRef = useRef<HTMLDivElement>(null);
 
   // Load historical events
   useEffect(() => {
@@ -67,12 +70,12 @@ export function EventFeed({ liveEvents, wsConnected }: EventFeedProps) {
 
     loadEvents();
     return () => { cancelled = true; };
-  }, [filterEventType, filterSeverity, filterHost]);
+  }, [filterEventType, filterSeverity, filterHost, resync]);
 
-  // Auto-scroll to bottom on new live events
+  // Live events are added at the top of the table; auto-scroll keeps it in view.
   useEffect(() => {
-    if (autoScroll && tableEndRef.current) {
-      tableEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (autoScroll && feedTopRef.current) {
+      feedTopRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [liveEvents, autoScroll]);
 
@@ -174,10 +177,11 @@ export function EventFeed({ liveEvents, wsConnected }: EventFeedProps) {
         ) : filteredEvents.length === 0 ? (
           <div className="empty-state">
             <h3>No events found</h3>
-            <p>Events will appear here when agents detect hook activity.</p>
+            <p>Events will appear here when sensor buses detect hook activity.</p>
           </div>
         ) : (
           <div className="card">
+            <div ref={feedTopRef} />
             <div style={{ overflowX: 'auto' }}>
               <table className="data-table">
                 <thead>
@@ -189,6 +193,7 @@ export function EventFeed({ liveEvents, wsConnected }: EventFeedProps) {
                     <th>Summary</th>
                     <th>Process</th>
                     <th>Policy</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -198,7 +203,6 @@ export function EventFeed({ liveEvents, wsConnected }: EventFeedProps) {
                 </tbody>
               </table>
             </div>
-            <div ref={tableEndRef} />
           </div>
         )}
       </div>

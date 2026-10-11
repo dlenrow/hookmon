@@ -2,11 +2,19 @@ import { useState, useEffect, useCallback } from 'react';
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import type { Severity, HookEvent } from './api/types';
 import { getEvents, connectWebSocket } from './api/client';
+import type { WebSocketState } from './api/client';
 import { EventFeed } from './pages/EventFeed';
 import { PolicyManager } from './pages/PolicyManager';
+import { PendingApproval } from './pages/PendingApproval';
 import { HostInventory } from './pages/HostInventory';
 import { Investigation } from './pages/Investigation';
 import { Settings } from './pages/Settings';
+
+const WS_LABEL: Record<WebSocketState, string> = {
+  live: 'Live',
+  reconnecting: 'Disconnected, retrying',
+  'no-token': 'No API token (see Settings)',
+};
 
 interface SeverityCounts {
   INFO: number;
@@ -22,8 +30,10 @@ export function App() {
     ALERT: 0,
     CRITICAL: 0,
   });
-  const [wsConnected, setWsConnected] = useState(false);
+  const [wsState, setWsState] = useState<WebSocketState>('reconnecting');
+  const [resync, setResync] = useState(0);
   const [liveEvents, setLiveEvents] = useState<HookEvent[]>([]);
+  const wsConnected = wsState === 'live';
 
   // Fetch initial severity counts from recent events
   useEffect(() => {
@@ -59,14 +69,18 @@ export function App() {
     }));
   }, []);
 
-  const handleWsStatus = useCallback((connected: boolean) => {
-    setWsConnected(connected);
+  // Each (re)connect starts a new feed; pages reload history to cover the gap.
+  const handleWsState = useCallback((state: WebSocketState) => {
+    setWsState(state);
+    if (state === 'live') {
+      setResync((n) => n + 1);
+    }
   }, []);
 
   useEffect(() => {
-    const ws = connectWebSocket(handleWsEvent, handleWsStatus);
+    const ws = connectWebSocket(handleWsEvent, handleWsState);
     return () => ws.close();
-  }, [handleWsEvent, handleWsStatus]);
+  }, [handleWsEvent, handleWsState]);
 
   return (
     <div className="app-layout">
@@ -90,6 +104,10 @@ export function App() {
             <span className="nav-icon">P</span>
             Policies
           </NavLink>
+          <NavLink to="/pending" className={({ isActive }) => isActive ? 'active' : ''}>
+            <span className="nav-icon">A</span>
+            Pending Approval
+          </NavLink>
           <NavLink to="/settings" className={({ isActive }) => isActive ? 'active' : ''}>
             <span className="nav-icon">S</span>
             Settings
@@ -99,6 +117,8 @@ export function App() {
         <div className="sidebar-stats">
           <div
             className={`ws-status ${wsConnected ? 'connected' : 'disconnected'}`}
+            data-testid="ws-status"
+            data-state={wsState}
             style={{ marginBottom: '12px' }}
           >
             <span
@@ -110,7 +130,7 @@ export function App() {
                   : '0 0 6px var(--status-offline)',
               }}
             />
-            {wsConnected ? 'Live' : 'Disconnected'}
+            {WS_LABEL[wsState]}
           </div>
           <div className="severity-counts">
             <span className="severity-count info">
@@ -135,11 +155,12 @@ export function App() {
           <Route path="/" element={<Navigate to="/events" replace />} />
           <Route
             path="/events"
-            element={<EventFeed liveEvents={liveEvents} wsConnected={wsConnected} />}
+            element={<EventFeed liveEvents={liveEvents} wsConnected={wsConnected} resync={resync} />}
           />
           <Route path="/events/:id" element={<Investigation />} />
           <Route path="/hosts" element={<HostInventory />} />
           <Route path="/policies" element={<PolicyManager />} />
+          <Route path="/pending" element={<PendingApproval />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

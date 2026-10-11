@@ -4,7 +4,15 @@ import type { HookEvent } from '../api/types';
 import { getEvent, getEvents } from '../api/client';
 import { SeverityBadge } from '../components/SeverityBadge';
 import { TimelineView } from '../components/TimelineView';
-import { formatTimestampFull, bpfProgTypeName, bpfCmdName, truncateHash } from '../utils';
+import { AllowlistEventButton } from '../components/AllowlistEventButton';
+import {
+  formatTimestampFull,
+  bpfProgTypeName,
+  bpfCmdName,
+  truncateHash,
+  ptraceRequestDescription,
+  shmPatternDescription,
+} from '../utils';
 
 export function Investigation() {
   const { id } = useParams<{ id: string }>();
@@ -98,9 +106,12 @@ export function Investigation() {
               <SeverityBadge severity={event.severity} />
               <span className="badge badge-type">{event.event_type}</span>
             </div>
-            <p className="mono" style={{ marginTop: '4px' }}>
+            <p className="mono" style={{ marginTop: '4px' }} data-testid="event-id">
               ID: {event.id}
             </p>
+          </div>
+          <div style={{ marginLeft: 'auto' }}>
+            <AllowlistEventButton event={event} />
           </div>
         </div>
       </div>
@@ -205,10 +216,19 @@ export function Investigation() {
                 </div>
                 <div className="card-body">
                   <div className="detail-grid">
-                    <span className="detail-label">BPF Command</span>
-                    <span className="detail-value mono">
-                      {bpfCmdName(event.bpf_detail.bpf_cmd)} ({event.bpf_detail.bpf_cmd})
-                    </span>
+                    {event.event_type === 'BPF_INVENTORY' ? (
+                      <>
+                        <span className="detail-label">Source</span>
+                        <span className="detail-value">Inventory scan of loaded programs (no syscall seen)</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="detail-label">BPF Command</span>
+                        <span className="detail-value mono">
+                          {bpfCmdName(event.bpf_detail.bpf_cmd)} ({event.bpf_detail.bpf_cmd})
+                        </span>
+                      </>
+                    )}
 
                     <span className="detail-label">Program Type</span>
                     <span className="detail-value mono">
@@ -218,24 +238,100 @@ export function Investigation() {
                     <span className="detail-label">Program Name</span>
                     <span className="detail-value mono">{event.bpf_detail.prog_name || '-'}</span>
 
-                    <span className="detail-label">Attach Type</span>
-                    <span className="detail-value mono">{event.bpf_detail.attach_type}</span>
+                    <span className="detail-label">Program Tag</span>
+                    <span className="detail-value mono" data-testid="bpf-tag">
+                      {event.bpf_detail.prog_hash || '- (the kernel gave no tag; a failed load, or the program could not be read)'}
+                    </span>
 
-                    <span className="detail-label">Target FD</span>
-                    <span className="detail-value mono">{event.bpf_detail.target_fd}</span>
+                    {event.bpf_detail.prog_id ? (
+                      <>
+                        <span className="detail-label">Program ID</span>
+                        <span className="detail-value mono">{event.bpf_detail.prog_id}</span>
+                      </>
+                    ) : null}
+
+                    {event.bpf_detail.attach_target && (
+                      <>
+                        <span className="detail-label">Attach Target</span>
+                        <span className="detail-value mono">{event.bpf_detail.attach_target}</span>
+                      </>
+                    )}
+
+                    {event.event_type !== 'BPF_INVENTORY' && (
+                      <>
+                        <span className="detail-label">Attach Type</span>
+                        <span className="detail-value mono">{event.bpf_detail.attach_type}</span>
+
+                        <span className="detail-label">Target FD</span>
+                        <span className="detail-value mono">{event.bpf_detail.target_fd}</span>
+                      </>
+                    )}
 
                     <span className="detail-label">Instruction Count</span>
                     <span className="detail-value mono">{event.bpf_detail.insn_count}</span>
 
-                    {event.bpf_detail.prog_hash && (
+                    {event.bpf_detail.load_time && (
                       <>
-                        <span className="detail-label">Program Hash</span>
-                        <span className="detail-value mono" title={event.bpf_detail.prog_hash}>
-                          {truncateHash(event.bpf_detail.prog_hash)}
-                        </span>
+                        <span className="detail-label">Loaded</span>
+                        <span className="detail-value mono">{formatTimestampFull(event.bpf_detail.load_time)}</span>
+                      </>
+                    )}
+
+                    {event.bpf_detail.created_by_uid !== undefined && (
+                      <>
+                        <span className="detail-label">Loaded by UID</span>
+                        <span className="detail-value mono">{event.bpf_detail.created_by_uid}</span>
                       </>
                     )}
                   </div>
+                </div>
+              </div>
+            )}
+
+            {event.bpf_inventory_detail && (
+              <div className="card" style={{ marginBottom: '24px' }}>
+                <div className="card-header">
+                  <h3>BPF Inventory</h3>
+                </div>
+                <div className="card-body">
+                  <div className="detail-grid">
+                    <span className="detail-label">Scan ID</span>
+                    <span className="detail-value mono">{event.bpf_inventory_detail.scan_id}</span>
+
+                    <span className="detail-label">Event</span>
+                    <span className="detail-value">
+                      {event.bpf_inventory_detail.summary
+                        ? 'Host summary of the scan'
+                        : 'One loaded program (see BPF Detail)'}
+                    </span>
+
+                    {event.bpf_inventory_detail.summary && (
+                      <>
+                        <span className="detail-label">Programs</span>
+                        <span className="detail-value mono">{event.bpf_inventory_detail.prog_count ?? 0}</span>
+                      </>
+                    )}
+                  </div>
+                  {event.bpf_inventory_detail.by_type && Object.keys(event.bpf_inventory_detail.by_type).length > 0 && (
+                    <table className="data-table" style={{ marginTop: '16px' }}>
+                      <thead>
+                        <tr>
+                          <th>Program type</th>
+                          <th>Count</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(event.bpf_inventory_detail.by_type)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([type, n]) => (
+                            <tr key={type}>
+                              <td className="mono">{type}</td>
+                              <td className="mono">{n}</td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
             )}
@@ -246,9 +342,24 @@ export function Investigation() {
                   <h3>Exec Injection Detail</h3>
                 </div>
                 <div className="card-body">
+                  {event.exec_injection_detail.scan_truncated && (
+                    <div className="error-banner" data-testid="scan-truncated">
+                      Environment scan truncated: the sensor stopped before the end of this process&apos;s
+                      environment (too many variables, a failed read, or too many matches), so an LD_* variable may
+                      be in the part it did not scan.
+                    </div>
+                  )}
                   <div className="detail-grid">
                     <span className="detail-label">Library Path</span>
-                    <span className="detail-value mono">{event.exec_injection_detail.library_path}</span>
+                    <span className="detail-value mono">
+                      {event.exec_injection_detail.library_path || '-'}
+                      {event.exec_injection_detail.value_truncated && (
+                        <span style={{ color: 'var(--severity-warn)' }} data-testid="value-truncated">
+                          {' '}… truncated: the value was longer than the sensor captures, so this is its start and it
+                          has no hash
+                        </span>
+                      )}
+                    </span>
 
                     <span className="detail-label">Library Hash</span>
                     <span className="detail-value mono" title={event.exec_injection_detail.library_hash}>
@@ -286,7 +397,14 @@ export function Investigation() {
                     <span className="detail-value mono">{event.shm_detail.size} bytes</span>
 
                     <span className="detail-label">Pattern</span>
-                    <span className="detail-value">{event.shm_detail.pattern}</span>
+                    <span className="detail-value" data-testid="shm-pattern">
+                      <span className="mono">{event.shm_detail.pattern || '-'}</span>
+                      {shmPatternDescription(event.shm_detail.pattern) && (
+                        <span style={{ color: 'var(--text-secondary)' }}>
+                          {' '}({shmPatternDescription(event.shm_detail.pattern)})
+                        </span>
+                      )}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -359,6 +477,11 @@ export function Investigation() {
                     <span className="detail-label">Request</span>
                     <span className="detail-value mono">
                       {event.ptrace_detail.request_name} ({event.ptrace_detail.request})
+                      {ptraceRequestDescription(event.ptrace_detail.request_name) && (
+                        <span style={{ fontFamily: 'var(--font-sans)', color: 'var(--text-secondary)' }}>
+                          {' '}: {ptraceRequestDescription(event.ptrace_detail.request_name)}
+                        </span>
+                      )}
                     </span>
 
                     <span className="detail-label">Target PID</span>
@@ -456,7 +579,7 @@ export function Investigation() {
                     <span className="detail-value">{event.elf_rpath_detail.is_setuid ? 'Yes' : 'No'}</span>
                   </div>
 
-                  {event.elf_rpath_detail.entries.length > 0 && (
+                  {(event.elf_rpath_detail.entries || []).length > 0 && (
                     <div style={{ marginTop: '16px' }}>
                       <h4 style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px' }}>
                         Path Entries
@@ -472,7 +595,7 @@ export function Investigation() {
                           </tr>
                         </thead>
                         <tbody>
-                          {event.elf_rpath_detail.entries.map((entry, i) => (
+                          {(event.elf_rpath_detail.entries || []).map((entry, i) => (
                             <tr key={i}>
                               <td><span className="mono">{entry.path || '(empty)'}</span></td>
                               <td>

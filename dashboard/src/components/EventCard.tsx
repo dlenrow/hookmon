@@ -1,15 +1,17 @@
 import { useNavigate } from 'react-router-dom';
 import type { HookEvent, EventType } from '../api/types';
 import { SeverityBadge } from './SeverityBadge';
-import { formatTimestamp } from '../utils';
+import { AllowlistEventButton } from './AllowlistEventButton';
+import { formatTimestamp, bpfProgTypeName } from '../utils';
 
 interface EventCardProps {
   event: HookEvent;
 }
 
-const EVENT_TYPE_CLASS: Record<EventType, string> = {
+export const EVENT_TYPE_CLASS: Record<EventType, string> = {
   BPF_LOAD: 'badge-bpf',
   BPF_ATTACH: 'badge-bpf',
+  BPF_INVENTORY: 'badge-bpf',
   EXEC_INJECTION: 'badge-exec-injection',
   SHM_CREATE: 'badge-shm',
   DLOPEN: 'badge-dlopen',
@@ -21,20 +23,37 @@ const EVENT_TYPE_CLASS: Record<EventType, string> = {
   ELF_RPATH: 'badge-elf-rpath',
 };
 
-function eventSummary(event: HookEvent): string {
+function bpfSummary(event: HookEvent): string {
+  const d = event.bpf_detail;
+  if (!d) return `BPF ${event.event_type === 'BPF_ATTACH' ? 'attach' : 'load'}`;
+  const name = d.prog_name || '(unnamed)';
+  const tag = d.prog_hash ? ` tag ${d.prog_hash}` : '';
+  const target = d.attach_target ? ` → ${d.attach_target}` : '';
+  return `${bpfProgTypeName(d.prog_type)} ${name}${tag}${target}`;
+}
+
+export function eventSummary(event: HookEvent): string {
   switch (event.event_type) {
     case 'BPF_LOAD':
     case 'BPF_ATTACH':
-      return event.bpf_detail?.prog_name
-        ? `BPF program: ${event.bpf_detail.prog_name}`
-        : `BPF cmd=${event.bpf_detail?.bpf_cmd ?? 'unknown'}`;
-    case 'EXEC_INJECTION':
-      return event.exec_injection_detail?.library_path
-        ? `Library: ${event.exec_injection_detail.library_path}`
-        : 'Exec injection detected';
+      return bpfSummary(event);
+    case 'BPF_INVENTORY': {
+      const inv = event.bpf_inventory_detail;
+      if (inv?.summary) {
+        return `Inventory scan: ${inv.prog_count ?? 0} BPF programs loaded`;
+      }
+      return `Loaded: ${bpfSummary(event)}`;
+    }
+    case 'EXEC_INJECTION': {
+      const d = event.exec_injection_detail;
+      if (!d) return 'Exec injection detected';
+      if (d.scan_truncated) return 'Environment scan truncated: an LD_* variable may be unscanned';
+      const v = d.env_var || 'LD_*';
+      return `${v}=${d.library_path}${d.value_truncated ? '… (truncated)' : ''}`;
+    }
     case 'SHM_CREATE':
-      return event.shm_detail?.shm_name
-        ? `SHM: ${event.shm_detail.shm_name}`
+      return event.shm_detail
+        ? `SHM: ${event.shm_detail.shm_name} (${event.shm_detail.pattern || 'no pattern'})`
         : 'Shared memory created';
     case 'DLOPEN':
       return event.dlopen_detail?.library_path
@@ -46,7 +65,7 @@ function eventSummary(event: HookEvent): string {
         : 'Linker config modified';
     case 'PTRACE_INJECT':
       return event.ptrace_detail?.request_name
-        ? `${event.ptrace_detail.request_name} → PID ${event.ptrace_detail.target_pid}`
+        ? `${event.ptrace_detail.request_name} → PID ${event.ptrace_detail.target_pid}${event.ptrace_detail.target_comm ? ` (${event.ptrace_detail.target_comm})` : ''}`
         : 'Ptrace injection detected';
     case 'LIB_INTEGRITY':
       return event.lib_integrity_detail?.library_path
@@ -57,12 +76,17 @@ function eventSummary(event: HookEvent): string {
         ? `RPATH risk: ${event.elf_rpath_detail.highest_risk} in ${event.exe_path}`
         : 'Suspicious ELF RPATH detected';
     case 'AGENT_OFFLINE':
-      return 'Agent went offline';
+      return 'Sensor bus went offline';
     case 'AGENT_RECOVERED':
-      return 'Agent recovered';
+      return 'Sensor bus recovered';
     default:
       return event.event_type;
   }
+}
+
+function processLabel(event: HookEvent): string {
+  if (event.event_type === 'BPF_INVENTORY' || !event.pid) return '-';
+  return `${event.comm} (PID ${event.pid})`;
 }
 
 export function EventCard({ event }: EventCardProps) {
@@ -71,6 +95,8 @@ export function EventCard({ event }: EventCardProps) {
   return (
     <tr
       className="clickable-row"
+      data-testid="event-row"
+      data-event-id={event.id}
       onClick={() => navigate(`/events/${event.id}`)}
     >
       <td style={{ whiteSpace: 'nowrap' }}>
@@ -96,7 +122,7 @@ export function EventCard({ event }: EventCardProps) {
       </td>
       <td>
         <span className="mono" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-          {event.comm} (PID {event.pid})
+          {processLabel(event)}
         </span>
       </td>
       <td>
@@ -105,6 +131,9 @@ export function EventCard({ event }: EventCardProps) {
             {event.policy_result.action}
           </span>
         )}
+      </td>
+      <td onClick={(e) => e.stopPropagation()}>
+        {event.policy_result?.action !== 'ALLOW' && <AllowlistEventButton event={event} compact />}
       </td>
     </tr>
   );

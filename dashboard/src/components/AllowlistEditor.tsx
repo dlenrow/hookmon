@@ -5,11 +5,14 @@ interface AllowlistEditorProps {
   onSave: (entry: Partial<AllowlistEntry>) => void;
   onCancel: () => void;
   initial?: Partial<AllowlistEntry>;
+  /** Editing an existing entry: created_by is fixed, and a REJECTED entry keeps action ALERT. */
+  editing?: boolean;
 }
 
 const EVENT_TYPES: EventType[] = [
   'BPF_LOAD',
   'BPF_ATTACH',
+  'BPF_INVENTORY',
   'EXEC_INJECTION',
   'SHM_CREATE',
   'DLOPEN',
@@ -21,7 +24,7 @@ const EVENT_TYPES: EventType[] = [
 
 const ACTIONS: PolicyAction[] = ['ALLOW', 'ALERT', 'DENY'];
 
-export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorProps) {
+export function AllowlistEditor({ onSave, onCancel, initial, editing }: AllowlistEditorProps) {
   const [description, setDescription] = useState(initial?.description || '');
   const [eventTypes, setEventTypes] = useState<EventType[]>(initial?.event_types || []);
   const [exePath, setExePath] = useState(initial?.exe_path || '');
@@ -29,6 +32,11 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
   const [libraryPath, setLibraryPath] = useState(initial?.library_path || '');
   const [libraryHash, setLibraryHash] = useState(initial?.library_hash || '');
   const [progName, setProgName] = useState(initial?.prog_name || '');
+  const [progHash, setProgHash] = useState(initial?.prog_hash || '');
+  const [progType, setProgType] = useState(
+    initial?.prog_type !== undefined && initial?.prog_type !== null ? String(initial.prog_type) : ''
+  );
+  const [hostID, setHostID] = useState(initial?.host_id || '');
   const [hostPattern, setHostPattern] = useState(initial?.host_pattern || '');
   const [containerImage, setContainerImage] = useState(initial?.container_image || '');
   const [action, setAction] = useState<PolicyAction>(initial?.action || 'ALLOW');
@@ -52,6 +60,9 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
       library_path: libraryPath || '',
       library_hash: libraryHash || '',
       prog_name: progName || '',
+      prog_hash: progHash.trim(),
+      prog_type: progType.trim() === '' ? null : Number(progType),
+      host_id: hostID.trim(),
       host_pattern: hostPattern || '',
       container_image: containerImage || '',
       action,
@@ -147,6 +158,40 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
         </div>
 
         <div className="form-group">
+          <label className="form-label">BPF Program Tag</label>
+          <input
+            type="text"
+            className="form-input"
+            value={progHash}
+            onChange={(e) => setProgHash(e.target.value)}
+            placeholder="16 hex digits, as bpftool prog show prints"
+          />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">BPF Program Type (number)</label>
+          <input
+            type="number"
+            min={0}
+            className="form-input"
+            value={progType}
+            onChange={(e) => setProgType(e.target.value)}
+            placeholder="5 (TRACEPOINT); pin it with a tag"
+          />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Host ID (empty for the fleet)</label>
+          <input
+            type="text"
+            className="form-input"
+            value={hostID}
+            onChange={(e) => setHostID(e.target.value)}
+            placeholder="enrolled host ID"
+          />
+        </div>
+
+        <div className="form-group">
           <label className="form-label">Host Pattern (glob)</label>
           <input
             type="text"
@@ -176,9 +221,18 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
             value={createdBy}
             onChange={(e) => setCreatedBy(e.target.value)}
             placeholder="admin@company.com"
+            disabled={editing}
           />
         </div>
       </div>
+
+      {initial?.learned && (
+        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+          This entry also matches only events with its exact key ({initial.learned.key.event_type},{' '}
+          {initial.learned.key.subject_kind || 'binary'} {initial.learned.key.subject || ''}). The key cannot be
+          edited.
+        </p>
+      )}
 
       <div className="form-group">
         <label className="form-label">Allowed RPATHs (one glob pattern per line, for ELF_RPATH events)</label>
@@ -198,6 +252,8 @@ export function AllowlistEditor({ onSave, onCancel, initial }: AllowlistEditorPr
             className="form-select"
             value={action}
             onChange={(e) => setAction(e.target.value as PolicyAction)}
+            disabled={editing && initial?.status === 'REJECTED'}
+            title={editing && initial?.status === 'REJECTED' ? 'A REJECTED entry keeps alerting' : undefined}
           >
             {ACTIONS.map((a) => (
               <option key={a} value={a}>

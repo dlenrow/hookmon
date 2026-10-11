@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -84,8 +83,7 @@ func (s *Server) handleStartHostLearning(w http.ResponseWriter, r *http.Request)
 // the fleet (hostID empty) or one host.
 func (s *Server) startLearning(w http.ResponseWriter, r *http.Request, hostID string) {
 	var req learningRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, `invalid request body: want {"duration": "7d"} or {"ends_at": "<RFC 3339 time>"}`)
+	if !decodeBody(w, r, &req, true, `invalid request body: want {"duration": "7d"} or {"ends_at": "<RFC 3339 time>"}`) {
 		return
 	}
 	now := time.Now().UTC()

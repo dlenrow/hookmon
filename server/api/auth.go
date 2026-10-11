@@ -35,8 +35,7 @@ func (a *AuthMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if !a.validateToken(token) {
+		if !a.validateToken(bearerToken(auth)) {
 			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
 			return
 		}
@@ -45,6 +44,13 @@ func (a *AuthMiddleware) Handler(next http.Handler) http.Handler {
 	})
 }
 
+// bearerToken returns the token in an Authorization header value.
+func bearerToken(header string) string {
+	return strings.TrimPrefix(header, "Bearer ")
+}
+
+// validateToken reports whether token is one of the API tokens. REST and
+// the WebSocket both use it.
 func (a *AuthMiddleware) validateToken(token string) bool {
 	for t := range a.tokens {
 		if subtle.ConstantTimeCompare([]byte(token), []byte(t)) == 1 {

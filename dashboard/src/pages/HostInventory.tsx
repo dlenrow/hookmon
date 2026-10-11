@@ -1,8 +1,67 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { Host } from '../api/types';
+import type { Host, SensorHealth } from '../api/types';
 import { getHosts } from '../api/client';
 import { HostStatus } from '../components/HostStatus';
 import { formatRelativeTime, formatTimestamp } from '../utils';
+
+/** Colors for the sensor registry's states. */
+const SENSOR_COLOR: Record<string, string> = {
+  alive: 'var(--status-online)',
+  unverifiable: 'var(--status-unresponsive)',
+  dead: 'var(--status-offline)',
+  failed: 'var(--status-offline)',
+};
+
+/**
+ * Per-sensor health from the host's latest heartbeat: the bus's sensor
+ * registry snapshot.
+ */
+function SensorHealthList({ sensors }: { sensors?: SensorHealth[] }) {
+  if (!sensors || sensors.length === 0) {
+    return (
+      <div style={{ marginTop: '16px', fontSize: '12px', color: 'var(--text-muted)' }}>
+        No sensor report yet (none in the latest heartbeat).
+      </div>
+    );
+  }
+  const alive = sensors.filter((s) => s.status === 'alive').length;
+  return (
+    <div style={{ marginTop: '16px' }} data-testid="sensor-health">
+      <div className="detail-label" style={{ marginBottom: '8px' }}>
+        Sensors: {alive} of {sensors.length} alive
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px' }}>
+        {sensors.map((s) => (
+          <div
+            key={s.name}
+            data-testid="sensor"
+            data-status={s.status}
+            title={s.reason || s.status}
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', minWidth: 0 }}
+          >
+            <span
+              className="status-dot"
+              style={{ backgroundColor: SENSOR_COLOR[s.status] || 'var(--text-muted)', flex: 'none' }}
+            />
+            <span className="mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {s.name}
+            </span>
+            {s.status !== 'alive' && (
+              <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{s.status}</span>
+            )}
+          </div>
+        ))}
+      </div>
+      {sensors
+        .filter((s) => s.status !== 'alive' && s.reason)
+        .map((s) => (
+          <div key={s.name} style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+            {s.name}: {s.reason}
+          </div>
+        ))}
+    </div>
+  );
+}
 
 export function HostInventory() {
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -64,12 +123,12 @@ export function HostInventory() {
         ) : hosts.length === 0 ? (
           <div className="empty-state">
             <h3>No hosts enrolled</h3>
-            <p>Deploy the hookmon-agent to monitored hosts to see them here.</p>
+            <p>Enroll a sensor bus (hookmon-bus --enroll-token; see Settings) to see hosts here.</p>
           </div>
         ) : (
           <div className="host-grid">
             {sortedHosts.map((host) => (
-              <div key={host.id} className="card">
+              <div key={host.id} className="card" data-testid="host-card" data-host-id={host.id}>
                 <div className="card-body">
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
                     <div>
@@ -84,7 +143,7 @@ export function HostInventory() {
                   </div>
 
                   <div className="detail-grid" style={{ gridTemplateColumns: '120px 1fr', gap: '6px 12px' }}>
-                    <span className="detail-label">Agent</span>
+                    <span className="detail-label">Bus version</span>
                     <span className="detail-value mono">{host.agent_version || '-'}</span>
 
                     <span className="detail-label">OS</span>
@@ -107,6 +166,8 @@ export function HostInventory() {
                       {host.last_event_at ? formatRelativeTime(host.last_event_at) : 'None'}
                     </span>
                   </div>
+
+                  <SensorHealthList sensors={host.sensors} />
                 </div>
               </div>
             ))}

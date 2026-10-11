@@ -248,7 +248,7 @@ The dashboard (`deploy/docker/grafana/dashboards/hookmon.json`, uid `hookmon-mai
 - **Enrollment** (`server/ingestion/enroll.go`) on `--enroll-addr` (default `:9444`); see [Enrollment](#enrollment).
 - **Policy** (`server/policy`): matches events against the allowlist, sets severity, and in learning mode records unmatched events as PENDING entries; see [Policy and Learning Mode](#policy-and-learning-mode).
 - **Store** (`server/store`): PostgreSQL (`database.url` or `--db`), with `events`, `allowlist`, `learning_mode`, `hosts`, `enrollment_token_uses` and `audit_log` tables. Migrations are in `server/store/migrations/` and run at every start. PID, PPID, UID, GID and BPF program type are stored as BIGINT, so the bus's "unknown" UID (4294967295) is stored like any other.
-- **REST API, WebSocket and dashboard** (`server/api`) on `--http-addr` (default `:8443`), over HTTPS with the server certificate (TLS 1.2 or newer). Events, policies, hosts and health are under `/api/v1/`, and a live event feed is at `/api/v1/ws/events`. API tokens come from `api.tokens` or `--api-tokens`; `/api/v1/health` needs none. Paths outside `/api` serve the dashboard (see [Dashboard](#dashboard)). The API reference is written after fix plan step 7.
+- **REST API, WebSocket and dashboard** (`server/api`) on `--http-addr` (default `:8443`), over HTTPS with the server certificate (TLS 1.2 or newer). Events, policies, hosts, settings and health are under `/api/v1/`, and a live event feed is at `/api/v1/ws/events` (see [Live Event Feed](#live-event-feed)). API tokens come from `api.tokens` or `--api-tokens`; `/api/v1/health` needs none. List endpoints answer `[]`, never `null`, when empty. Every write takes a JSON body of at most 64 KiB (413 above that) and refuses unknown fields. Paths outside `/api` serve the dashboard (see [Dashboard](#dashboard)). The API reference is written after fix plan step 7.
 - **Connectors** (`server/connectors`): Syslog/CEF, Splunk HEC, Elasticsearch, webhook and Kafka, configured under `connectors:`. Each has its own queue and worker; see [SIEM Connectors](#siem-connectors).
 - **Watchdog**: every `watchdog.check_interval` (default 15 s) it marks an ONLINE host UNRESPONSIVE once it has gone `watchdog.heartbeat_timeout` (default 60 s) without a heartbeat, stores an AGENT_OFFLINE event (CRITICAL), and sends it to every connector. The next heartbeat sets the host ONLINE again. No AGENT_RECOVERED event is sent.
 
@@ -268,9 +268,8 @@ Not working yet:
 
 | Gap | Fix plan step |
 |-----|---------------|
-| The WebSocket accepts any non-empty token and any Origin, and one shared channel splits events across open clients. | 7e |
 | No gRPC recovery interceptor. The rate limiter's table of hosts is never trimmed. | 7f |
-| Only `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` (step 7d) covers this path end to end, and it skips without `HOOKMON_TEST_PG_DSN` and `HOOKMON_SERVER_BIN`. No test covers the WebSocket. | 7h |
+| Only `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` (step 7d) covers this path end to end with a root bus, and it skips without `HOOKMON_TEST_PG_DSN` and `HOOKMON_SERVER_BIN`. The WebSocket is covered by `TestIntegration_WebSocketFanOut` (in-process server, test bus) and the dashboard's Playwright smoke test, not by an e2e test from a BPF canary. | 7h |
 
 ### Policy and Learning Mode
 
@@ -291,7 +290,9 @@ Each PENDING entry has an occurrence count, first and last seen times, and the I
 
 A PENDING entry matches nothing. Approving it for the fleet makes it APPROVED with action ALLOW; rejecting it makes it REJECTED with action ALERT, so the event keeps alerting and is not proposed again. Approving or rejecting for one host creates a separate entry for that host and takes the host off the PENDING entry, which is deleted when no host is left. A learned entry matches exactly its key: an empty executable hash or "not in a container" is not a wildcard.
 
-REST endpoints (all need an API token): `GET /api/v1/policies` (entries in force; `?status=PENDING`, `REJECTED`, `APPROVED` or `ALL`), `POST /api/v1/policies`, `DELETE /api/v1/policies/{id}`, `POST /api/v1/policies/{id}/approve` and `/reject` with `{"scope": "fleet"}` or `{"scope": "host", "host_id": "..."}`, `GET /api/v1/learning`, and `PUT` / `DELETE` on `/api/v1/learning/fleet` and `/api/v1/learning/hosts/{host_id}`, where PUT takes `{"duration": "7d"}` or `{"ends_at": "<RFC 3339>"}`.
+REST endpoints (all need an API token): `GET /api/v1/policies` (entries in force; `?status=PENDING`, `REJECTED`, `APPROVED` or `ALL`), `POST /api/v1/policies`, `PUT /api/v1/policies/{id}` (replaces the criteria, action, expiry, description and `enabled`; `id`, `created_at`, `created_by` and `learned` are kept, and `status` cannot change), `PATCH /api/v1/policies/{id}` (sets only the fields given, such as `{"enabled": false}`; `null` clears one), `DELETE /api/v1/policies/{id}`, `POST /api/v1/policies/{id}/approve` and `/reject` with `{"scope": "fleet"}` or `{"scope": "host", "host_id": "..."}`, `POST /api/v1/events/{id}/allowlist` with `{"scope": "fleet"}` or `{"scope": "host"}`, `GET /api/v1/learning`, and `PUT` / `DELETE` on `/api/v1/learning/fleet` and `/api/v1/learning/hosts/{host_id}`, where PUT takes `{"duration": "7d"}` or `{"ends_at": "<RFC 3339>"}`.
+
+Writes check `action` (ALLOW, ALERT or DENY; anything else, or none, is a 400) and the hash formats. A PENDING entry cannot be edited (409): it is approved or rejected. A REJECTED entry keeps action ALERT. `POST /api/v1/events/{id}/allowlist` is "Allowlist this event": it creates an APPROVED ALLOW entry whose `learned.key` is the event's key from the table above, for the fleet or for the event's host, so it matches exactly the events learning mode would have grouped with it. Field criteria cannot express some subjects (a shared memory pattern, a linker config file), and an empty executable hash would match any binary, so the key is the criterion. It answers 409 with the existing entry's ID if an ALLOW entry for that key and scope is already in force, and 400 for AGENT_OFFLINE and AGENT_RECOVERED.
 
 **Severity.** The bus rates each event with context the server lacks (a package manager wrote the file, the shared memory name, who can write an RPATH directory). The server keeps that rating and adds the allowlist and two escalations: an unmatched event from root is CRITICAL, and a WARN event from a binary the bus could not hash is ALERT. Neither escalation applies to an event the bus rated INFO or to ELF_RPATH. The full table is in `CLAUDE.md` ("Severity Classification") and [theory-of-operations.md](theory-of-operations.md#severity).
 
@@ -352,11 +353,30 @@ Later starts use the stored identity and ignore `--enroll-token`. A certificate 
 
 ## Dashboard
 
-`dashboard/` is a React and TypeScript app built with Vite (`make build-dashboard` writes `dashboard/dist`). It has five pages: Event Feed, Policy Manager, Host Inventory, Investigation and Settings. It talks to the server's REST API and WebSocket with relative URLs (`/api/v1`), using `wss:` when the page is loaded over HTTPS. The API token is entered on the Settings page and kept in the browser's local storage.
+`dashboard/` is a React and TypeScript app built with Vite (`make build-dashboard` writes `dashboard/dist`). It talks to the server's REST API and WebSocket with relative URLs (`/api/v1`), using `wss:` when the page is loaded over HTTPS. The API token is entered on the Settings page and kept in the browser's local storage. Pages:
+
+| Page | What it shows and does |
+|------|------------------------|
+| Event Feed (`/events`) | Recent events from REST plus live ones from the WebSocket, with filters. Each event that is not ALLOWed has an "Allowlist" button. Every event type renders, BPF_INVENTORY included, with the BPF program tag and attach target, a truncated environment scan or value, the shared memory pattern, and each ptrace request. History reloads whenever the feed reconnects, to cover the gap |
+| Investigation (`/events/{id}`) | One event in full, with the same "Allowlist this event" action, and the host's recent events |
+| Host Inventory (`/hosts`) | Each host's status, heartbeat, and the health of each sensor from its latest heartbeat (alive, dead, failed, unverifiable or unknown, with the registry's reason) |
+| Policy Manager (`/policies`) | Entries in force, with scope, status and what each matches. Create, edit (PUT), enable or disable (PATCH) and delete |
+| Pending Approval (`/pending`) | Learning-mode candidates with counts, first and last seen and hosts; approve or reject each for the fleet or one of the hosts that saw it. Shows whether learning mode is on |
+| Settings (`/settings`) | The API token; the enrollment command built from the server's bound ports (`--enroll-token`, `--server-addr`, `--enroll-addr`, `--ca-file`, `--state-dir`) and the enrollment tokens by name and expiry; the listener addresses; connector counts (sent, failed, dropped, queued) and the live feed's clients. Read from `GET /api/v1/settings`, which never returns a token secret, a connector URL or a credential |
 
 `hookmon-server` serves the built files from `dashboard_dir` (`--dashboard-dir`, default `/usr/share/hookmon/dashboard`) on the same HTTPS listener as the API. A request for a file in that directory gets the file. Any other path outside `/api` gets `index.html`, so the dashboard's own routes (such as `/hosts`) load directly. An unknown `/api` path gets a JSON 404, never `index.html`. If the directory has no `index.html`, the server logs a warning and serves the API only; an empty `dashboard_dir` turns the dashboard off. `deploy/docker/Dockerfile.server` copies the build to `/usr/share/hookmon/dashboard`.
 
-Not working yet: the Vite dev server's `/api` proxy lacks `ws: true`, so the live feed does not work under `npm run dev`. The Settings page shows an enrollment command that does not exist. There is no PENDING-approval page (the API above serves what it needs) and no per-sensor health on Host Inventory. (step 7e)
+**Development.** `npm run dev` serves the dashboard on `http://localhost:5173` and proxies `/api`, WebSocket included (`ws: true`), to `HOOKMON_API_URL` (default `https://localhost:8443`). With `HOOKMON_CA_FILE` the proxy verifies the server certificate; without it, it does not. The proxy passes the browser's Origin through, so add `http://localhost:5173` to `api.allowed_origins` for the live feed.
+
+**Smoke test.** `dashboard/e2e/smoke.spec.ts` (Playwright, `npm run test:e2e`) runs against a running, seeded server: it opens all six pages and checks each shows what the API holds, allowlists an event from Investigation (and deletes the entry again), toggles a policy off and on, and checks that two tabs receive the same live events in the same order. It needs `HOOKMON_E2E_URL`, `HOOKMON_E2E_CA` and `HOOKMON_E2E_TOKEN`, and skips without them. Node verifies the server certificate against the CA; the browser then trusts only that certificate's key.
+
+### Live Event Feed
+
+`GET /api/v1/ws/events` upgrades to a WebSocket that sends every event the server stores, as JSON text messages, from the moment the handshake completes.
+
+- **Token.** The same API tokens and the same check as REST. A browser cannot set an Authorization header on a WebSocket, and a token in the URL is written to access and proxy logs, so the dashboard offers two subprotocols: `hookmon.v1` and `hookmon.bearer.<token as unpadded base64url>`. The server selects `hookmon.v1`, so the token is never echoed back. Clients that can set headers send `Authorization: Bearer <token>` instead. A `?token=` in the URL is refused. A missing or wrong token gets 401 before the upgrade.
+- **Origin.** A browser always sends Origin. The handshake is refused with 403 unless the Origin's host is the host the request was sent to (the server's own origin) or the origin is listed in `api.allowed_origins` (`scheme://host[:port]`). `null` is refused. A handshake with no Origin is not from a browser and is allowed; it still needs the token.
+- **Fan-out.** A hub gives every client its own buffer of 256 events. Every client gets every event, in order. Ingestion never waits for a client: when a client's buffer is full the hub drops it, and the server closes it with code 1013 (try again later). The dashboard then reconnects and reloads recent events over REST. `GET /api/v1/settings` reports the number of clients, the events sent and the clients dropped.
 
 ## Directory Structure
 

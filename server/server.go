@@ -174,6 +174,16 @@ func (s *Server) Run(ctx context.Context) error {
 		Insecure:     !useTLS,
 	})
 
+	// REST API, WebSocket and dashboard. The hub fans every processed event
+	// out to each WebSocket client; it starts with the listeners below.
+	hub := api.NewHub(api.DefaultSubscriberBuffer)
+	apiSrv := api.NewServer(s.store, s.logger, hub)
+	apiSrv.SetPolicyReloader(s.policy)
+	if err := apiSrv.SetAllowedOrigins(s.cfg.API.AllowedOrigins); err != nil {
+		return fmt.Errorf("config: api.allowed_origins: %w", err)
+	}
+	apiSrv.SetSettingsSource(s.settings)
+
 	// gRPC servers. The event stream needs a verified client certificate at
 	// the TLS handshake. Enrollment has its own listener, where the server
 	// authenticates itself but the bus, which has no certificate yet, does
@@ -270,8 +280,12 @@ func (s *Server) Run(ctx context.Context) error {
 	if dashboard != nil {
 		dashHandler = dashboard
 	}
-	apiSrv := api.NewServer(s.store, s.logger, s.ingestion.GetEventChannel())
-	apiSrv.SetPolicyReloader(s.policy)
+	// The hub fans every processed event out to each WebSocket client.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hub.Run(ctx, s.ingestion.GetEventChannel())
+	}()
 	s.httpServer = &http.Server{Handler: apiSrv.Router(s.cfg.API.Tokens, dashHandler)}
 	wg.Add(1)
 	go func() {

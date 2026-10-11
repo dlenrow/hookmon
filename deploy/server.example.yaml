@@ -56,8 +56,12 @@ database:
   url: "postgres://hookmon:CHANGE-ME@localhost:5432/hookmon?sslmode=disable"
 
 api:
-  # Bearer tokens for the REST API.
+  # Bearer tokens for the REST API and the WebSocket event feed.
   tokens: []
+  # Browser origins (scheme://host[:port]), besides the server's own, whose
+  # pages may open the WebSocket event feed. Leave it empty when the
+  # dashboard is served by this server.
+  allowed_origins: []
 
 enrollment:
   # Lifetime of the client certificates the server issues.

@@ -22,7 +22,12 @@ type Store interface {
 	// QueryAllowlist returns the entries with any of the statuses, or every
 	// entry when none is given.
 	QueryAllowlist(ctx context.Context, statuses ...event.EntryStatus) ([]*event.AllowlistEntry, error)
+	// GetAllowlistEntry returns one entry by ID.
+	GetAllowlistEntry(ctx context.Context, id string) (*event.AllowlistEntry, error)
 	CreateAllowlistEntry(ctx context.Context, entry *event.AllowlistEntry) error
+	// UpdateAllowlistEntry writes an entry's editable fields;
+	// store.ErrPending if the entry is a PENDING candidate.
+	UpdateAllowlistEntry(ctx context.Context, entry *event.AllowlistEntry) error
 	// DeleteAllowlistEntry and the calls below return store.ErrNotFound
 	// (wrapped) for a missing row.
 	DeleteAllowlistEntry(ctx context.Context, id string) error
@@ -69,6 +74,9 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("query events failed", zap.Error(err))
 		return
 	}
+	if events == nil {
+		events = []*event.HookEvent{}
+	}
 
 	writeJSON(w, http.StatusOK, events)
 }
@@ -97,5 +105,7 @@ func intParam(s string, defaultVal int) int {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false) // error messages show <placeholders> as written
+	enc.Encode(v)
 }

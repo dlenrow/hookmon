@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/dlenrow/hookmon/pkg/event"
 )
 
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
@@ -11,6 +13,9 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 		return
+	}
+	if hosts == nil {
+		hosts = []*event.Host{}
 	}
 	writeJSON(w, http.StatusOK, hosts)
 }

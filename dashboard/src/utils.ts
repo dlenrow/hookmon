@@ -123,26 +123,53 @@ export function bpfProgTypeName(progType: number): string {
 }
 
 /**
- * Map BPF command number to a human-readable name.
+ * Map a BPF command number to its name. The bpf_syscall sensor reports
+ * only these commands. BPF_INVENTORY events carry 0, which there means no
+ * syscall (the program was found by an inventory scan), not MAP_CREATE.
  */
 export function bpfCmdName(cmd: number): string {
   const names: Record<number, string> = {
-    0: 'MAP_CREATE',
-    1: 'MAP_LOOKUP_ELEM',
-    2: 'MAP_UPDATE_ELEM',
-    3: 'MAP_DELETE_ELEM',
-    4: 'MAP_GET_NEXT_KEY',
-    5: 'PROG_LOAD',
-    6: 'OBJ_PIN',
-    7: 'OBJ_GET',
-    8: 'PROG_ATTACH',
-    9: 'PROG_DETACH',
-    10: 'PROG_TEST_RUN',
-    11: 'PROG_GET_NEXT_ID',
-    12: 'MAP_GET_NEXT_ID',
-    13: 'PROG_GET_FD_BY_ID',
-    14: 'MAP_GET_FD_BY_ID',
-    15: 'OBJ_GET_INFO_BY_FD',
+    5: 'BPF_PROG_LOAD',
+    8: 'BPF_PROG_ATTACH',
+    17: 'BPF_RAW_TRACEPOINT_OPEN',
+    28: 'BPF_LINK_CREATE',
   };
   return names[cmd] || `CMD_${cmd}`;
+}
+
+/**
+ * What a ptrace request does to the tracee. The ptrace sensor reports
+ * attaching and writing memory or registers.
+ */
+export function ptraceRequestDescription(name: string): string {
+  const desc: Record<string, string> = {
+    PTRACE_ATTACH: 'attach to a running process',
+    PTRACE_SEIZE: 'attach to a running process without stopping it',
+    PTRACE_POKETEXT: "write to the tracee's code",
+    PTRACE_POKEDATA: "write to the tracee's data",
+    PTRACE_POKEUSER: "write to the tracee's USER area (registers)",
+    PTRACE_SETREGS: "overwrite the tracee's registers",
+    PTRACE_SETREGSET: 'overwrite a tracee register set',
+  };
+  return desc[name] || '';
+}
+
+/**
+ * What the shm sensor's pattern for a /dev/shm name means.
+ */
+export function shmPatternDescription(pattern: string): string {
+  const desc: Record<string, string> = {
+    bpftime: 'bpftime userspace eBPF runtime',
+    bpf_related: 'name mentions bpf, ebpf or libbpf',
+    unknown: 'no known pattern',
+  };
+  return desc[pattern] || '';
+}
+
+/**
+ * The port of a "host:port" listener address ("[::]:9443" gives "9443").
+ */
+export function addrPort(addr: string): string {
+  const i = addr.lastIndexOf(':');
+  return i >= 0 ? addr.slice(i + 1) : '';
 }

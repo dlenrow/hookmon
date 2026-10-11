@@ -1,8 +1,12 @@
 import type {
   HookEvent,
   AllowlistEntry,
+  EntryStatus,
   Host,
   EventQueryParams,
+  LearningState,
+  Scope,
+  ServerSettings,
 } from './types';
 
 const API_BASE = '/api/v1';
@@ -106,6 +110,22 @@ export async function getEvent(id: string): Promise<HookEvent> {
   return apiFetch<HookEvent>(`/events/${encodeURIComponent(id)}`);
 }
 
+/**
+ * Create an ALLOW entry that matches exactly the events with this event's
+ * learning-mode key (event type, binary hash, subject such as the BPF tag,
+ * container context), for the fleet or for the event's host.
+ */
+export async function allowlistEvent(
+  id: string,
+  scope: 'fleet' | 'host',
+  description?: string
+): Promise<AllowlistEntry> {
+  return apiFetch<AllowlistEntry>(`/events/${encodeURIComponent(id)}/allowlist`, {
+    method: 'POST',
+    body: JSON.stringify(description ? { scope, description } : { scope }),
+  });
+}
+
 // --- Hosts ---
 
 /**
@@ -125,10 +145,12 @@ export async function getHost(id: string): Promise<Host> {
 // --- Policies ---
 
 /**
- * List all allowlist/policy entries.
+ * List allowlist entries: by default those in force (APPROVED and
+ * REJECTED), or those with the given statuses.
  */
-export async function getPolicies(): Promise<AllowlistEntry[]> {
-  return apiFetch<AllowlistEntry[]>('/policies');
+export async function getPolicies(...statuses: EntryStatus[]): Promise<AllowlistEntry[]> {
+  const qs = statuses.length ? `?status=${statuses.join(',')}` : '';
+  return apiFetch<AllowlistEntry[]>(`/policies${qs}`);
 }
 
 /**
@@ -142,6 +164,26 @@ export async function createPolicy(entry: Partial<AllowlistEntry>): Promise<Allo
 }
 
 /**
+ * Replace an entry's criteria, action, expiry, description and enabled flag.
+ */
+export async function updatePolicy(id: string, entry: Partial<AllowlistEntry>): Promise<AllowlistEntry> {
+  return apiFetch<AllowlistEntry>(`/policies/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(entry),
+  });
+}
+
+/**
+ * Change some of an entry's editable fields, such as { enabled: false }.
+ */
+export async function patchPolicy(id: string, patch: Partial<AllowlistEntry>): Promise<AllowlistEntry> {
+  return apiFetch<AllowlistEntry>(`/policies/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+/**
  * Delete an allowlist entry by ID.
  */
 export async function deletePolicy(id: string): Promise<void> {
@@ -150,38 +192,97 @@ export async function deletePolicy(id: string): Promise<void> {
   });
 }
 
+/**
+ * Approve (ALLOW) or reject (keep alerting) a PENDING learning-mode entry,
+ * for the fleet or for one host.
+ */
+export async function decidePolicy(
+  id: string,
+  decision: 'approve' | 'reject',
+  scope: Scope
+): Promise<AllowlistEntry> {
+  return apiFetch<AllowlistEntry>(`/policies/${encodeURIComponent(id)}/${decision}`, {
+    method: 'POST',
+    body: JSON.stringify(scope),
+  });
+}
+
+// --- Learning mode ---
+
+export async function getLearning(): Promise<LearningState> {
+  return apiFetch<LearningState>('/learning');
+}
+
+// --- Settings ---
+
+export async function getSettings(): Promise<ServerSettings> {
+  return apiFetch<ServerSettings>('/settings');
+}
+
 // --- WebSocket ---
 
+/** The subprotocol of the live event feed. */
+export const WS_PROTOCOL = 'hookmon.v1';
+/**
+ * A browser cannot set an Authorization header on a WebSocket, and a token
+ * in the URL ends up in logs, so the token travels as a second offered
+ * subprotocol: this prefix plus the token as unpadded base64url.
+ */
+const WS_TOKEN_PREFIX = 'hookmon.bearer.';
+
+function base64url(s: string): string {
+  let bin = '';
+  for (const b of new TextEncoder().encode(s)) {
+    bin += String.fromCharCode(b);
+  }
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** live: connected; reconnecting: waiting to retry; no-token: no API token set. */
+export type WebSocketState = 'live' | 'reconnecting' | 'no-token';
+
 export type WebSocketEventHandler = (event: HookEvent) => void;
-export type WebSocketStatusHandler = (connected: boolean) => void;
+export type WebSocketStateHandler = (state: WebSocketState) => void;
 
 interface WebSocketConnection {
   close: () => void;
 }
 
+/** Close code the server uses for a client that fell behind the feed. */
+const CLOSE_TRY_AGAIN_LATER = 1013;
+
 /**
- * Connect to the real-time event WebSocket stream.
+ * Connect to the real-time event WebSocket stream. It reconnects with
+ * backoff; each time the state becomes 'live' the feed restarts, so callers
+ * reload recent events over REST to cover any gap.
  * Returns an object with a close() method to disconnect.
  */
 export function connectWebSocket(
   onEvent: WebSocketEventHandler,
-  onStatus?: WebSocketStatusHandler
+  onState?: WebSocketStateHandler
 ): WebSocketConnection {
   const token = getToken();
+  if (!token) {
+    onState?.('no-token');
+    return { close() {} };
+  }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}${API_BASE}/ws/events?token=${encodeURIComponent(token)}`;
+  const wsUrl = `${protocol}//${window.location.host}${API_BASE}/ws/events`;
+  const protocols = [WS_PROTOCOL, WS_TOKEN_PREFIX + base64url(token)];
 
   let ws: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
+  let delay = 1000;
 
   function connect() {
     if (closed) return;
 
-    ws = new WebSocket(wsUrl);
+    ws = new WebSocket(wsUrl, protocols);
 
     ws.onopen = () => {
-      onStatus?.(true);
+      delay = 1000;
+      onState?.('live');
     };
 
     ws.onmessage = (msg) => {
@@ -193,12 +294,14 @@ export function connectWebSocket(
       }
     };
 
-    ws.onclose = () => {
-      onStatus?.(false);
-      if (!closed) {
-        // Reconnect after 3 seconds
-        reconnectTimer = setTimeout(connect, 3000);
-      }
+    ws.onclose = (ev) => {
+      if (closed) return;
+      onState?.('reconnecting');
+      // A client dropped for falling behind may retry at once; otherwise
+      // back off up to 30 s (a wrong token or origin keeps failing).
+      const wait = ev.code === CLOSE_TRY_AGAIN_LATER ? 1000 : delay;
+      delay = Math.min(delay * 2, 30000);
+      reconnectTimer = setTimeout(connect, wait);
     };
 
     ws.onerror = () => {
