@@ -23,7 +23,7 @@ All sensors are read-only. They observe and report, and cannot block or change a
 - Go 1.23 or newer to build the collector
 
 ### Sensor Bus Host
-- Linux with BTF (`/sys/kernel/btf/vmlinux`). The e2e suite has run on 5.19 (Ubuntu 22.10) and 6.17 (Ubuntu 24.04).
+- Linux with BTF (`/sys/kernel/btf/vmlinux`). The e2e suite has run on 5.19 (Ubuntu 22.10) and 6.17 (Ubuntu 24.04). The bus from the RPM has run with all eight sensors on 5.14 (Rocky Linux 9.8, SELinux enforcing).
   - 5.9 or newer is required: the file sensors need fanotify directory-entry events.
   - On kernels before 5.15 there are no perf-event link objects, so the health check skips the link and only asks the kernel which program the perf event has attached.
   - On kernels before 5.17, `exec_injection` scans fewer environment variables (512 reads instead of 8192).
@@ -532,7 +532,7 @@ make package-deb     # bin/hookmon-bus_<version>_<arch>.deb (needs dpkg-deb)
 make package-rpm     # bin/hookmon-bus-<version>-1.<arch>.rpm (needs rpmbuild)
 ```
 
-Each target builds the eBPF objects from the build host's kernel BTF, then the dlopen helper with `$(CC)`, then a static `hookmon-bus`, and packs them. Objects built on 5.19 have loaded unchanged on 6.17 (see [claims.md](claims.md)). To build the RPM on a host that has `rpmbuild` but no eBPF toolchain, copy `bin/hookmon-bus` and `bin/hookmon-dlopen-probe` from a build host and run `PREBUILT=1 scripts/build-agent.sh rpm`. The package version comes from `git describe`; `PKG_VERSION` overrides it.
+Each target builds the eBPF objects from the build host's kernel BTF, then the dlopen helper with `$(CC)`, then a static `hookmon-bus`, and packs them. Objects built on 5.19 have loaded unchanged on 6.17 and on Rocky Linux 9.8's 5.14 (see [claims.md](claims.md)). To build the RPM on a host that has `rpmbuild` but no eBPF toolchain, copy `bin/hookmon-bus` and `bin/hookmon-dlopen-probe` from a build host (build the bus with `CGO_ENABLED=0 make build-bus`, so it is static like the packaged one; plain `make build-bus` links it dynamically) and run `PREBUILT=1 scripts/build-agent.sh rpm`. The package version comes from `git describe`; `PKG_VERSION` overrides it.
 
 What the package installs:
 

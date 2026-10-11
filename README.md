@@ -202,7 +202,7 @@ Open `http://<appliance>:3000/d/hookmon-main/hookmon` in your browser.
 
 ### Install the Sensor Bus from a Package (Server Path)
 
-`make package-deb` or `make package-rpm` builds `hookmon-bus` for the build host's architecture. Its eBPF objects are compiled against that host's kernel BTF; objects built on 5.19 have loaded unchanged on 6.17 ([claims](docs/claims.md)). The package installs `hookmon-bus` and `hookmon-dlopen-probe` in `/usr/bin`, a hardened `hookmon-bus.service`, and `/etc/hookmon/bus.yaml`, which upgrades keep. The service is enabled but stays stopped until the host is configured: an enrollment token in `/etc/hookmon/enroll-token`, or a certificate from an earlier enrollment in `/var/lib/hookmon`.
+`make package-deb` or `make package-rpm` builds `hookmon-bus` for the build host's architecture. Its eBPF objects are compiled against that host's kernel BTF; objects built on 5.19 have loaded unchanged on 6.17 and on Rocky Linux 9.8's 5.14 ([claims](docs/claims.md)). The package installs `hookmon-bus` and `hookmon-dlopen-probe` in `/usr/bin`, a hardened `hookmon-bus.service`, and `/etc/hookmon/bus.yaml`, which upgrades keep. The service is enabled but stays stopped until the host is configured: an enrollment token in `/etc/hookmon/enroll-token`, or a certificate from an earlier enrollment in `/var/lib/hookmon`.
 
 ```bash
 sudo dpkg -i bin/hookmon-bus_<version>_amd64.deb      # or: sudo dnf install ./bin/hookmon-bus-<version>-1.el9.x86_64.rpm
