@@ -295,7 +295,7 @@ The allowlist does not need to be written by hand from documentation or vendor l
 3. The server keeps one PENDING allowlist entry per key, with its count, first and last time seen, and the hosts that saw it.
 4. Security operations reviews the entries and approves or rejects each one, for the fleet or for one host.
 
-When learning ends and monitoring starts, the allowlist records what the infrastructure actually does. An approved entry allows exactly the tuple that was seen, so a new binary version, a changed library or a new BPF program is new again. Descriptions are generated ("learned: BPF_LOAD by /usr/bin/foo: BPF tag …, prog type 8"); edit them, or disable an entry, in the dashboard's Policy Manager or with `PUT` / `PATCH /api/v1/policies/{id}`. The learned tuple itself cannot be edited. The allowlist guide (`docs/allowlist-guide.md`) will be written after step 7.
+When learning ends and monitoring starts, the allowlist records what the infrastructure actually does. An approved entry allows exactly the tuple that was seen, so a new binary version, a changed library or a new BPF program is new again. Descriptions are generated ("learned: BPF_LOAD by /usr/bin/foo: BPF tag …, prog type 8"); edit them, or disable an entry, in the dashboard's Policy Manager or with `PUT` / `PATCH /api/v1/policies/{id}`. The learned tuple itself cannot be edited. The [allowlist guide](allowlist-guide.md) covers learning, review and the pitfalls.
 
 ### Operational Consequences
 

@@ -317,8 +317,8 @@ hookmon/
 │   ├── theory-of-operations.md # Attack classes, allowlist model, tests
 │   ├── deployment-guide.md    # Observability stack, sensor bus, server path and enrollment
 │   ├── claims.md              # Claims ledger: what was tested, and how
-│   ├── api-reference.md       # REST API docs — written after step 7
-│   └── allowlist-guide.md     # How to build allowlists — written after step 7
+│   ├── api-reference.md       # REST API, WebSocket, event JSON, CLI equivalents
+│   └── allowlist-guide.md     # Matching, learning mode, review, severity, pitfalls
 │
 └── scripts/
     ├── generate.sh            # buf generate + make bpf

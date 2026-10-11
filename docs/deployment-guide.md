@@ -516,7 +516,7 @@ curl --cacert /etc/hookmon/tls/ca.crt -H "Authorization: Bearer <api-token>" \
 
 The host shows `ONLINE` with its sensors' health. If its heartbeats stop for `watchdog.heartbeat_timeout` (default 60 s), the server marks it `UNRESPONSIVE` and stores an AGENT_OFFLINE event. When the bus heartbeats again the host goes back to `ONLINE` and the server stores an AGENT_RECOVERED event. Both appear in the dashboard's live feed and go to every connector.
 
-`hookmon-cli` defaults to `https://localhost:8443`. Pass `--server https://hookmon.internal:8443 --token <api-token> --ca-file ca.crt`, or set `HOOKMON_CA_FILE`.
+`hookmon-cli` defaults to `https://localhost:8443`. Pass `--server https://hookmon.internal:8443 --token <api-token> --ca-file ca.crt`, or set `HOOKMON_CA_FILE`. Every REST endpoint and its CLI equivalent is in [api-reference.md](api-reference.md).
 
 ### Install the Sensor Bus from a Package
 
@@ -622,7 +622,7 @@ hookmon-cli $FLAGS policies reject <entry-id> --fleet       # keeps alerting; no
 hookmon-cli $FLAGS learning stop --fleet                    # end early; PENDING entries stay
 ```
 
-An approved entry allows exactly the tuple it was learned from. A change through the API applies to the next event. To apply changes made directly in the database, send the server `SIGHUP` (`sudo kill -HUP $(pidof hookmon-server)`); it rereads the allowlist and learning windows, not the config file.
+An approved entry allows exactly the tuple it was learned from. [allowlist-guide.md](allowlist-guide.md) covers matching, review, scopes, severity and the pitfalls. A change through the API applies to the next event. To apply changes made directly in the database, send the server `SIGHUP` (`sudo kill -HUP $(pidof hookmon-server)`); it rereads the allowlist and learning windows, not the config file.
 
 ### Configure SIEM Connectors
 

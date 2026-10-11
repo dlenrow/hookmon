@@ -230,7 +230,7 @@ The Ansible role `deploy/ansible/roles/hookmon-agent` does the same on many host
 - **Monitoring mode.** The steady state. Unmatched events raise alerts. Nothing is blocked.
 - **Enforcement mode: does not exist.** No code blocks anything, and the fix plan does not add it.
 
-The allowlist guide (`docs/allowlist-guide.md`) and the API reference (`docs/api-reference.md`) will be written after step 7.
+The [allowlist guide](docs/allowlist-guide.md) covers matching, learning mode, review and severity in detail. The [API reference](docs/api-reference.md) lists every endpoint.
 
 ## SIEM Integration
 
@@ -267,7 +267,8 @@ HookMon monitors the monitors. It provides an authorization and inventory layer 
 - [Threat Model](docs/threat-model.md): every way code enters a Linux process, and which sensor covers it
 - [Claims Ledger](docs/claims.md): what has been tested, and how
 - [Security Policy](SECURITY.md): trust boundaries and known limitations
-- API reference and allowlist guide: written after fix plan step 7
+- [API Reference](docs/api-reference.md): every REST endpoint, the WebSocket feed, the event JSON and the CLI equivalents
+- [Allowlist Guide](docs/allowlist-guide.md): matching, learning mode, review and approval, severity, pitfalls
 
 ## Building from Source
 
