@@ -248,7 +248,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		// Start Go-side heartbeat tickers for fanotify and audit sensors
 		if s.Type() == sensors.SensorTypeFanotify || s.Type() == sensors.SensorTypeAudit {
 			a.wg.Add(1)
-			go a.sensorHeartbeatTicker(ctx, s.Name())
+			go a.sensorHeartbeatTicker(ctx, s)
 		}
 	}
 	if a.metrics != nil {
@@ -355,7 +355,7 @@ func (a *Agent) sendEvent(evt *event.HookEvent) {
 }
 
 // sensorHeartbeatTicker periodically beats the registry for Go-side sensors.
-func (a *Agent) sensorHeartbeatTicker(ctx context.Context, name string) {
+func (a *Agent) sensorHeartbeatTicker(ctx context.Context, s sensors.Sensor) {
 	defer a.wg.Done()
 	ticker := time.NewTicker(sensorInterval(a.cfg))
 	defer ticker.Stop()
@@ -365,9 +365,21 @@ func (a *Agent) sensorHeartbeatTicker(ctx context.Context, name string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.registry.Beat(name)
+			a.beatGoSensor(s)
 		}
 	}
+}
+
+// beatGoSensor beats a Go-side sensor's heartbeat, unless the sensor
+// reports that it is not seeing events (its fanotify reads keep failing).
+func (a *Agent) beatGoSensor(s sensors.Sensor) {
+	if h, ok := s.(interface{ Healthy() error }); ok {
+		if err := h.Healthy(); err != nil {
+			a.registry.Miss(s.Name(), err.Error())
+			return
+		}
+	}
+	a.registry.Beat(s.Name())
 }
 
 // healthLoop runs a probe/read/evaluate cycle at start and then once per

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -54,7 +53,13 @@ type fanWatcher struct {
 	mu       sync.Mutex
 	dirs     map[string]string // handle key -> path when marked
 	mountFds map[[8]byte]int   // fsid -> O_PATH fd used as open_by_handle_at's mount_fd
+
+	reads readErrors // read failures, reported through healthErr
 }
+
+// healthErr reports whether reads from the fanotify fd keep failing, so the
+// sensor's heartbeat stops while it is not seeing events.
+func (w *fanWatcher) healthErr() error { return w.reads.err() }
 
 // dirEvent is one change to a directory entry, with the process that made it.
 type dirEvent struct {
@@ -92,6 +97,7 @@ func newFanWatcher(follow func(string) bool, procs *procReader) (*fanWatcher, er
 		procs:    procs,
 		dirs:     make(map[string]string),
 		mountFds: make(map[[8]byte]int),
+		reads:    readErrors{source: "fanotify"},
 	}, nil
 }
 
@@ -202,21 +208,17 @@ func (w *fanWatcher) run(done <-chan struct{}, out chan<- dirEvent) {
 	for {
 		n, err := w.file.Read(buf)
 		if err != nil {
-			if errors.Is(err, os.ErrClosed) {
-				return
-			}
-			select {
-			case <-done:
-				return
-			default:
+			if errors.Is(err, syscall.EINTR) {
+				continue
 			}
 			// The runtime poller absorbs EAGAIN; anything else here is
-			// unexpected, so back off rather than spin.
-			if !errors.Is(err, syscall.EINTR) {
-				time.Sleep(100 * time.Millisecond)
+			// unexpected. Back off, and count it against the sensor's health.
+			if !w.reads.handle(err, done) {
+				return
 			}
 			continue
 		}
+		w.reads.ok()
 		recs, _ := parseFanotifyEvents(buf[:n])
 		for _, r := range recs {
 			if !r.HasDir {

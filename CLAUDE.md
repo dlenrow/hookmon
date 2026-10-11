@@ -662,7 +662,7 @@ The bus rates each event when it sees it (per sensor; see `docs/theory-of-operat
 | # | Condition | Severity | Action |
 |---|-----------|----------|--------|
 | 1 | Host offline: AGENT_OFFLINE raised by the server's watchdog | CRITICAL | Alert SOC, possible tampering |
-| 2 | AGENT_OFFLINE or AGENT_RECOVERED arriving on a bus's event stream | ALERT | Alert SOC |
+| 2 | Host back: AGENT_RECOVERED raised by the server on the first heartbeat after an outage | INFO | Notify SOC (sent to every connector). A bus cannot send AGENT_OFFLINE or AGENT_RECOVERED itself; the server refuses them |
 | 3 | BPF_INVENTORY (a census of loaded programs; the policy result records whether each is on the allowlist) | INFO | Log only |
 | 4 | Matches an allowlist entry with ALLOW, for the fleet or for this host | INFO | Log only |
 | 5 | The bus rated it INFO: a package manager wrote the library or linker file, or a /dev/shm segment has no BPF pattern | INFO | Log only |

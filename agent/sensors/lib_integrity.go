@@ -73,6 +73,14 @@ func (s *LibIntegritySensor) Name() string                    { return "lib_inte
 func (s *LibIntegritySensor) Type() SensorType                { return SensorTypeFanotify }
 func (s *LibIntegritySensor) Events() <-chan *event.HookEvent { return s.eventCh }
 
+// Healthy reports why the sensor is not seeing events, or nil.
+func (s *LibIntegritySensor) Healthy() error {
+	if s.watcher == nil {
+		return nil
+	}
+	return s.watcher.healthErr()
+}
+
 func isSharedObjectName(name string) bool {
 	return strings.HasSuffix(name, ".so") || strings.Contains(name, ".so.")
 }

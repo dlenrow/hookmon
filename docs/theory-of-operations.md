@@ -126,7 +126,7 @@ Compare this with syscall monitoring (millions of events per second) or network 
 | Condition | Severity | Meaning |
 |-----------|----------|---------|
 | Host offline (AGENT_OFFLINE from the watchdog) | CRITICAL | Bus stopped or killed |
-| AGENT_OFFLINE or AGENT_RECOVERED on a bus's event stream | ALERT | Lifecycle report |
+| Host back (AGENT_RECOVERED from the server, on the first heartbeat after an outage) | INFO | Outage over; sent to every connector. A bus cannot send lifecycle events itself |
 | BPF_INVENTORY | INFO | Census; the policy result says whether each program is on the allowlist |
 | Matches an allowlist entry with ALLOW action | INFO | Known good, log for audit |
 | The bus rated it INFO (package-manager write, ordinary /dev/shm segment) | INFO | Expected change |

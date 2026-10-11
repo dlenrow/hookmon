@@ -62,6 +62,14 @@ func (s *LinkerConfigSensor) Name() string                    { return "linker_c
 func (s *LinkerConfigSensor) Type() SensorType                { return SensorTypeFanotify }
 func (s *LinkerConfigSensor) Events() <-chan *event.HookEvent { return s.eventCh }
 
+// Healthy reports why the sensor is not seeing events, or nil.
+func (s *LinkerConfigSensor) Healthy() error {
+	if s.watcher == nil {
+		return nil
+	}
+	return s.watcher.healthErr()
+}
+
 func (s *LinkerConfigSensor) confDir() string { return filepath.Join(s.etcDir, linkerConfigDir) }
 
 // isLinkerConfigPath reports whether path is one of the linker files, an

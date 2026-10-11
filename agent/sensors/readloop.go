@@ -29,6 +29,9 @@ const (
 // therefore shows up in /status and the alerts instead of losing events
 // while the sensor still looks alive.
 type readErrors struct {
+	// source names what is read, for the error; "ring buffer" if empty.
+	source string
+
 	consecutive atomic.Int32
 
 	mu    sync.Mutex
@@ -93,7 +96,11 @@ func (r *readErrors) err() error {
 	if r.clock().Sub(r.at) >= readFailingFor {
 		return nil
 	}
-	return fmt.Errorf("ring buffer read failing (%d errors in a row): %w", n, r.last)
+	source := r.source
+	if source == "" {
+		source = "ring buffer"
+	}
+	return fmt.Errorf("%s read failing (%d errors in a row): %w", source, n, r.last)
 }
 
 func (r *readErrors) clock() time.Time {

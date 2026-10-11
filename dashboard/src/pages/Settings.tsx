@@ -12,7 +12,7 @@ const STATE_DIR = '/var/lib/hookmon';
  */
 function enrollCommand(s: ServerSettings, host: string): string {
   const lines = [
-    'sudo hookmon-bus --enroll-token <enrollment-token> \\',
+    'sudo hookmon-bus --enroll-token-file /etc/hookmon/enroll-token \\',
     `  --server-addr ${host}:${addrPort(s.grpc_addr)} \\`,
     `  --enroll-addr ${host}:${addrPort(s.enroll_addr)} \\`,
     '  --ca-file /path/to/ca.crt \\',

@@ -240,7 +240,7 @@ test('every page renders the server data', async () => {
   await nav(page, /Settings/);
   const host = new URL(BASE).hostname;
   const cmd = page.getByTestId('enroll-command');
-  await expect(cmd).toContainText('--enroll-token <enrollment-token>');
+  await expect(cmd).toContainText('--enroll-token-file /etc/hookmon/enroll-token');
   await expect(cmd).toContainText(`--server-addr ${host}:${port(st.grpc_addr)}`);
   await expect(cmd).toContainText(`--enroll-addr ${host}:${port(st.enroll_addr)}`);
   await expect(cmd).toContainText('--ca-file');

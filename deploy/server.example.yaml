@@ -67,8 +67,9 @@ enrollment:
   # Lifetime of the client certificates the server issues.
   cert_validity: 8760h
   # Enrollment secrets. A bus enrolls once, on first start:
-  #   hookmon-bus --enroll-token <secret> --server-addr hookmon.internal:9443 \
-  #     --ca-file /path/to/ca.crt
+  #   hookmon-bus --enroll-token-file /etc/hookmon/enroll-token \
+  #     --server-addr hookmon.internal:9443 --ca-file /path/to/ca.crt
+  # (the token file holds the secret, mode 0600, so it stays out of ps)
   # It stores its key and certificate under /var/lib/hookmon and needs no
   # token after that. Each token needs a unique name, a secret of at least
   # 32 characters (openssl rand -hex 32) and an expiry. A single_use token
@@ -100,7 +101,7 @@ watchdog:
 #   INFO or WARN: an event feed. Every stored event at or above that
 #     severity, allowed or not, repeats included.
 # Every connector also receives AGENT_OFFLINE (CRITICAL) when a host stops
-# sending heartbeats.
+# sending heartbeats, and AGENT_RECOVERED (INFO) when it resumes.
 #
 # Delivery settings every connector takes:
 #   min_severity    see above (default ALERT)
