@@ -92,7 +92,7 @@ Run on drl-nuc8i3bek (Ubuntu 22.10, kernel 5.19) against the full working tree. 
 | --- | --- | --- | --- |
 | Each probe advances its sensor's heartbeat map | `strace` of the bus, plus reading the maps with `bpftool` | All five confirmed. The ptrace map, which has no other traffic on this host, advanced exactly every 10.000 s. The dlopen map moved only when the helper ran. | Verified |
 | Idle host, all sensors alive for 10 minutes | `HOOKMON_E2E_LONG=1 go test -tags e2e -run TestHeartbeat_IdleAllAlive ./test/e2e/` | All 7 sensors alive at all 120 polls. Of 1989 host events, none came from the bus or its probes. | Verified |
-| Detaching a sensor's link marks it dead within 30 s | `TestHeartbeat_LinkDetach` | Not possible as written on 5.19: `bpftool link detach` returns EOPNOTSUPP for perf_event links, and the hook keeps running. The test skips with that reason. The dead path is covered by `TestHealthCycleDetachedHookGoesDead` and `TestHealthCycleAttachmentCheckBlocksBeat`; the worst case is 20 s with a 15 s threshold and a 10 s cycle. | Code reading |
+| Detaching a sensor's link marks it dead within 30 s | `TestHeartbeat_LinkDetach` | Not possible as written on 5.19, and on 6.17 either (infinichat-u9, 2026-10-11, static bpftool v7.7.0): `bpftool link detach` returns EOPNOTSUPP for perf_event links, and the hook keeps running. The test skips with that reason. The dead path is covered by `TestHealthCycleDetachedHookGoesDead` and `TestHealthCycleAttachmentCheckBlocksBeat`; the worst case is 20 s with a 15 s threshold and a 10 s cycle. | Code reading |
 | `kill -9` of the bus is reported unreachable within one poll | `TestHeartbeat_KillBusCollectorUnreachable` | Unreachable 1.955 s after the kill, with a 2 s poll. | Verified |
 | A missing dlopen helper is reported, not treated as alive | `TestHeartbeat_DlopenProbeMissing` | `dlopen_monitor=unverifiable`, and the host is `degraded`. | Verified |
 | Probe events are not reported or counted | `TestProbeEventsNotSentOrCounted` | They reach neither the transport nor `hookmon_events_total`. The test fails if the filter is removed. | Verified |
@@ -319,3 +319,13 @@ Still open, for 7f:
 - A missing event and a database error both return 404 (`server/store/postgres.go:395`).
 - The 256-event buffer between ingestion and the hub drops events silently when full (`server/ingestion/grpc.go:274`).
 - The event feed loads its history twice on first load.
+
+### Second kernel: e2e on infinichat-u9 (2026-10-11)
+
+infinichat-u9 runs Ubuntu 24.04.2 with kernel 6.17.0-23, on x86_64 with 16 CPUs and Docker. The binaries, eBPF objects, canaries and e2e test binary were built on drl-nuc8i3bek from `main` at 14c176f. They ran on u9 unchanged: CO-RE objects compiled against 5.19 type info load on 6.17.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| Full e2e suite on kernel 6.17 | `e2e.test -test.v` as root | 38 pass, 2 skip (env-gated idle and SIEM tests), 1 fail. The failure was `TestHeartbeat_LinkDetach`: Ubuntu's `/usr/sbin/bpftool` wrapper has no binary for 6.17, so the test misread the broken tool as "the bus holds no link". `/etc/ld.so.preload` was absent before and after, and no canary library or container image was left behind. | Verified |
+| Link detach on 6.17 | The same test, with static bpftool v7.7.0 first in PATH | `bpftool link detach id 330` failed with "Operation not supported". The hook kept running, ptrace_monitor stayed alive, and the test skipped with that reason. Detach-to-dead can't be exercised on 5.19 or on 6.17. | Verified |
+| A broken bpftool is reported as such | `TestHeartbeat_LinkDetach` with the Ubuntu wrapper | The test now checks `bpftool version` first. It skips with "bpftool is not usable here … bpftool not found for kernel 6.17.0-23" instead of failing on a false reason. | Verified |

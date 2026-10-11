@@ -221,6 +221,13 @@ func TestHeartbeat_IdleAllAlive(t *testing.T) {
 // returns EOPNOTSUPP) leave the hook running; then the sensor must stay
 // alive, and the dead path is left to the agent unit tests.
 func TestHeartbeat_LinkDetach(t *testing.T) {
+	// Ubuntu's /usr/sbin/bpftool is a wrapper that fails on kernels with no
+	// matching linux-tools build (6.17 on 24.04). Without a working bpftool
+	// the link lookup below would wrongly report that the bus holds no link.
+	if out, err := exec.Command("bpftool", "version").CombinedOutput(); err != nil {
+		t.Skipf("bpftool is not usable here, so the tamper action cannot run: %v: %s",
+			err, strings.TrimSpace(string(out)))
+	}
 	const port = "2191"
 	bus, err := StartBusArgs(busBin(), "--status-port", port)
 	if err != nil {
