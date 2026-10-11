@@ -220,7 +220,7 @@ Every detection produces a `HookEvent` (`pkg/event/event.go`) with:
 | Pushgateway | 9091 | Receives fleet health metrics from `hookmon-collector` |
 | Alertmanager | 9093 | Routes alerts; ships with a placeholder webhook receiver |
 
-`hookmon-collector` is not in the compose file. Run it on the same host (see the [deployment guide](deployment-guide.md)). The server and PostgreSQL are not in it either; a compose file with the whole server path is fix plan step 7g.
+`hookmon-collector` is not in this monitoring-only compose file. Run it on the same host (see the [deployment guide](deployment-guide.md)). The compose appliance (`deploy/appliance/docker-compose.yml`) runs everything: the server, PostgreSQL, the collector and the monitoring stack, configured by `deploy/appliance/hookmon-init.sh`.
 
 ### Grafana Dashboard
 

@@ -5,7 +5,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /hookmon-server ./cmd/hookmon-server
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-s -w -X github.com/dlenrow/hookmon/pkg/version.Version=${VERSION}" \
+    -o /hookmon-server ./cmd/hookmon-server
 
 FROM node:20.20.2-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS dashboard
 WORKDIR /dashboard

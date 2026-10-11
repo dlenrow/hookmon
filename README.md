@@ -136,6 +136,21 @@ Before use:
 - Add each sensor bus (`<host>:2112`) as a target under `hookmon-bus` in `deploy/docker/prometheus.yml`.
 - Add a webhook URL in `deploy/docker/alertmanager.yml`. Until you do, alerts show in Alertmanager but notify nobody.
 
+### Or: the Compose Appliance (Server Path on One Host)
+
+The whole server path in one compose project:
+
+```bash
+git clone https://github.com/dlenrow/hookmon.git
+cd hookmon
+sudo deploy/appliance/hookmon-init.sh --mode compose --hostname hookmon.internal --ip <server-ip>
+sudo docker compose -f deploy/appliance/docker-compose.yml up -d --build --wait
+```
+
+`hookmon-init.sh` writes the CA, the server certificate, an enrollment token, the API token, the database and Grafana passwords, `server.yaml` and `collector.yaml` under `/etc/hookmon` (`--out-dir` to change it; the compose file reads `HOOKMON_CONFIG_DIR`). Secrets are mode 0600. Re-running it changes nothing unless you pass `--new-enroll-token` or `--force`. At the end it prints the bus enrollment command and the CA fingerprint.
+
+The stack runs `hookmon-server` (dashboard and API on :8443, buses on :9443, enrollment on :9444), PostgreSQL (internal only), the collector, Grafana (:3000), Loki (:3100), and Prometheus, Pushgateway and Alertmanager (127.0.0.1 only, since they have no authentication). Every image is pinned by digest. `deploy/appliance/check-stack.sh` checks a running stack; CI runs it on every push.
+
 ### 2. Build and Run the Sensor Bus
 
 On each monitored Linux host (kernel with BTF; tested on 5.19):

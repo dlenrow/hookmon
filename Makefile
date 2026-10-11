@@ -140,10 +140,10 @@ package-rpm:
 	./scripts/build-agent.sh rpm
 
 docker-agent:
-	docker build -f deploy/docker/Dockerfile.agent -t hookmon-bus:$(VERSION) .
+	docker build -f deploy/docker/Dockerfile.agent --build-arg VERSION=$(VERSION) -t hookmon-bus:$(VERSION) .
 
 docker-server:
-	docker build -f deploy/docker/Dockerfile.server -t hookmon-server:$(VERSION) .
+	docker build -f deploy/docker/Dockerfile.server --build-arg VERSION=$(VERSION) -t hookmon-server:$(VERSION) .
 
 ## Appliance
 

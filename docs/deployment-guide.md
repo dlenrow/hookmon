@@ -4,7 +4,7 @@
 
 This guide sets up the observability path, which works today, and then the server path. The observability path has three parts:
 
-1. **Observability stack:** Grafana, Loki, Prometheus, Pushgateway and Alertmanager, run with Docker Compose. Today this compose stack is the whole "appliance". The appliance images (ISO, OVA, QCOW2, VHD) do not build a working image yet (fix plan step 7g).
+1. **Observability stack:** Grafana, Loki, Prometheus, Pushgateway and Alertmanager, run with Docker Compose (`deploy/docker/docker-compose.grafana.yml`). For the whole server path on one host, use the [compose appliance](#compose-appliance) instead. The appliance images (ISO, OVA, QCOW2, VHD) do not build a working image yet (fix plan step 7g).
 2. **Sensor buses:** `hookmon-bus` on each monitored Linux host. Each detects eBPF loads, linker environment injection, ptrace abuse, library tampering and more, and pushes events to Loki.
 3. **Collector:** `hookmon-collector`, run on the stack's host but outside Compose. It polls each host's `/status` endpoint and pushes fleet health to Pushgateway.
 
@@ -322,6 +322,23 @@ curl -s http://<bus-host>:2112/status | jq .
 ```
 
 `overall` should be `alive`, and each of the eight sensors `alive`.
+
+## Compose Appliance
+
+The compose appliance runs the server path and the observability stack together on one Docker host (`deploy/appliance/docker-compose.yml`):
+
+```bash
+git clone https://github.com/dlenrow/hookmon.git
+cd hookmon
+sudo deploy/appliance/hookmon-init.sh --mode compose --hostname hookmon.internal --ip <server-ip>
+sudo docker compose -f deploy/appliance/docker-compose.yml up -d --build --wait
+```
+
+`hookmon-init.sh` writes the CA, the server certificate, an enrollment token, the API token, the database and Grafana passwords, `server.yaml` and `collector.yaml` under `/etc/hookmon` (`--out-dir` to change it; the compose file reads `HOOKMON_CONFIG_DIR`). Secrets are mode 0600. Re-running it changes nothing unless you pass `--new-enroll-token` or `--force`. At the end it prints the bus enrollment command and the CA fingerprint.
+
+The stack runs `hookmon-server` (dashboard and API on :8443, buses on :9443, enrollment on :9444), PostgreSQL (internal only), the collector, Grafana (:3000), Loki (:3100), and Prometheus, Pushgateway and Alertmanager (127.0.0.1 only, since they have no authentication). Every image is pinned by digest. `deploy/appliance/check-stack.sh` checks a running stack; CI runs it on every push.
+
+Then enroll each bus with the printed command (see [Server Path](#server-path) for what enrollment does), and open `https://hookmon.internal:8443` with the CA from `/etc/hookmon/tls/ca.crt` trusted, or Grafana on :3000.
 
 ## Server Path
 
