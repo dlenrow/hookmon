@@ -43,7 +43,7 @@ const enrollCallTimeout = 30 * time.Second
 // ErrNoIdentity is returned when the bus has no client certificate, no
 // enrollment token and no --insecure: it will not connect in plaintext.
 var ErrNoIdentity = errors.New("no client certificate and no enrollment token: refusing to connect to the server without TLS; " +
-	"enroll with --enroll-token and --ca-file, set tls.cert_file, or pass --insecure to connect without TLS (development only)")
+	"enroll with --enroll-token-file and --ca-file, set tls.cert_file, or pass --insecure to connect without TLS (development only)")
 
 // EnsureIdentity makes sure the bus has a client certificate before the
 // transport connects, and sets cfg.TLS and cfg.HostID to match. In order:

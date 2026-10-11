@@ -105,7 +105,7 @@ The sensor bus will:
 Without `--console`, the bus also streams events over mutual-TLS gRPC to `hookmon-server` at `server_addr` (default `localhost:9443`). If no server answers, the events are written to `fallback_log_path`. A bus without `--console` needs a client certificate, which it gets by enrolling (see [Server Path](#server-path)). With no certificate and no enrollment token it refuses to start:
 
 ```
-enrollment: no client certificate and no enrollment token: refusing to connect to the server without TLS; enroll with --enroll-token and --ca-file, set tls.cert_file, or pass --insecure to connect without TLS (development only)
+enrollment: no client certificate and no enrollment token: refusing to connect to the server without TLS; enroll with --enroll-token-file and --ca-file, set tls.cert_file, or pass --insecure to connect without TLS (development only)
 ```
 
 Use `--console` if you run no server.
@@ -578,7 +578,7 @@ To check a connector, load a BPF program that is not on the allowlist, as in [Ve
 
 Browse to `https://hookmon.internal:8443/` from a machine that trusts `ca.crt`. Enter an API token on the Settings page and reload; the browser keeps it in local storage. The server serves the dashboard from `dashboard_dir` (default `/usr/share/hookmon/dashboard`).
 
-- **Settings** shows the enrollment command for this server (its gRPC and enrollment ports, `--enroll-token`, `--ca-file`, `--state-dir`), the enrollment tokens by name and expiry, and each connector's sent, failed and dropped counts. No secret is shown.
+- **Settings** shows the enrollment command for this server (its gRPC and enrollment ports, `--enroll-token-file`, `--ca-file`, `--state-dir`), the enrollment tokens by name and expiry, and each connector's sent, failed and dropped counts. No secret is shown.
 - **Events** is live: the sidebar shows "Live" while the WebSocket is connected. Every open tab gets every event. A tab that falls more than 256 events behind is disconnected and reconnects by itself, reloading recent events.
 - **Allowlist** on an event (in the feed or on its Investigation page) allows exactly that kind of event on its host or on every host.
 - **Pending Approval** lists learning-mode candidates; approve or reject each for the fleet or for one host.

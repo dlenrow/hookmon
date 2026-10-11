@@ -31,7 +31,7 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` on drl-nuc8i3bek; `server/connectors` tests | Since step 7d, connectors are configured in the server config, and a bad setting fails startup. Each connector delivers asynchronously from its own queue. A BPF canary reached real syslog and webhook receivers: an RFC 5424 line with valid CEF fields, and the full JSON event. AGENT_OFFLINE reached both after the bus stopped. Splunk HEC, Elastic (bulk, auth, ILM policy and index template) and Kafka are tested only against stand-ins (`httptest` servers and sarama's mock producer), not real products. Syslog has no TLS, and Kafka has no TLS or SASL. | Verified |
 | Allowlist scopes and learning mode on the server | `test/integration/policy_test.go`; `pkg/allowlist` tests; real stack on drl-nuc8i3bek | Since step 7c, candidates are approved or rejected through the API and CLI, either for the fleet or for one host (a `host_id`-scoped entry). After all 14 PENDING entries were approved, the only non-ALLOW events came from a newly loaded BPF canary. A policy change through the API takes effect in about 26 ms, with no restart; SIGHUP also reloads. The dashboard approval page comes in 7e. | Verified |
 | Dashboard pages (event feed, policies, hosts, investigation, settings) | `dashboard/e2e/smoke.spec.ts` (Playwright) against the real server on drl-nuc8i3bek; `TestIntegration_WebSocketFanOut` | Since step 7e, all six pages render real data from a seeded server: events (200 rows, live feed), investigation (BPF program tag), "allowlist this event", hosts (8 of 8 sensors alive), policies (edit, enable/disable), pending approvals (42), and settings (real enrollment command, connector status). The WebSocket checks the same token as REST, sent as a subprotocol so it never appears in a URL. It also checks Origin, and fans every event out to every tab: two tabs each received the same 62 live events. | Verified |
-| Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | Audit of `appliance/`, `deploy/` | Only the compose monitoring stack runs. Packer targets QEMU only and would fail, the ISO builder is a stub, the RPM spec and Ansible roles are broken, and the DEB ships the old binary. Fixed in 7g. | Not true |
+| Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | CI job "Compose appliance"; `check-stack.sh` on infinichat-u9; DEB install on drl-nuc8i3bek; RPM in a Rocky 9 container; Ansible agent role run against the NUC | Since 7g: the compose appliance brings up all 8 services healthy, and CI checks it on every push. The DEB installs, enrolls, upgrades and purges cleanly on the NUC. The RPM builds, installs and erases in a pinned Rocky 9 container; the bus itself was not run on an RPM host. The Ansible agent role enrolls a host and is idempotent (rerun: changed=0). The Packer qcow2, VHD, OVA and ISO images and the Ansible appliance role are still in progress (7g, part 3). | Not true |
 
 ## Step log
 
@@ -352,3 +352,27 @@ Ran on drl-nuc8i3bek with a real stack: a root bus enrolled with `--enroll-token
 Test expectation changes: `TestWire_StreamEvents` and `TestSIEM_AlertsReachSyslogAndWebhook` now expect the enrolled hostname instead of the one the bus sent. The dashboard smoke test expects the `--enroll-token-file` enrollment command.
 
 Still open: `hostTracker` is unbounded in insecure (development) mode.
+
+### Step 7g, part 1: Compose appliance (2026-10-11)
+
+Ran on infinichat-u9 under compose project `hookmon-7g`, with an override that moves the published ports off the host's own services. Torn down afterwards. CI runs the same checks on every push; first green run at fd70a45.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| `docker compose up` on a clean Linux host gives a working stack | `hookmon-init.sh --mode compose`, then `docker compose up -d --build --wait` | All 8 services became healthy in 1:20 with nothing cached: server, Postgres, Loki, Prometheus, Pushgateway, Alertmanager, Grafana and the collector. Every image is pinned by digest. | Verified |
+| The stack works | `deploy/appliance/check-stack.sh`, run twice | 14 of 14 checks pass. Secrets are 0600. Postgres is not published. TLS health returns `{"status":"ok"}`. The dashboard and its assets load. The API token gives 401 without it and 200 with it. The enrollment port verifies the hostname. Grafana is healthy and provisioned. Prometheus targets are up, with 5 of 5 alert rules loaded. Alertmanager is up. The collector's `push_time_seconds` is fresh. Loki is ready. | Verified |
+| The first-run script is idempotent | `hookmon-init.sh` run twice, hashes compared | No file changed. Edge cases tested: SAN change, `--new-enroll-token`, `--force`, a wrong mode, half a CA missing. | Verified |
+| The same, in CI | GitHub Actions job "Compose appliance" | Green, on the merged code including 7f. | Verified |
+
+### Step 7g, part 2: DEB, RPM and the Ansible agent role (2026-10-11)
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| `make package-deb` from a clean tree | drl-nuc8i3bek, fresh extract | Builds the eBPF objects, the helper and the bus, then the `.deb`. `dpkg-deb --info/--contents` shows everything root-owned and `Depends: libc6 (>= 2.34)`. | Verified |
+| The DEB ships `hookmon-bus`, a unit, a config and a state directory | `dpkg -i`, then configure, start, upgrade and purge on the NUC | Installed, the unit is enabled but stays inactive until `/etc/hookmon/enroll-token` or a certificate exists. With a token file it enrolled: key and certificates 0600, token never visible in `ps`. The host showed ONLINE with 8 of 8 sensors and 130 events. A reinstall kept the edited `bus.yaml`. `dpkg --purge` removed everything. | Verified |
+| The RPM builds, installs and erases | `rockylinux:9` container pinned by digest, on infinichat-u9 | `rpm -qpl` lists the expected files. `rpmlint` reports only the static Go binary and the 0750 log directory, both on purpose. `dnf install` enabled the unit, a reinstall kept the edited config, and `rpm -e` removed everything. The bus was not run on an RPM host. | Verified |
+| The Ansible agent role is valid and idempotent | `ansible-playbook --syntax-check`, `ansible-lint` (production profile), a real run against the NUC | Both checks pass. The real run made 8 changes, and the host showed ONLINE with 8 sensors. The rerun made 0 changes. Purged afterwards. The role's dnf path was only linted. | Verified |
+
+Unit hardening: the capability bounding set is limited to what the bus needs, with `NoNewPrivileges` and a seccomp filter. Two kinds of option are left out on purpose:
+- Options that give the service its own mount namespace (`ProtectSystem`, `PrivateTmp` and the like). The bus resolves other processes' executables against its own mount namespace.
+- `RestrictSUIDSGID`. On the NUC it made `openat2()` return ENOSYS, which killed shm_monitor.

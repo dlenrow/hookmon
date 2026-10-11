@@ -123,7 +123,7 @@ export function HostInventory() {
         ) : hosts.length === 0 ? (
           <div className="empty-state">
             <h3>No hosts enrolled</h3>
-            <p>Enroll a sensor bus (hookmon-bus --enroll-token; see Settings) to see hosts here.</p>
+            <p>Enroll a sensor bus (hookmon-bus --enroll-token-file; see Settings) to see hosts here.</p>
           </div>
         ) : (
           <div className="host-grid">
