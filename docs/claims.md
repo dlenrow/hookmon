@@ -461,3 +461,28 @@ Evidence is in `docs/evidence/`: `step8.md` (write-up), `step8-drl-nuc8i3bek-eve
   - Unlabelled Active Sensors tiles (now labelled per host).
   - The compose docs didn't say to list buses in `prometheus/buses.yml` and `collector.yaml` (now documented).
 - **Open, for David:** a fresh deployment on a Docker host raises a CRITICAL on every container healthcheck until learning mode is run and its entries approved. Ranking `LD_LIBRARY_PATH` directories by writability, as RPATH entries now are, would make these INFO. The plan doesn't ask for that, so nothing was changed.
+
+### Step 9: Release gate (2026-10-11)
+
+The claims table above has 20 rows: the 15 claims the plan lists and 5 server-path claims. No cell is blank. 15 are Verified, 1 is Code reading ("read-only in default mode"), and 4 are Not true:
+- "SHA256 bytecode hashing": detection works, through the kernel program tag, not SHA256.
+- Enforcement mode: no code exists.
+- "Every way code enters a Linux process": see `docs/threat-model.md` for the gaps.
+- The formats row: there is no ISO.
+
+David edits the blog from this table.
+
+Checked against the plan's "Done means", at `ebe9d8d`:
+
+| Item | Evidence | Result |
+| --- | --- | --- |
+| Steps 1–5 and 7–9 are committed | `git log` on main; this ledger's step log | Done. Step 6 is out of scope. Every step is pushed. |
+| CI is green | GitHub Actions run at ebe9d8d | All four jobs pass: Go Build & Test (with Postgres), Dashboard Typecheck & Build, Compose appliance (including the promtool rule tests), and Dashboard e2e (a real root bus enrolled on the runner, 8 of 8 sensors alive, Playwright). |
+| The e2e suite passes on the Linux host, including the full-path test from 7h | `make test-e2e` and `make test-e2e-full` on drl-nuc8i3bek at ebe9d8d | `make test-e2e`: 38 pass, 4 skip, 0 fail. The skips are the full-path test (run by its own target), the opt-in 10-minute idle test, link detach (the kernel returns EOPNOTSUPP), and the env-gated SIEM test. `make test-e2e-full`: PASS. The suite also passed on kernel 6.17 (infinichat-u9). |
+| The compose appliance runs on a clean host | CI job "Compose appliance"; infinichat-u9 (7g, cross-host and step 8) | Done. |
+| `docs/claims.md` has no row left blank | This table | Done. |
+
+Left for David:
+- **Docker hosts:** a fresh deployment raises a CRITICAL on every container healthcheck until learning mode has run and its entries are approved (step 8).
+- **e2e runner:** registering a self-hosted runner for `e2e.yml`.
+- **Untested imports:** importing the OVA, VHD or RPM into real VMware, VirtualBox, Hyper-V, Azure or RHEL hosts.
