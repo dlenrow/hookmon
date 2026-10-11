@@ -22,7 +22,7 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | Heartbeat every 10 s independent of traffic | `TestHeartbeat_IdleAllAlive` (`HOOKMON_E2E_LONG=1`); `agent/health_test.go` | Since step 3, every 10 s the bus fires each eBPF hook itself. A sensor is alive only if its kernel heartbeat map advanced and its program and link are still attached. On an idle host all sensors were alive at every one of 120 polls over 10 minutes. Detaching a hook can't be tested on kernel 5.19 (`bpftool link detach` returns EOPNOTSUPP for these links), so the dead path is covered by unit tests. The two fanotify sensors have no kernel heartbeat map. They beat from a Go ticker, and since 7f the ticker beats only while their fanotify reads are succeeding. A root attacker can forge the heartbeat map (see SECURITY.md). | Verified |
 | `/status` plus a 30 s collector poll | `TestHeartbeat_KillBusCollectorUnreachable` | Default poll is 30 s. After `kill -9` of the bus, the collector (set to poll every 2 s for the test) reported the host unreachable 1.955 s later, within one poll. A root attacker can serve a fake `/status` (see SECURITY.md). | Verified |
 | Four-row alert hierarchy, including "zero events for 24h" | `promtool test rules deploy/docker/grafana/alerts/tests/*.yml`; live run on drl-nuc8i3bek | There are five rules: HostUnreachable, SensorDead, FleetDegraded, plus CollectorSilent and NoEvents24h (new in step 3). Alertmanager now routes them to a placeholder webhook. CollectorSilent fired live after the collector was stopped and reached Alertmanager. Both new rules pass promtool unit tests; NoEvents24h has not fired on a live host. Step 5 found that the periodic `BPF_INVENTORY` events (added in step 4) kept NoEvents24h from ever firing; the rule now excludes them, and a promtool case covers a host with inventory events only. The blog's "four rows" no longer matches the count. | Verified |
-| Fleet health banner | `deploy/docker/grafana/dashboards/hookmon.json` | The "Fleet Health" panel exists. | Code reading |
+| Fleet health banner | `deploy/docker/grafana/dashboards/hookmon.json`; `fleet_banner_test.yml` (promtool, in CI); `docs/evidence/step8-grafana.png` | The banner exists and is green or red from the collector's fleet metrics. The step 8 screenshot showed it broken: two tiles, because the query's `or vector(0)` kept an unlabelled zero next to the labelled Pushgateway series. With only the unreachable count pushed, the same mismatch would have shown green with hosts unreachable. The query now sums each side first. A promtool test proves one correct series with both metrics, with only one, and with none, and it fails on the old query. CI runs it. The fixed banner has not been screenshotted again. | Verified |
 | Read-only in default mode | Audit of the sensors | Tracepoints, uprobes and `FAN_CLASS_NOTIF` fanotify only. No blocking path exists. | Code reading |
 | Enforcement mode available | Audit of the whole repo | No enforcement code exists. | Not true |
 | Learning mode auto-populates candidates | `test/integration/policy_test.go`; real bus, server and Postgres on drl-nuc8i3bek | Since step 7c, learning mode runs on the server, per fleet or per host, with an end time. Each unmatched unique tuple becomes a PENDING allowlist entry with occurrence count, first and last seen, and the hosts it appeared on. A 5-minute fleet learning run on the idle test host produced 14 PENDING entries. There is no bus-side candidate file; plan step 6 is out of scope. | Verified |
@@ -436,3 +436,28 @@ Bugs found while writing them, all fixed in the follow-up commit (`10e0f4f` on i
 Also fixed in that commit: timestamps now read back in UTC whatever the server's time zone (`TestStore_TimesReadBackInUTC`). Malformed `limit` and `offset` now return 400, as `since` and `until` do. Still documented as known issues in `docs/api-reference.md`:
 - A policy created without `enabled` is stored disabled.
 - `event_type` and `severity` filters accept any string.
+
+### Step 8: First five minutes on two real hosts (2026-10-11)
+
+Evidence is in `docs/evidence/`: `step8.md` (write-up), `step8-drl-nuc8i3bek-events.json` (646 events), `step8-infinichat-u9-events.json` (469 events) and `step8-grafana.png`.
+
+- **Hosts, as they were (David's decision):**
+  - drl-nuc8i3bek: a workstation on kernel 5.19.
+  - infinichat-u9: a container host on kernel 6.17, running Docker, containerd and GPU/LLM services.
+  - Neither is a Kubernetes node, and neither runs Cilium or Falco, so the plan's k8s-node and Cilium/Falco cases are not covered.
+- **Coverage held:** each bus started fresh, enrolled into a compose appliance on u9, and pushed to its Loki. All 8 sensors were alive on both hosts for the whole window, and the bus counters match the stored events.
+- **NUC:** SHM_CREATE 570, DLOPEN 39, BPF_INVENTORY 33, EXEC_INJECTION 4. Server severity: INFO 603, CRITICAL 30, WARN 13.
+  - 88% of events were INFO shared-memory segments from the Slimjet browser.
+  - 33 of the 43 non-INFO events came from the capture's own SSH login and sudo.
+  - The other 10 came from a parallel test removing a Postgres container.
+- **u9:** EXEC_INJECTION 410, BPF_INVENTORY 34, DLOPEN 24, ELF_RPATH 1. Server severity: CRITICAL 419, INFO 34, WARN 15, ALERT 1.
+  - 87% of events were CRITICAL EXEC_INJECTION from Docker healthchecks. containerd's shim runs `runc` with `LD_LIBRARY_PATH=/opt/containerd/lib:`, so every healthcheck run is one CRITICAL event.
+  - A root cron PAM session gave 9 CRITICAL.
+  - llama-server's RUNPATH has an empty entry (ALERT).
+- **First BPF inventory:** 32 programs on the NUC and 33 on u9. They are systemd device and firewall filters, runc device filters, two snap filters, and the bus's own programs. Nothing unexpected. The same `.o` gets different tags on 5.19 and 6.17.
+- **Learning:** 99 PENDING entries after the windows.
+- **Bugs the capture found:**
+  - The Fleet Health banner (fixed; see the row above).
+  - Unlabelled Active Sensors tiles (now labelled per host).
+  - The compose docs didn't say to list buses in `prometheus/buses.yml` and `collector.yaml` (now documented).
+- **Open, for David:** a fresh deployment on a Docker host raises a CRITICAL on every container healthcheck until learning mode is run and its entries approved. Ranking `LD_LIBRARY_PATH` directories by writability, as RPATH entries now are, would make these INFO. The plan doesn't ask for that, so nothing was changed.

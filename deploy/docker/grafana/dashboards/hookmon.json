@@ -120,13 +120,13 @@
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
-        "textMode": "value",
+        "textMode": "value_and_name",
         "reduceOptions": { "calcs": ["lastNotNull"] }
       },
       "targets": [
         {
           "expr": "hookmon_sensors_active",
-          "legendFormat": "sensors"
+          "legendFormat": "{{instance}}"
         }
       ]
     },
