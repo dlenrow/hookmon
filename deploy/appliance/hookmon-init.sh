@@ -524,9 +524,10 @@ Dashboard and REST API:  https://$NAME:$HTTPS_PORT/
 Enrollment token "initial": $USES, expires $ENROLL_EXPIRES
 
 To enroll a sensor bus, copy $TLS/ca.crt to the bus host as
-/etc/hookmon/ca.crt, then run there:
+/etc/hookmon/ca.crt and $SEC/enroll-token as /etc/hookmon/enroll-token
+(mode 0600; a file keeps the secret out of the process list), then run there:
 
-  sudo hookmon-bus --enroll-token $ENROLL_TOKEN \\
+  sudo hookmon-bus --enroll-token-file /etc/hookmon/enroll-token \\
     --server-addr $NAME:$GRPC_PORT \\
     --enroll-addr $NAME:$ENROLL_PORT \\
     --ca-file /etc/hookmon/ca.crt \\

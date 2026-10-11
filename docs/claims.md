@@ -31,7 +31,13 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` on drl-nuc8i3bek; `server/connectors` tests | Since step 7d, connectors are configured in the server config, and a bad setting fails startup. Each connector delivers asynchronously from its own queue. A BPF canary reached real syslog and webhook receivers: an RFC 5424 line with valid CEF fields, and the full JSON event. AGENT_OFFLINE reached both after the bus stopped. Splunk HEC, Elastic (bulk, auth, ILM policy and index template) and Kafka are tested only against stand-ins (`httptest` servers and sarama's mock producer), not real products. Syslog has no TLS, and Kafka has no TLS or SASL. | Verified |
 | Allowlist scopes and learning mode on the server | `test/integration/policy_test.go`; `pkg/allowlist` tests; real stack on drl-nuc8i3bek | Since step 7c, candidates are approved or rejected through the API and CLI, either for the fleet or for one host (a `host_id`-scoped entry). After all 14 PENDING entries were approved, the only non-ALLOW events came from a newly loaded BPF canary. A policy change through the API takes effect in about 26 ms, with no restart; SIGHUP also reloads. The dashboard approval page comes in 7e. | Verified |
 | Dashboard pages (event feed, policies, hosts, investigation, settings) | `dashboard/e2e/smoke.spec.ts` (Playwright) against the real server on drl-nuc8i3bek; `TestIntegration_WebSocketFanOut` | Since step 7e, all six pages render real data from a seeded server: events (200 rows, live feed), investigation (BPF program tag), "allowlist this event", hosts (8 of 8 sensors alive), policies (edit, enable/disable), pending approvals (42), and settings (real enrollment command, connector status). The WebSocket checks the same token as REST, sent as a subprotocol so it never appears in a URL. It also checks Origin, and fans every event out to every tab: two tabs each received the same 62 live events. | Verified |
-| Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | CI job "Compose appliance"; `check-stack.sh` on infinichat-u9; DEB install on drl-nuc8i3bek; RPM in a Rocky 9 container; Ansible agent role run against the NUC | Since 7g: the compose appliance brings up all 8 services healthy, and CI checks it on every push. The DEB installs, enrolls, upgrades and purges cleanly on the NUC. The RPM builds, installs and erases in a pinned Rocky 9 container; the bus itself was not run on an RPM host. The Ansible agent role enrolls a host and is idempotent (rerun: changed=0). The Packer qcow2, VHD, OVA and ISO images and the Ansible appliance role are still in progress (7g, part 3). | Not true |
+| Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | CI job "Compose appliance"; infinichat-u9 (compose, Packer under KVM, Ansible appliance role); drl-nuc8i3bek (DEB, Ansible agent role); Rocky 9 container (RPM) | Since 7g:
+- **Compose:** the compose appliance runs, and CI checks it on every push.
+- **QCOW2, VHD and OVA:** QCOW2 is built with Packer, and VHD and OVA are converted from it. Each boots under QEMU/KVM to a healthy TLS server.
+- **DEB and RPM:** the DEB installs, enrolls into the compose appliance from a second host, and purges cleanly. The RPM builds, installs and erases in a pinned Rocky 9 container.
+- **Ansible:** both roles, agent and appliance, work and are idempotent.
+- **Not true as worded:** there is no ISO (bare-metal installer); on bare metal, install Ubuntu 24.04 and use the Ansible appliance role.
+- **Untested:** importing the OVA into VMware or VirtualBox, the VHD into Hyper-V or Azure, and running the bus on an RPM host. | Not true |
 
 ## Step log
 
@@ -388,3 +394,25 @@ Compose appliance on infinichat-u9 at 4f2989a, under project `hookmon-xhost` wit
 | Its events show in the dashboard | REST API; Playwright `every page renders the server data` | The host `drl-NUC8i3BEK` is ONLINE with 8 of 8 sensors alive, and 233 events arrived (169 SHM_CREATE, 33 DLOPEN, 31 BPF_INVENTORY). In Playwright, the event feed, investigation, allowlist-from-event and hosts pages rendered that data. Fleet learning produced 46 PENDING entries. | Verified |
 | The full smoke test on a fresh appliance | Playwright | 2 of 3 tests passed. The page walk stopped at Policies: the test assumed an approved entry already exists, which is true of a seeded server but not of a fresh appliance. The test now creates a temporary entry when there is none and deletes it afterwards; 7h runs it in CI against a fresh appliance. | Verified |
 | Clean removal | `dpkg --purge`; `docker compose down -v --rmi all` | The unit, `/var/lib/hookmon` and `/etc/hookmon` are gone from the NUC. The stack, its volumes and its images are gone from u9. The user's own containers and images on both hosts are untouched. | Verified |
+
+### Step 7g, part 3: Packer image, VHD/OVA, Ansible appliance role (2026-10-11)
+
+Built and booted on infinichat-u9 under KVM. qemu-system-x86 and qemu-utils were installed through apt, with David's approval. Packer ran as a pinned standalone binary under `/tmp`. Every VM and image was removed afterwards.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| Packer builds the QCOW2 appliance | `make appliance-qcow2` recipe | 2m01s, 837 MiB. The base is the Ubuntu 24.04 cloud image (`release-20260926`), pinned by URL and sha256 and seeded through NoCloud. The image ships no keys, tokens, passwords, host keys or machine ID. | Verified |
+| First boot configures and starts the server | Boot under KVM | `hookmon-firstboot` runs `hookmon-init.sh --mode host` with the VM's hostname and IPs, sets up PostgreSQL, and starts `hookmon-server`. After a reboot it does not run again, and the CA stays the same. A boot with no cloud-init datasource still comes up healthy. | Verified |
+| QCOW2, VHD and OVA each boot to a healthy server | `curl --cacert` from u9 against each image | `/api/v1/health` returns ok; without the CA, curl refuses. The dashboard index and its JS return 200. The API token gives 401 without and 200 with. TLS verifies on enrollment port 9444. | Verified |
+| The Ansible appliance role deploys the server and is idempotent | `--syntax-check`, `ansible-lint` (production profile), and a real run against a throwaway Ubuntu 24.04 VM | First run: changed=12, then the same checks pass. Second run: changed=0. | Verified |
+| ISO | — | Not shipped. `build-iso.sh` (a stub) is deleted, and so is the make target. | Not true |
+| Hypervisor imports (OVA into VMware or VirtualBox, VHD into Hyper-V or Azure) | — | Not tested. | Code reading |
+
+Design:
+- nginx is gone; the server terminates TLS on 8443 and serves the dashboard.
+- The VM runs `hookmon-server` as user `hookmon` in a sandboxed unit, with PostgreSQL 16 on loopback.
+- ufw allows 22, 8443, 9443 and 9444.
+
+Fixed while merging:
+- `hookmon-init.sh` printed the enrollment command with the secret in `--enroll-token`. It now prints `--enroll-token-file`.
+- The deployment guide now asks for clock sync, because certificates are valid from the moment they are made. u9's clock running 38 s slow made one check fail until it caught up.

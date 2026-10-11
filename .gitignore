@@ -44,7 +44,6 @@ dashboard/dist/
 dashboard/.env.local
 
 # Appliance build
-appliance/output-*/
 *.ova
 *.qcow2
 *.vhd
