@@ -1,0 +1,29 @@
+# Prometheus config for the compose appliance (docker-compose.yml here).
+# The same jobs as deploy/docker/prometheus.yml, addressed by compose
+# service name instead of localhost.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alerts/*.yaml
+
+scrape_configs:
+  # Pushgateway. The collector pushes fleet health here.
+  - job_name: hookmon-collector
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  # Sensor buses: /metrics on each bus's status port (default 2112). List
+  # them in prometheus/buses.yml in the hookmon-init.sh output directory;
+  # Prometheus re-reads it when it changes.
+  - job_name: hookmon-bus
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/buses.yml]

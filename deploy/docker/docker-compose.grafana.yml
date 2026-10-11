@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki:3.0.0@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
     network_mode: host
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:v2.53.0
+    image: prom/prometheus:v2.53.0@sha256:075b1ba2c4ebb04bc3a6ab86c06ec8d8099f8fda1c96ef6d104d9bb1def1d8bc
     network_mode: host
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -19,12 +19,12 @@ services:
     restart: unless-stopped
 
   pushgateway:
-    image: prom/pushgateway:v1.11.2
+    image: prom/pushgateway:v1.11.2@sha256:c835998819105d84d484918908df132807c78c05f3e0e649df0c0479c6780d98
     network_mode: host
     restart: unless-stopped
 
   alertmanager:
-    image: prom/alertmanager:v0.31.1
+    image: prom/alertmanager:v0.31.1@sha256:88b605de9aba0410775c1eb3438f951115054e0d307f23f274a4c705f51630c1
     network_mode: host
     # Single node. An empty cluster address keeps port 9094 closed.
     command:
@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:11.1.0
+    image: grafana/grafana:11.1.0@sha256:079600c9517b678c10cda6006b4487d3174512fd4c6cface37df7822756ed7a5
     network_mode: host
     environment:
       - GF_SECURITY_ADMIN_USER=admin

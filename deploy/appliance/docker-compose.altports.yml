@@ -1,0 +1,34 @@
+# Override for a host whose standard ports are taken: publishes every port
+# 10000 higher (8443 becomes 18443, 3000 becomes 13000, and so on). The
+# server's ports stay on all interfaces so buses on other hosts can reach
+# it; everything else is on 127.0.0.1 only.
+#
+#   docker compose -f deploy/appliance/docker-compose.yml \
+#     -f deploy/appliance/docker-compose.altports.yml up -d --build --wait
+#
+# Pass the same ports to hookmon-init.sh so it prints the right commands:
+#   --grpc-port 19443 --enroll-port 19444 --https-port 18443
+# !override replaces the base file's port list instead of adding to it
+# (Compose 2.24.4 or later).
+
+services:
+  server:
+    ports: !override
+      - "18443:8443"
+      - "19443:9443"
+      - "19444:9444"
+  grafana:
+    ports: !override
+      - "127.0.0.1:13000:3000"
+  loki:
+    ports: !override
+      - "127.0.0.1:13100:3100"
+  prometheus:
+    ports: !override
+      - "127.0.0.1:19090:9090"
+  pushgateway:
+    ports: !override
+      - "127.0.0.1:19091:9091"
+  alertmanager:
+    ports: !override
+      - "127.0.0.1:19093:9093"

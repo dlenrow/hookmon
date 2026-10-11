@@ -68,3 +68,52 @@ jobs:
       - name: Build
         working-directory: dashboard
         run: npx vite build
+
+  appliance:
+    name: Compose appliance
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      COMPOSE_PROJECT_NAME: hookmon-ci
+      APPLIANCE_HOSTNAME: hookmon.ci.internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint scripts
+        run: shellcheck deploy/appliance/hookmon-init.sh deploy/appliance/check-stack.sh
+
+      - name: First-run script
+        run: |
+          dir="$RUNNER_TEMP/hookmon"
+          echo "HOOKMON_CONFIG_DIR=$dir" >> "$GITHUB_ENV"
+          init() {
+            deploy/appliance/hookmon-init.sh --mode compose --out-dir "$dir" \
+              --hostname "$APPLIANCE_HOSTNAME" --ip 127.0.0.1
+          }
+          init
+          # A second run keeps every file as it is.
+          sums() { find "$dir" -type f -exec sha256sum {} + | sort; }
+          before=$(sums)
+          init >/dev/null
+          if [ "$before" != "$(sums)" ]; then
+            echo "a second run of hookmon-init.sh changed files"
+            exit 1
+          fi
+
+      - name: Start the stack
+        run: docker compose -f deploy/appliance/docker-compose.yml up -d --build --wait --wait-timeout 300
+
+      - name: Check the stack
+        run: |
+          deploy/appliance/check-stack.sh --config-dir "$HOOKMON_CONFIG_DIR" \
+            --hostname "$APPLIANCE_HOSTNAME" -- docker compose -f deploy/appliance/docker-compose.yml
+
+      - name: Show the stack
+        if: failure()
+        run: |
+          docker compose -f deploy/appliance/docker-compose.yml ps -a
+          docker compose -f deploy/appliance/docker-compose.yml logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/appliance/docker-compose.yml down -v --remove-orphans

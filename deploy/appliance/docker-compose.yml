@@ -1,0 +1,232 @@
+# HookMon compose appliance: the server path (hookmon-server, Postgres) and
+# the observability path (Loki, Prometheus, Pushgateway, Alertmanager,
+# Grafana, hookmon-collector) on one host.
+#
+# First run, from the repository root:
+#   sudo deploy/appliance/hookmon-init.sh --mode compose --hostname hookmon.example.internal --ip 10.0.0.5
+#   sudo docker compose -f deploy/appliance/docker-compose.yml up -d --build --wait
+#
+# HOOKMON_CONFIG_DIR is the hookmon-init.sh --out-dir (default /etc/hookmon).
+# The server gets server.yaml and tls/, the collector collector.yaml,
+# Prometheus prometheus/, Postgres secrets/db-password and Grafana
+# secrets/grafana.env. A missing file stops `up` with an error.
+#
+# Published ports:
+#   8443  dashboard and REST API (HTTPS)        all interfaces
+#   9443  bus gRPC (mutual TLS)                 all interfaces
+#   9444  bus enrollment (TLS)                  all interfaces
+#   3000  Grafana                               all interfaces
+#   3100  Loki (buses push logs with --loki-url) all interfaces
+#   9090  Prometheus, 9091 Pushgateway,
+#   9093  Alertmanager                          127.0.0.1 only (no auth)
+# Postgres has no published port and sits on an internal network that only
+# the server shares.
+#
+# The alert rules, Alertmanager config and Grafana dashboard are the ones in
+# deploy/docker/, shared with the monitoring-only stack there.
+
+name: hookmon
+
+services:
+  postgres:
+    image: postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_USER: hookmon
+      POSTGRES_DB: hookmon
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      # -h 127.0.0.1: the server the entrypoint runs during initdb listens
+      # on the socket only, so this passes once the real server is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U hookmon -d hookmon"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  server:
+    image: hookmon-server:appliance
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.server
+    command: ["--config", "/etc/hookmon/server.yaml"]
+    volumes:
+      - type: bind
+        source: ${HOOKMON_CONFIG_DIR:-/etc/hookmon}/server.yaml
+        target: /etc/hookmon/server.yaml
+        read_only: true
+      - type: bind
+        source: ${HOOKMON_CONFIG_DIR:-/etc/hookmon}/tls
+        target: /etc/hookmon/tls
+        read_only: true
+    ports:
+      - "8443:8443"
+      - "9443:9443"
+      - "9444:9444"
+    networks:
+      - default
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # GET /api/v1/health over TLS, checking the certificate chain against
+      # the CA. The server listens only after the database is migrated.
+      test:
+        - CMD-SHELL
+        - >-
+          printf 'GET /api/v1/health HTTP/1.0\r\n\r\n'
+          | openssl s_client -quiet -connect 127.0.0.1:8443
+          -CAfile /etc/hookmon/tls/ca.crt -verify_return_error 2>/dev/null
+          | grep -q '"status":"ok"'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
+  collector:
+    image: hookmon-collector:appliance
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.collector
+    volumes:
+      - type: bind
+        source: ${HOOKMON_CONFIG_DIR:-/etc/hookmon}/collector.yaml
+        target: /etc/hookmon/collector.yaml
+        read_only: true
+      - collector-data:/var/lib/hookmon
+    depends_on:
+      pushgateway:
+        condition: service_healthy
+    healthcheck:
+      # The collector rewrites fleet-status.json after every poll (30 s by
+      # default). Raise -mmin if you raise poll_interval past a minute.
+      test: ["CMD-SHELL", "test -n \"$$(find /var/lib/hookmon/fleet-status.json -mmin -2 2>/dev/null)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.0.0@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3100/ready | grep -q ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 15s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0@sha256:075b1ba2c4ebb04bc3a6ab86c06ec8d8099f8fda1c96ef6d104d9bb1def1d8bc
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../docker/grafana/alerts:/etc/prometheus/alerts:ro
+      - type: bind
+        source: ${HOOKMON_CONFIG_DIR:-/etc/hookmon}/prometheus
+        target: /etc/prometheus/targets
+        read_only: true
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      alertmanager:
+        condition: service_healthy
+      pushgateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  pushgateway:
+    image: prom/pushgateway:v1.11.2@sha256:c835998819105d84d484918908df132807c78c05f3e0e649df0c0479c6780d98
+    ports:
+      - "127.0.0.1:9091:9091"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9091/-/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.31.1@sha256:88b605de9aba0410775c1eb3438f951115054e0d307f23f274a4c705f51630c1
+    # Single node. An empty cluster address keeps port 9094 closed.
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+    volumes:
+      - ../docker/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9093/-/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0@sha256:079600c9517b678c10cda6006b4487d3174512fd4c6cface37df7822756ed7a5
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    # GF_SECURITY_ADMIN_PASSWORD, from hookmon-init.sh. Grafana applies it
+    # when it first creates its database.
+    env_file:
+      - ${HOOKMON_CONFIG_DIR:-/etc/hookmon}/secrets/grafana.env
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ../docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: unless-stopped
+
+networks:
+  default: {}
+  # Postgres and the server only. internal: no route out, no published ports.
+  backend:
+    internal: true
+
+secrets:
+  db_password:
+    file: ${HOOKMON_CONFIG_DIR:-/etc/hookmon}/secrets/db-password
+
+volumes:
+  postgres-data:
+  collector-data:
+  loki-data:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

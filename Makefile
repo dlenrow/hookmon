@@ -33,7 +33,7 @@ endif
 .PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dlopen-probe build-dashboard build-canaries build-canaries-noebpf
 .PHONY: bpf generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
-.PHONY: appliance-ova appliance-qcow2 appliance-iso
+.PHONY: appliance-ova appliance-qcow2 appliance-iso appliance-compose
 
 ## Build targets
 
@@ -155,6 +155,13 @@ appliance-qcow2:
 
 appliance-iso:
 	./appliance/iso/build-iso.sh
+
+# Compose appliance: builds the server and collector images and starts the
+# stack. Run deploy/appliance/hookmon-init.sh --mode compose first, with
+# --out-dir $(APPLIANCE_CONFIG_DIR).
+APPLIANCE_CONFIG_DIR ?= /etc/hookmon
+appliance-compose:
+	HOOKMON_CONFIG_DIR=$(APPLIANCE_CONFIG_DIR) docker compose -f deploy/appliance/docker-compose.yml up -d --build --wait
 
 ## Cleanup
 

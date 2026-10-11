@@ -1,0 +1,13 @@
+# Build context for Dockerfile.collector (BuildKit reads this file in place
+# of a root .dockerignore). Keeps git metadata, local builds and any
+# appliance secrets out of the build.
+.git
+.claude
+**/node_modules
+dashboard/dist
+bin
+deploy/appliance/config
+**/*.key
+**/*.pem
+**/*.env
+**/*.o

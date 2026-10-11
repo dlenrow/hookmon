@@ -1,0 +1,24 @@
+FROM golang:1.24.13-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" -o /hookmon-collector ./cmd/hookmon-collector
+
+FROM debian:bookworm-20260918-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+
+# The collector polls each bus's /status over HTTP and pushes to
+# Pushgateway; it needs no privileges. It writes fleet-status.json to
+# /var/lib/hookmon (a volume in the compose appliance).
+RUN useradd --uid 10001 --user-group --home-dir /var/lib/hookmon \
+        --no-create-home --shell /usr/sbin/nologin hookmon \
+    && mkdir -p /etc/hookmon /var/lib/hookmon \
+    && chown hookmon:hookmon /var/lib/hookmon
+
+COPY --from=builder /hookmon-collector /usr/bin/hookmon-collector
+
+USER hookmon
+ENTRYPOINT ["/usr/bin/hookmon-collector"]
+CMD ["--config", "/etc/hookmon/collector.yaml"]
