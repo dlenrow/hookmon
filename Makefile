@@ -31,7 +31,7 @@ BPF_DEPS := bpf
 endif
 
 .PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dlopen-probe build-dashboard build-canaries build-canaries-noebpf
-.PHONY: bpf generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
+.PHONY: bpf generate test test-unit test-registry test-collector test-integration test-e2e test-e2e-full e2e-deploy smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
 .PHONY: appliance-server appliance-qcow2 appliance-vhd appliance-ova appliance-compose
 
@@ -110,7 +110,11 @@ build-canaries:
 build-canaries-noebpf:
 	$(MAKE) -C test/canary canaries-noebpf
 
-test-e2e: build-bus build-dlopen-probe build-canaries
+# e2e tests run as root through sudo, which drops the environment; these
+# settings are passed through when set (see docs/theory-of-operations.md).
+E2E_ENV := $(foreach v,HOOKMON_STATUS_PORT HOOKMON_LOKI_URL HOOKMON_E2E_LONG HOOKMON_E2E_IDLE_DURATION HOOKMON_E2E_REINSTALL_PKG,$(if $($(v)),$(v)=$($(v))))
+
+e2e-deploy: build-bus build-dlopen-probe build-canaries
 	@echo "==> Deploying canaries and bus to /tmp for e2e..."
 	@mkdir -p /tmp/canary/bin
 	cp $(BIN_DIR)/hookmon-bus /tmp/hookmon-bus
@@ -118,7 +122,38 @@ test-e2e: build-bus build-dlopen-probe build-canaries
 	cp test/canary/bin/* /tmp/canary/bin/ 2>/dev/null || true
 	cp test/canary/*.o /tmp/canary/ 2>/dev/null || true
 	cp test/canary/*.sh /tmp/canary/
-	sudo env "PATH=$$PATH" go test -tags e2e -v -count=1 -timeout 300s ./test/e2e/...
+
+test-e2e: e2e-deploy
+	sudo env "PATH=$$PATH" $(E2E_ENV) go test -tags e2e -v -count=1 -timeout 300s ./test/e2e/...
+
+# Full-path e2e (fix plan step 7h): a BPF canary through a root bus (not
+# console mode), enrollment, gRPC, hookmon-server, PostgreSQL, policy, a
+# webhook connector and the WebSocket feed. Starts PostgreSQL in a container
+# (pinned by digest, data in tmpfs, published on a random localhost port),
+# builds the server, runs the test and removes the container, also on
+# failure. Needs docker and passwordless sudo, besides what test-e2e needs.
+# E2E_FULL_RUN=. runs the whole e2e suite against that stack instead (the
+# SIEM test also needs the alpine image it pulls).
+E2E_PG_IMAGE ?= postgres:16.15-alpine3.24@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+E2E_FULL_RUN ?= TestFullPath
+test-e2e-full: e2e-deploy build-server
+	@set -eu; \
+	name="hookmon-e2e-pg-$$$$"; \
+	pw=$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n'); \
+	trap 'docker rm -f "$$name" >/dev/null 2>&1 || true' EXIT; \
+	echo "==> Starting PostgreSQL ($$name)"; \
+	docker run -d --name "$$name" -e POSTGRES_PASSWORD="$$pw" -p 127.0.0.1::5432 \
+		--tmpfs /var/lib/postgresql/data:rw,size=512m $(E2E_PG_IMAGE) >/dev/null; \
+	ready=; for i in $$(seq 60); do \
+		if docker exec "$$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then ready=1; break; fi; \
+		sleep 1; \
+	done; \
+	if [ -z "$$ready" ]; then docker logs "$$name"; echo "PostgreSQL did not become ready"; exit 1; fi; \
+	port=$$(docker port "$$name" 5432/tcp | head -n1 | sed 's/.*://'); \
+	sudo env "PATH=$$PATH" $(E2E_ENV) \
+		HOOKMON_TEST_PG_DSN="postgres://postgres:$$pw@127.0.0.1:$$port/postgres?sslmode=disable" \
+		HOOKMON_SERVER_BIN="$(CURDIR)/$(BIN_DIR)/hookmon-server" \
+		go test -tags e2e -v -count=1 -timeout 300s -run '$(E2E_FULL_RUN)' ./test/e2e/...
 
 lint:
 	golangci-lint run ./...

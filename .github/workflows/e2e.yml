@@ -1,0 +1,69 @@
+name: e2e
+
+# The end-to-end suites load eBPF programs, run hookmon-bus as root and run
+# real attacks (LD_PRELOAD, /etc/ld.so.preload, ptrace), so they run only on
+# a self-hosted Linux runner registered for them (label hookmon-e2e), and
+# only when someone with write access to the repository starts the
+# workflow. It has no push or pull_request trigger: code from a fork never
+# runs on that host. CONTRIBUTING.md ("e2e in GitHub Actions") says how to
+# register a runner and what the host needs.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: the suites share the host's kernel and /tmp paths.
+concurrency:
+  group: hookmon-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: e2e on the Linux host
+    runs-on: [self-hosted, linux, hookmon-e2e]
+    timeout-minutes: 45
+    env:
+      # clang builds the eBPF objects already; it also builds the C helpers,
+      # so the host needs no gcc.
+      CC: clang
+      # The test buses' /status port, off the default 2112 in case the host
+      # runs its own bus.
+      HOOKMON_STATUS_PORT: ${{ vars.HOOKMON_E2E_STATUS_PORT || '2157' }}
+      # Held while a suite runs, so other e2e runs on the host (by hand, or
+      # another runner) wait their turn.
+      E2E_LOCK: ${{ vars.HOOKMON_E2E_LOCK || '/tmp/hookmon-e2e.lock' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check the host
+        run: |
+          uname -r
+          test -r /sys/kernel/btf/vmlinux
+          for tool in clang llvm-strip bpftool docker flock; do
+            command -v "$tool" >/dev/null || { echo "missing: $tool"; exit 1; }
+          done
+          bpftool version
+          sudo -n true
+
+      - name: make test-e2e
+        run: flock "$E2E_LOCK" make test-e2e
+
+      - name: make test-e2e-full
+        run: flock "$E2E_LOCK" make test-e2e-full
+
+      - name: Clean up
+        if: always()
+        run: |
+          # The suites build and test as root; keep root's Go cache from
+          # growing on the host.
+          sudo env "PATH=$PATH" go clean -cache -testcache || true
+          docker ps -a --filter name=hookmon-e2e-pg- --filter name=hookmon-siem- -q | xargs -r docker rm -f
