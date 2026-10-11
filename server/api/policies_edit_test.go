@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +204,42 @@ func TestCreatePolicy_ActionAndFields(t *testing.T) {
 	}
 	if len(st.entries) != 3 {
 		t.Errorf("entries: %d, want 3", len(st.entries))
+	}
+	// A generated created_at is in UTC, not the server's local zone.
+	for _, e := range st.entries {
+		if e.CreatedAt.IsZero() || e.CreatedAt.Location() != time.UTC {
+			t.Errorf("created_at %v (%v), want a UTC time", e.CreatedAt, e.CreatedAt.Location())
+		}
+	}
+}
+
+// TestCreatePolicy_DuplicateIDIs409: creating an entry with an ID that is
+// taken is 409 with a JSON error naming the ID, and changes nothing. It
+// used to be 500 "failed to create policy".
+func TestCreatePolicy_DuplicateIDIs409(t *testing.T) {
+	st, rl := newPolStore(), &polReloader{}
+	h := polRouter(st, rl)
+	first := `{"id":"dup","description":"first","action":"ALLOW","enabled":true}`
+	if code, body := polDo(t, h, http.MethodPost, "/api/v1/policies", first); code != http.StatusCreated {
+		t.Fatalf("first create: %d %s", code, body)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/policies",
+		strings.NewReader(`{"id":"dup","description":"second","action":"DENY","enabled":true}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var e struct {
+		Error string `json:"error"`
+	}
+	if rec.Code != http.StatusConflict || rec.Header().Get("Content-Type") != "application/json" ||
+		json.Unmarshal(rec.Body.Bytes(), &e) != nil || e.Error != `an allowlist entry with id "dup" already exists` {
+		t.Errorf("second create: %d %q %s, want 409 naming the ID", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
+	}
+	if len(st.entries) != 1 || st.entries[0].Description != "first" || st.entries[0].Action != event.ActionAllow {
+		t.Errorf("entries after the refused create: %+v", st.entries)
+	}
+	if rl.n() != 1 {
+		t.Errorf("reloads: %d, want 1 (the refused create must not reload)", rl.n())
 	}
 }
 

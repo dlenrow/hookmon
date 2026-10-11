@@ -21,7 +21,19 @@ var (
 	// ErrNotPending is returned when approving or rejecting an entry that is
 	// not a PENDING candidate.
 	ErrNotPending = errors.New("allowlist entry is not PENDING")
+	// ErrConflict is returned (wrapped) when a write would duplicate a
+	// unique key, such as an allowlist entry ID that is already taken.
+	ErrConflict = errors.New("already exists")
 )
+
+// pgUniqueViolation is PostgreSQL's SQLSTATE for unique_violation.
+const pgUniqueViolation = "23505"
+
+// isUniqueViolation reports whether err is a unique-key violation.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+}
 
 // LearningCreator is the created_by of entries learning mode creates.
 const LearningCreator = "learning-mode"
@@ -118,7 +130,7 @@ func getAllowlistEntry(ctx context.Context, q querier, id, suffix string) (*even
 }
 
 // CreateAllowlistEntry inserts a new allowlist entry. An empty status is
-// stored as APPROVED.
+// stored as APPROVED. An ID that is already taken is ErrConflict (wrapped).
 func (s *Store) CreateAllowlistEntry(ctx context.Context, entry *event.AllowlistEntry) error {
 	if entry.Status == "" {
 		entry.Status = event.StatusApproved
@@ -206,6 +218,9 @@ func insertAllowlistEntry(ctx context.Context, x execer, entry *event.AllowlistE
 		candidateKey, learnedKey, exePath,
 		occurrences, firstSeen, lastSeen, hosts,
 	)
+	if isUniqueViolation(err) {
+		return fmt.Errorf("allowlist entry %s: %w", entry.ID, ErrConflict)
+	}
 	if err != nil {
 		return fmt.Errorf("insert allowlist entry %s: %w", entry.ID, err)
 	}

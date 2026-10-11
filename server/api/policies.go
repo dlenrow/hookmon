@@ -121,10 +121,14 @@ func (s *Server) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 		entry.ID = uuid.New().String()
 	}
 	if entry.CreatedAt.IsZero() {
-		entry.CreatedAt = time.Now()
+		entry.CreatedAt = time.Now().UTC()
 	}
 
 	if err := s.store.CreateAllowlistEntry(r.Context(), &entry); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("an allowlist entry with id %q already exists", entry.ID))
+			return
+		}
 		s.logger.Error("create allowlist entry failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to create policy")
 		return

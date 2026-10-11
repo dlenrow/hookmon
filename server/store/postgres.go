@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
@@ -50,6 +51,17 @@ func NewStore(ctx context.Context, connString string, logger *zap.Logger) (*Stor
 	config, err := pgxpool.ParseConfig(connString)
 	if err != nil {
 		return nil, fmt.Errorf("parse connection string: %w", err)
+	}
+	// pgx scans TIMESTAMPTZ into the process's local zone by default, so on
+	// a host not set to UTC the API would return offsets such as -04:00.
+	// Scan every TIMESTAMPTZ into UTC instead; the instant is unchanged.
+	config.AfterConnect = func(_ context.Context, conn *pgx.Conn) error {
+		conn.TypeMap().RegisterType(&pgtype.Type{
+			Name:  "timestamptz",
+			OID:   pgtype.TimestamptzOID,
+			Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC},
+		})
+		return nil
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
@@ -114,7 +126,11 @@ func (s *Store) RunMigrations(ctx context.Context) error {
 // Events
 // ---------------------------------------------------------------------------
 
-// InsertEvent persists a HookEvent to the events table.
+// InsertEvent persists a HookEvent to the events table. In the same
+// statement it moves the host's last_event_at forward to the event's
+// timestamp, never back: an event that arrives late (an older timestamp)
+// leaves it alone. An event whose host is not enrolled is stored all the
+// same.
 func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 	bpfJSON, err := nullableJSON(ev.BPFDetail)
 	if err != nil {
@@ -157,28 +173,39 @@ func (s *Store) InsertEvent(ctx context.Context, ev *event.HookEvent) error {
 		return fmt.Errorf("marshal policy_result: %w", err)
 	}
 
+	// One statement, so the event and the host's last_event_at are written
+	// together or not at all. The UPDATE's WHERE is checked again against
+	// the latest row version if another insert for the host updated it
+	// first, so concurrent events cannot move last_event_at back.
 	const query = `
-		INSERT INTO events (
-			id, timestamp, host_id, hostname,
-			event_type, severity,
-			pid, ppid, uid, gid,
-			comm, cmdline, exe_path, exe_hash,
-			cgroup_path, container_id, namespace,
-			bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
-			linker_config_detail, ptrace_detail, lib_integrity_detail,
-			elf_rpath_detail, bpf_inventory_detail,
-			policy_result
-		) VALUES (
-			$1, $2, $3, $4,
-			$5, $6,
-			$7, $8, $9, $10,
-			$11, $12, $13, $14,
-			$15, $16, $17,
-			$18, $19, $20, $21,
-			$22, $23, $24,
-			$25, $26,
-			$27
-		)`
+		WITH ins AS (
+			INSERT INTO events (
+				id, timestamp, host_id, hostname,
+				event_type, severity,
+				pid, ppid, uid, gid,
+				comm, cmdline, exe_path, exe_hash,
+				cgroup_path, container_id, namespace,
+				bpf_detail, exec_injection_detail, shm_detail, dlopen_detail,
+				linker_config_detail, ptrace_detail, lib_integrity_detail,
+				elf_rpath_detail, bpf_inventory_detail,
+				policy_result
+			) VALUES (
+				$1, $2, $3, $4,
+				$5, $6,
+				$7, $8, $9, $10,
+				$11, $12, $13, $14,
+				$15, $16, $17,
+				$18, $19, $20, $21,
+				$22, $23, $24,
+				$25, $26,
+				$27
+			)
+			RETURNING host_id, timestamp
+		)
+		UPDATE hosts SET last_event_at = ins.timestamp
+		FROM ins
+		WHERE hosts.id = ins.host_id
+		  AND (hosts.last_event_at IS NULL OR hosts.last_event_at < ins.timestamp)`
 
 	_, err = s.pool.Exec(ctx, query,
 		ev.ID, ev.Timestamp, ev.HostID, ev.Hostname,
@@ -440,7 +467,8 @@ const hostColumns = `
 	last_heartbeat, last_event_at, sensors`
 
 // UpsertHost inserts a host or updates it if it already exists. It does not
-// touch the sensor snapshot.
+// touch the sensor snapshot, and never moves last_event_at back: an update
+// keeps the later of the stored and the given time.
 func (s *Store) UpsertHost(ctx context.Context, h *event.Host) error {
 	const query = `
 		INSERT INTO hosts (
@@ -459,7 +487,7 @@ func (s *Store) UpsertHost(ctx context.Context, h *event.Host) error {
 			os_info        = EXCLUDED.os_info,
 			status         = EXCLUDED.status,
 			last_heartbeat = EXCLUDED.last_heartbeat,
-			last_event_at  = EXCLUDED.last_event_at`
+			last_event_at  = GREATEST(hosts.last_event_at, EXCLUDED.last_event_at)`
 
 	_, err := s.pool.Exec(ctx, query,
 		h.ID, h.Hostname, h.IPAddress, h.AgentVersion,

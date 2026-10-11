@@ -12,9 +12,15 @@ type AuthMiddleware struct {
 }
 
 // NewAuthMiddleware creates middleware that accepts the given API tokens.
+// An empty or whitespace-only token is dropped: it would let in a request
+// whose bearer token is empty. Config validation refuses such tokens
+// first; this is the second line.
 func NewAuthMiddleware(tokens []string) *AuthMiddleware {
 	m := &AuthMiddleware{tokens: make(map[string]bool)}
 	for _, t := range tokens {
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
 		m.tokens[t] = true
 	}
 	return m
@@ -31,12 +37,12 @@ func (a *AuthMiddleware) Handler(next http.Handler) http.Handler {
 
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
-			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "missing authorization header")
 			return
 		}
 
 		if !a.validateToken(bearerToken(auth)) {
-			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
 
@@ -50,8 +56,12 @@ func bearerToken(header string) string {
 }
 
 // validateToken reports whether token is one of the API tokens. REST and
-// the WebSocket both use it.
+// the WebSocket both use it. An empty or whitespace-only token is never
+// valid, whatever the configuration.
 func (a *AuthMiddleware) validateToken(token string) bool {
+	if strings.TrimSpace(token) == "" {
+		return false
+	}
 	for t := range a.tokens {
 		if subtle.ConstantTimeCompare([]byte(token), []byte(t)) == 1 {
 			return true

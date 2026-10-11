@@ -49,8 +49,8 @@ Every route except `/api/v1/health` needs an API token:
 Authorization: Bearer <token>
 ```
 
-- Tokens come from `api.tokens` in the server config, or `--api-tokens` (comma-separated), which overrides the file. They are compared in constant time.
-- **Never leave an empty token in the list** (`tokens: [""]`, or a stray comma in `--api-tokens`). The server accepts it, and then a request with an empty bearer token is authenticated. See [Known Issues](#known-issues).
+- Tokens come from `api.tokens` in the server config, or `--api-tokens` (comma-separated, each entry trimmed of spaces), which overrides the file. They are compared in constant time.
+- An empty or whitespace-only token is a configuration error, and the server refuses to start: `api.tokens: token 2 of 2 is empty; ...`. A stray comma in `--api-tokens` makes one. An empty bearer token is always 401.
 - With no token configured, every authenticated request gets 401. The server does not warn about this at startup.
 - Every token can read and write everything. There are no roles or scopes.
 - The server strips a leading `Bearer ` if present, so a bare token in the header also works.
@@ -78,21 +78,21 @@ Responses are JSON (`application/json`). List endpoints return `[]`, never `null
 | 200 | Read, update, approve, reject, start learning |
 | 201 | Created: `POST /policies`, `POST /events/{id}/allowlist` |
 | 204 | Deleted: `DELETE /policies/{id}`, `DELETE /learning/...`. No body |
-| 400 | The body or a parameter is invalid. The message says which field and why |
-| 401 | Missing or wrong token. The body is JSON, but the `Content-Type` is `text/plain` |
+| 400 | The body or a query parameter is invalid. The message names the field or parameter and says why |
+| 401 | Missing or wrong token |
 | 403 | WebSocket only: the `Origin` is not allowed |
 | 404 | The event, host, policy entry or learning window does not exist, or the path is unknown under `/api` |
 | 405 | A known path with the wrong method. Empty body |
-| 409 | The entry is PENDING and can't be edited, is not PENDING and can't be approved or rejected, or an allowlist entry for the event already exists |
+| 409 | The entry is PENDING and can't be edited, is not PENDING and can't be approved or rejected, an allowlist entry for the event already exists, or `POST /policies` gave an `id` that is taken |
 | 413 | The body is over 64 KiB |
-| 500 | A database error, including a database that is down. Also a duplicate `id` on `POST /policies` (see [Known Issues](#known-issues)) |
+| 500 | A database error, including a database that is down |
 | 503 | WebSocket only: the server is shutting down |
 
 A missing row is always 404 and a database failure is always 500, so an outage is never reported as "not found".
 
 ### Times
 
-Times are RFC 3339. Values the server reads back from PostgreSQL carry the server's local UTC offset (for example `-04:00`). Values it has just set, such as a new entry's `created_at`, are in UTC (`Z`). Compare them as instants, not as strings.
+Times are RFC 3339, in UTC (`Z`), whatever the server's time zone. The one exception is an `expires` or `created_at` you send to `POST`, `PUT` or `PATCH /policies`: that write's answer repeats it as you sent it, and later reads return the same instant in UTC. PostgreSQL keeps microseconds, so a time read back can be shorter than one the server has just set. Compare times as instants, not as strings.
 
 ### Writes Apply at Once
 
@@ -152,17 +152,18 @@ Lists stored events, newest first (by `timestamp`).
 
 | Parameter | Type | Default | Meaning |
 |-----------|------|---------|---------|
-| `limit` | integer | 100 | Most events to return. A missing, non-numeric, zero or negative value means 100. There is no maximum. |
-| `offset` | integer | 0 | Events to skip, for paging. A non-numeric or negative value means 0. |
+| `limit` | integer | 100 | Most events to return. Missing, empty or zero means 100. A non-numeric or negative value is a 400. There is no maximum. |
+| `offset` | integer | 0 | Events to skip, for paging. Missing or empty means 0. A non-numeric or negative value is a 400. |
 | `host_id` | string | | Only this host (exact match on the enrolled host ID). |
 | `event_type` | string | | Only this type, such as `BPF_LOAD`. Exact and case-sensitive: `bpf_load` matches nothing. |
 | `severity` | string | | Only this severity: `INFO`, `WARN`, `ALERT` or `CRITICAL`. Exact and case-sensitive. |
-| `since` | RFC 3339 time | | Events at or after this time. |
-| `until` | RFC 3339 time | | Events at or before this time. |
+| `since` | RFC 3339 time | | Events at or after this time. A value that is not an RFC 3339 time is a 400. |
+| `until` | RFC 3339 time | | Events at or before this time. A value that is not an RFC 3339 time is a 400. |
 
 Filters combine with AND. Unknown parameters are ignored.
 
-- **An unparseable `since` or `until` is ignored, not refused.** The request then returns events without that bound. In a query string a `+` means a space, so write a positive UTC offset as `%2B` (`2026-10-11T02:58:00%2B00:00`) or use `Z`.
+- **A bad `limit`, `offset`, `since` or `until` is a 400**, never ignored, and the message names the parameter: `{"error":"since must be an RFC 3339 time such as 2026-10-11T00:00:00Z, not \"yesterday\""}`, `{"error":"limit must be a non-negative integer, not \"-1\""}`.
+- **Write a `+` as `%2B`.** In a query string a `+` means a space, so `since=2026-10-11T02:58:00+00:00` is a 400 (the message says to use `%2B`). Write `2026-10-11T02:58:00%2B00:00`, or use `Z`.
 - **Paging.** There is no total count and no cursor. New events shift offset-based pages. To page a fixed set, take the newest `timestamp` from the first page and pass it as `until` on every later page.
 
 Response: an array of [events](#event-json).
@@ -244,8 +245,8 @@ Response (201, abridged):
     },
     "exe_path": "/usr/bin/cilium-agent",
     "occurrences": 1,
-    "first_seen": "2026-10-10T22:56:59.437243-04:00",
-    "last_seen": "2026-10-10T22:56:59.437243-04:00",
+    "first_seen": "2026-10-11T02:56:59.437243Z",
+    "last_seen": "2026-10-11T02:56:59.437243Z",
     "hosts": ["6d4e295e-3725-4641-b1a9-efe3c8890a7c"]
   }
 }
@@ -260,7 +261,7 @@ Every event, from REST and from the WebSocket, has this shape. Detail objects ar
 ```json
 {
   "id": "3433b8bc-5c9b-4c76-8fd0-de531ab2cc5b",
-  "timestamp": "2026-10-10T22:56:59.437187-04:00",
+  "timestamp": "2026-10-11T02:56:59.437187Z",
   "host_id": "6d4e295e-3725-4641-b1a9-efe3c8890a7c",
   "hostname": "web-01",
   "event_type": "BPF_LOAD",
@@ -469,7 +470,7 @@ hookmon-cli $FLAGS hosts
 | `status` | string | `ONLINE`, or `UNRESPONSIVE` after `watchdog.heartbeat_timeout` with no heartbeat. `OFFLINE` is defined but nothing sets it |
 | `enrolled_at` | time | Enrollment time |
 | `last_heartbeat` | time | When the server received the latest heartbeat (server clock) |
-| `last_event_at` | time | Meant to be the latest event's time. Nothing sets it, so it is always omitted (see [Known Issues](#known-issues)) |
+| `last_event_at` | time | The newest `timestamp` of the host's stored events, AGENT_OFFLINE and AGENT_RECOVERED included. Storing an event moves it forward; an event that arrives late, with an older timestamp, leaves it alone. Omitted until the host's first event |
 | `sensors` | array | Sensor health from the latest heartbeat: `name`, `status` (`alive`, `dead`, `failed`, `unverifiable` or `unknown`) and `reason`. Omitted before the first heartbeat |
 
 ```json
@@ -480,8 +481,8 @@ hookmon-cli $FLAGS hosts
   "agent_version": "dev",
   "os_info": "simbus",
   "status": "ONLINE",
-  "enrolled_at": "2026-10-10T22:55:46.965627-04:00",
-  "last_heartbeat": "2026-10-10T23:12:12.934581-04:00",
+  "enrolled_at": "2026-10-11T02:55:46.965627Z",
+  "last_heartbeat": "2026-10-11T03:12:12.934581Z",
   "sensors": [
     {"name": "bpf_syscall", "status": "alive"},
     {"name": "exec_injection", "status": "alive"}
@@ -489,7 +490,7 @@ hookmon-cli $FLAGS hosts
 }
 ```
 
-(The `sensors` list is abridged; a real bus reports all eight.)
+(The `sensors` list is abridged; a real bus reports all eight. The example run was before `last_event_at` was written, so it is missing here; a host that has sent an event has it.)
 
 ## Policies (Allowlist)
 
@@ -553,14 +554,15 @@ Creates an entry. It is APPROVED and in force at once (if `enabled` is true).
 - Set `"enabled": true`. An entry created without it is stored disabled and matches nothing.
 - `status` must be empty or `APPROVED`; PENDING entries come only from learning mode.
 - `learned` must be absent.
-- `id` and `created_at` are generated when absent.
+- `id` and `created_at` are generated when absent. An `id` that is already taken is a 409, and the existing entry is not changed.
 
 | Status | When |
 |--------|------|
 | 201 | The stored entry |
 | 400 | No or bad `action`; bad hash format; `status` other than APPROVED; `learned` set; unknown field |
+| 409 | The `id` is taken: `{"error":"an allowlist entry with id \"<id>\" already exists"}` |
 | 413 | Body over 64 KiB |
-| 500 | Database error, or an `id` that already exists |
+| 500 | Database error |
 
 ```bash
 curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X POST "$HM/api/v1/policies" -d '{
@@ -683,8 +685,8 @@ Lists every window, ended ones included, with the server's time.
   "windows": [
     {
       "scope": "fleet",
-      "started_at": "2026-10-10T23:08:37.543263-04:00",
-      "ends_at": "2026-10-11T01:08:37.543263-04:00",
+      "started_at": "2026-10-11T03:08:37.543263Z",
+      "ends_at": "2026-10-11T05:08:37.543263Z",
       "started_by": "api",
       "active": true
     }
@@ -852,7 +854,7 @@ curl exits with code 28 when `--max-time` runs out; that is expected.
 
 ### Messages
 
-- Each event is one text message: the [event JSON](#event-json) after policy evaluation, the same object REST returns for it (times may show a different UTC offset).
+- Each event is one text message: the [event JSON](#event-json) after policy evaluation, the same object REST returns for it (REST's times have at most microsecond precision, as PostgreSQL stores them).
 - Every subscriber gets every event, in the order the server processed them. Several tabs each get the full feed.
 - AGENT_OFFLINE and AGENT_RECOVERED are sent too.
 - The server sends a ping every 30 s and closes the connection when no pong has arrived for 60 s. Browsers answer pings on their own.
@@ -901,6 +903,8 @@ No CLI command covers one event, one host, PUT, PATCH, allowlisting an event, `s
 
 Every curl and `hookmon-cli` example in this document and in [allowlist-guide.md](allowlist-guide.md) was run on 2026-10-11 against `hookmon-server` built from this tree, on drl-nuc8i3bek (Ubuntu 22.10), with TLS from a test CA and `postgres:16-alpine` pinned by digest. A test client enrolled two hosts, `web-01` and `web-02`, through the enrollment port, and streamed synthetic events of every type over the bus's gRPC transport (`agent/transport`). No real bus ran, so the events' process details are made up; their shape and the server's handling of them are real. The outputs shown are from that run; IDs differ on every server.
 
+That run found bugs that were fixed afterwards: an empty API token that authenticated, a 500 for a duplicate policy `id`, an ignored bad `since` or `until`, 401s sent as `text/plain`, `last_event_at` never set, and times read back with the server's `-04:00` offset. The outputs above give those times as the same instants in UTC, which is what the server returns now. The 400 and 409 messages for bad event-list parameters and a duplicate `id`, and the startup error for an empty token, come from the fixed server, run on the same host with `--insecure` and `TZ=America/New_York`.
+
 Notes on the run:
 
 - The server address was `https://localhost:28443`, so the examples ran with `HM=https://localhost:28443`.
@@ -912,11 +916,6 @@ Notes on the run:
 
 ### Known Issues
 
-Found while writing this document. None is fixed here.
+Found while writing this document, and not fixed yet.
 
-- **An empty API token authenticates.** With `--api-tokens "abc,"` (or an empty string in `api.tokens`), `curl -H "Authorization: Bearer " $HM/api/v1/hosts` got 200 over HTTP/2. Over HTTP/1.1 the server trims the trailing space, so the same header got 401. Neither the config check nor the middleware refuses an empty token (`server/api/auth.go:18,54-56`, `cmd/hookmon-server/main.go:79`). The WebSocket refuses an empty token.
-- `POST /api/v1/policies` with an `id` that already exists returns 500 `failed to create policy`, not 409 (`server/api/policies.go:127-130`).
-- An unparseable `since` or `until` on `GET /api/v1/events` is ignored instead of refused (`server/api/events.go:62-71`).
-- 401 responses carry a JSON body with `Content-Type: text/plain` (`server/api/auth.go:34,39`).
-- `POST /api/v1/policies` stores an entry without `enabled` as disabled, with no warning (`server/api/policies.go:98-136`).
-- `hosts.last_event_at` is never written: `InsertEvent` does not update the host row (`server/store/postgres.go:118`), so `last_event_at` is always omitted and the dashboard's Host Inventory shows "None" for every host's last event (`dashboard/src/pages/HostInventory.tsx:166`).
+- `POST /api/v1/policies` stores an entry without `enabled` as disabled, with no warning (`server/api/policies.go:98-140`).

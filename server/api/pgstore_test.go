@@ -209,8 +209,52 @@ func TestAPI_RealStore_EventsAndHosts(t *testing.T) {
 	if code := s.do(t, http.MethodGet, "/api/v1/hosts/h-b", "", &h); code != http.StatusOK || h.Hostname != "bravo" || h.Status != event.HostOnline {
 		t.Errorf("GET hosts/h-b: %d %+v", code, h)
 	}
+	// last_event_at is each host's newest event (it used to be absent).
+	if len(hosts) == 2 {
+		for _, c := range []struct {
+			got  *time.Time
+			name string
+			want time.Time
+		}{
+			{hosts[0].LastEventAt, "alpha (list)", base.Add(-1 * time.Minute)},
+			{hosts[1].LastEventAt, "bravo (list)", base.Add(-3 * time.Minute)},
+			{h.LastEventAt, "bravo (one)", base.Add(-3 * time.Minute)},
+		} {
+			if c.got == nil || !c.got.Equal(c.want) {
+				t.Errorf("%s: last_event_at %v, want %v", c.name, c.got, c.want)
+			}
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/hosts/h-b", nil)
+	req.Header.Set("Authorization", "Bearer "+t7hToken)
+	rec := httptest.NewRecorder()
+	s.h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"last_event_at":"2026-10-10T11:57:00Z"`) {
+		t.Errorf("GET hosts/h-b: want last_event_at in UTC: %s", rec.Body)
+	}
 	if code := s.do(t, http.MethodGet, "/api/v1/hosts/nope", "", nil); code != http.StatusNotFound {
 		t.Errorf("GET a missing host: %d", code)
+	}
+}
+
+// TestAPI_RealStore_DuplicateIDIs409: over the real store, a second POST
+// with an ID that is taken is 409, not 500, and the first entry stays.
+func TestAPI_RealStore_DuplicateIDIs409(t *testing.T) {
+	s := t7hNewStack(t)
+	body := `{"id":"fixed-id","description":"first","event_types":["DLOPEN"],"action":"ALLOW","enabled":true}`
+	if code := s.do(t, http.MethodPost, "/api/v1/policies", body, nil); code != http.StatusCreated {
+		t.Fatalf("first POST: %d", code)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/policies", strings.NewReader(strings.Replace(body, "first", "second", 1)))
+	req.Header.Set("Authorization", "Bearer "+t7hToken)
+	rec := httptest.NewRecorder()
+	s.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `already exists`) {
+		t.Errorf("second POST: %d %s, want 409", rec.Code, rec.Body)
+	}
+	var stored []*event.AllowlistEntry
+	if s.do(t, http.MethodGet, "/api/v1/policies", "", &stored); len(stored) != 1 || stored[0].Description != "first" {
+		t.Errorf("entries after the refused POST: %+v", stored)
 	}
 }
 

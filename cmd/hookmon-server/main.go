@@ -74,10 +74,7 @@ func main() {
 		case "db":
 			cfg.Database.URL = *dbURL
 		case "api-tokens":
-			cfg.API.Tokens = nil
-			if *apiTokens != "" {
-				cfg.API.Tokens = strings.Split(*apiTokens, ",")
-			}
+			cfg.API.Tokens = splitAPITokens(*apiTokens)
 		case "tls-cert":
 			cfg.TLS.CertFile = *tlsCert
 		case "tls-key":
@@ -90,6 +87,13 @@ func main() {
 			cfg.TLS.Insecure = *insecure
 		}
 	})
+
+	// Validate the config with the flags applied; LoadConfig checked only
+	// the file. Run checks this too; checking here gives the reason as the
+	// only error line.
+	if err := cfg.Validate(); err != nil {
+		logger.Fatal("invalid configuration", zap.Error(err))
+	}
 
 	// Refuse to start in plaintext unless --insecure (or tls.insecure) asked
 	// for it. Run checks this too; checking here gives the reason as the
@@ -112,4 +116,19 @@ func main() {
 	if err := srv.Run(ctx); err != nil {
 		logger.Fatal("server exited with error", zap.Error(err))
 	}
+}
+
+// splitAPITokens splits the --api-tokens value on commas and trims each
+// token. Empty entries are kept, so Validate refuses a stray comma instead
+// of the server quietly accepting an empty bearer token. An empty value
+// means no tokens.
+func splitAPITokens(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
 }

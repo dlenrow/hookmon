@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -106,5 +107,50 @@ func TestMain_BadConnectorConfigFailsStartup(t *testing.T) {
 	code, out := secRunMain(t, "--config", cfg, "--insecure")
 	if code != 1 || !strings.Contains(out, "failed to load config") || !strings.Contains(out, "connectors.splunk: token is required") {
 		t.Errorf("exit status %d; output:\n%s", code, out)
+	}
+}
+
+// TestMain_RefusesEmptyAPIToken: a stray comma in --api-tokens, or a token
+// of only spaces, stops hookmon-server with status 1 before it touches the
+// database. The old server kept the empty token, and then accepted a
+// request whose bearer token was empty.
+func TestMain_RefusesEmptyAPIToken(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "server.yaml")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tokens := range []string{"good-token,", ",good-token", "good-token, ,other"} {
+		code, out := secRunMain(t, "--config", empty, "--insecure", "--api-tokens", tokens,
+			"--db", "postgres://nobody@127.0.0.1:1/none", "--grpc-addr", "127.0.0.1:0", "--http-addr", "127.0.0.1:0", "--dashboard-dir", "")
+		if code != 1 {
+			t.Errorf("--api-tokens %q: exit status %d, want 1; output:\n%s", tokens, code, out)
+		}
+		for _, want := range []string{"invalid configuration", "api.tokens", "is empty"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("--api-tokens %q: output does not contain %q:\n%s", tokens, want, out)
+			}
+		}
+		if strings.Contains(out, "database") {
+			t.Errorf("--api-tokens %q: server reached the database before refusing:\n%s", tokens, out)
+		}
+	}
+}
+
+// TestSplitAPITokens: entries are trimmed; empty ones are kept for
+// Validate to refuse; an empty flag means no tokens.
+func TestSplitAPITokens(t *testing.T) {
+	for in, want := range map[string][]string{
+		"":              nil,
+		"a":             {"a"},
+		"a,b":           {"a", "b"},
+		" a , b ":       {"a", "b"},
+		"a,":            {"a", ""},
+		"a, ,b":         {"a", "", "b"},
+		",":             {"", ""},
+		"tok-1,\ttok-2": {"tok-1", "tok-2"},
+	} {
+		if got := splitAPITokens(in); !reflect.DeepEqual(got, want) {
+			t.Errorf("splitAPITokens(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -106,6 +106,38 @@ enrollment:
 	}
 }
 
+// TestValidate_EmptyAPIToken: an empty or whitespace-only API token is a
+// configuration error, from the file or from --api-tokens (which sets
+// API.Tokens before Run validates). Before, the server accepted it, and a
+// request with an empty bearer token was then authenticated.
+func TestValidate_EmptyAPIToken(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty string":    "api:\n  tokens: [\"good-token\", \"\"]\n",
+		"only spaces":     "api:\n  tokens: [\"   \"]\n",
+		"tab and newline": "api:\n  tokens: [\"good-token\", \"\\t\\n\"]\n",
+		"block list":      "api:\n  tokens:\n    - good-token\n    - ''\n",
+	} {
+		_, err := LoadConfig(enrWriteConfig(t, body))
+		if err == nil || !strings.Contains(err.Error(), "api.tokens") || !strings.Contains(err.Error(), "is empty") {
+			t.Errorf("%s: LoadConfig error %v, want one naming the empty api.tokens entry", name, err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.API.Tokens = []string{"good-token", ""}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "token 2 of 2 is empty") {
+		t.Errorf("Validate with an empty second token: %v", err)
+	}
+	cfg.API.Tokens = []string{"good-token", "other-token"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with two good tokens: %v", err)
+	}
+	cfg.API.Tokens = nil
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with no tokens: %v", err)
+	}
+}
+
 // TestLoadConfig_Connectors parses a connectors section with every
 // connector and its secrets.
 func TestLoadConfig_Connectors(t *testing.T) {

@@ -113,9 +113,15 @@ func (s *polStore) GetDecidedAllowlist(ctx context.Context) ([]*event.AllowlistE
 	return s.QueryAllowlist(ctx, event.StatusApproved, event.StatusRejected)
 }
 
+// CreateAllowlistEntry refuses an ID that is taken, as the real store does.
 func (s *polStore) CreateAllowlistEntry(_ context.Context, e *event.AllowlistEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, cur := range s.entries {
+		if cur.ID == e.ID {
+			return fmt.Errorf("allowlist entry %s: %w", e.ID, store.ErrConflict)
+		}
+	}
 	c := *e
 	s.entries = append(s.entries, &c)
 	return nil

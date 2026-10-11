@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -43,11 +46,26 @@ type Store interface {
 	GetHost(ctx context.Context, id string) (*event.Host, error)
 }
 
+// handleListEvents lists stored events, newest first. A query parameter
+// that is present but cannot be read (limit or offset not a non-negative
+// integer, since or until not an RFC 3339 time) is a 400 naming it, never
+// silently dropped: a dropped time bound returns events outside the range
+// the caller asked for.
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	limit, err := intParam(q, "limit", 100)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	offset, err := intParam(q, "offset", 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	filter := store.EventFilter{
-		Limit:  intParam(q.Get("limit"), 100),
-		Offset: intParam(q.Get("offset"), 0),
+		Limit:  limit,
+		Offset: offset,
 		HostID: q.Get("host_id"),
 	}
 
@@ -59,21 +77,19 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		sv := event.Severity(sev)
 		filter.Severity = &sv
 	}
-	if since := q.Get("since"); since != "" {
-		if t, err := time.Parse(time.RFC3339, since); err == nil {
-			filter.Since = &t
-		}
+	if filter.Since, err = timeParam(q, "since"); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	if until := q.Get("until"); until != "" {
-		if t, err := time.Parse(time.RFC3339, until); err == nil {
-			filter.Until = &t
-		}
+	if filter.Until, err = timeParam(q, "until"); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	events, err := s.store.QueryEvents(r.Context(), filter)
 	if err != nil {
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 		s.logger.Error("query events failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	if events == nil {
@@ -106,15 +122,39 @@ func (s *Server) storeError(w http.ResponseWriter, what string, err error) {
 	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
-func intParam(s string, defaultVal int) int {
-	if s == "" {
-		return defaultVal
+// intParam reads the query parameter name as a non-negative integer. A
+// missing or empty parameter is def; any other value that is not a
+// non-negative integer is an error naming the parameter.
+func intParam(q url.Values, name string, def int) (int, error) {
+	raw := q.Get(name)
+	if raw == "" {
+		return def, nil
 	}
-	v, err := strconv.Atoi(s)
+	v, err := strconv.Atoi(raw)
 	if err != nil || v < 0 {
-		return defaultVal
+		return 0, fmt.Errorf("%s must be a non-negative integer, not %q", name, raw)
 	}
-	return v
+	return v, nil
+}
+
+// timeParam reads the query parameter name as an RFC 3339 time. A missing
+// or empty parameter is nil; a value that does not parse is an error naming
+// the parameter.
+func timeParam(q url.Values, name string) (*time.Time, error) {
+	raw := q.Get(name)
+	if raw == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		msg := fmt.Sprintf("%s must be an RFC 3339 time such as 2026-10-11T00:00:00Z, not %q", name, raw)
+		if strings.Contains(raw, " ") {
+			// A "+" in a query string decodes to a space.
+			msg += "; write a + in the UTC offset as %2B"
+		}
+		return nil, errors.New(msg)
+	}
+	return &t, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -83,6 +84,8 @@ type DatabaseConfig struct {
 
 // APIConfig holds REST API settings.
 type APIConfig struct {
+	// Tokens are the bearer tokens the REST API and WebSocket accept. An
+	// empty or whitespace-only token is a configuration error.
 	Tokens []string `yaml:"tokens"`
 	// AllowedOrigins are the browser origins ("https://host[:port]"),
 	// besides the server's own, whose pages may open the WebSocket event
@@ -179,6 +182,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Watchdog.CheckInterval <= 0 || c.Watchdog.HeartbeatTimeout <= 0 {
 		return errors.New("watchdog.check_interval and watchdog.heartbeat_timeout must be positive")
+	}
+	for i, t := range c.API.Tokens {
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("api.tokens: token %d of %d is empty; an empty token would accept a request with an empty bearer token, so remove it (a stray comma in --api-tokens makes one)", i+1, len(c.API.Tokens))
+		}
 	}
 	if _, err := api.ParseOrigins(c.API.AllowedOrigins); err != nil {
 		return fmt.Errorf("api.allowed_origins: %w", err)

@@ -122,6 +122,9 @@ func TestAuth_Tokens(t *testing.T) {
 		if c.code == http.StatusUnauthorized && !strings.Contains(rec.Body.String(), `"error"`) {
 			t.Errorf("%s: body %q is not a JSON error", c.name, rec.Body)
 		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("%s: Content-Type %q, want application/json", c.name, ct)
+		}
 	}
 
 	// Health needs no token; with no tokens configured nothing else opens.
@@ -134,8 +137,70 @@ func TestAuth_Tokens(t *testing.T) {
 	}
 }
 
+// TestAuth_EmptyTokenNeverAuthenticates: an empty or whitespace-only token
+// in the configuration is dropped, and an empty bearer token is refused,
+// on REST and on the WebSocket. Before, NewAuthMiddleware stored "" from
+// --api-tokens "x," and "Authorization: Bearer " (kept as sent over
+// HTTP/2) got 200.
+func TestAuth_EmptyTokenNeverAuthenticates(t *testing.T) {
+	m := NewAuthMiddleware([]string{"tok", "", "   ", "\t"})
+	if len(m.tokens) != 1 || !m.tokens["tok"] {
+		t.Errorf("stored tokens %v, want only \"tok\"", m.tokens)
+	}
+	for _, tok := range []string{"", " ", "   ", "\t"} {
+		if m.validateToken(tok) {
+			t.Errorf("validateToken(%q) = true", tok)
+		}
+	}
+	if !m.validateToken("tok") {
+		t.Error(`validateToken("tok") = false`)
+	}
+	// Even a middleware whose map somehow held "" refuses an empty token.
+	forced := &AuthMiddleware{tokens: map[string]bool{"": true, " ": true}}
+	if forced.validateToken("") || forced.validateToken(" ") {
+		t.Error("validateToken accepted an empty token that was in the map")
+	}
+
+	s := NewServer(newPolStore(), zap.NewNop(), NewHub(4))
+	h := s.Router([]string{"tok", "", "  "}, nil)
+	for _, c := range []struct {
+		name, path, header string
+		code               int
+	}{
+		{"REST, empty bearer", "/api/v1/hosts", "Bearer ", http.StatusUnauthorized},
+		{"REST, spaces after Bearer", "/api/v1/hosts", "Bearer   ", http.StatusUnauthorized},
+		{"REST, bare space", "/api/v1/hosts", " ", http.StatusUnauthorized},
+		{"REST, good token", "/api/v1/hosts", "Bearer tok", http.StatusOK},
+		{"WebSocket, empty bearer", "/api/v1/ws/events", "Bearer ", http.StatusUnauthorized},
+		{"WebSocket, spaces after Bearer", "/api/v1/ws/events", "Bearer   ", http.StatusUnauthorized},
+	} {
+		req := httptest.NewRequest(http.MethodGet, c.path, nil)
+		req.Header.Set("Authorization", c.header)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != c.code {
+			t.Errorf("%s: status %d, want %d (%s)", c.name, rec.Code, c.code, rec.Body)
+		}
+		if c.code == http.StatusUnauthorized && rec.Header().Get("Content-Type") != "application/json" {
+			t.Errorf("%s: Content-Type %q", c.name, rec.Header().Get("Content-Type"))
+		}
+	}
+
+	// The WebSocket's subprotocol form, with an empty token encoded.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ws/events", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", WSProtocol+", "+WSTokenProtocolPrefix)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("WebSocket, empty subprotocol token: status %d (%s)", rec.Code, rec.Body)
+	}
+}
+
 // TestListEvents_QueryParameters: each query parameter reaches the store
-// filter; malformed values fall back to the defaults.
+// filter; a malformed value is a 400 naming the parameter, and the store is
+// not queried. (These used to be ignored: a bad since or until returned
+// events outside the range asked for, and a bad limit or offset became the
+// default.)
 func TestListEvents_QueryParameters(t *testing.T) {
 	st := &t7hEventStore{polStore: newPolStore(), result: []*event.HookEvent{{ID: "e1", EventType: event.EventBPFLoad}}}
 	h := polRouter(st, nil)
@@ -159,8 +224,8 @@ func TestListEvents_QueryParameters(t *testing.T) {
 		t.Errorf("filter %+v", f)
 	}
 
-	// Defaults, and malformed values ignored.
-	for _, q := range []string{"", "?limit=abc&offset=-3&since=yesterday&until=2026-13-01"} {
+	// Absent or empty parameters are the defaults.
+	for _, q := range []string{"", "?limit=&offset=&since=&until="} {
 		if code, body := polDo(t, h, http.MethodGet, "/api/v1/events"+q, ""); code != http.StatusOK {
 			t.Fatalf("%q: %d %s", q, code, body)
 		}
@@ -168,6 +233,50 @@ func TestListEvents_QueryParameters(t *testing.T) {
 		if !reflect.DeepEqual(f, store.EventFilter{Limit: 100}) {
 			t.Errorf("%q: filter %+v, want the defaults", q, f)
 		}
+	}
+
+	// Malformed values are refused, each with its parameter named.
+	st.mu.Lock()
+	queries := len(st.filters)
+	st.mu.Unlock()
+	for q, param := range map[string]string{
+		"?limit=abc":                       "limit",
+		"?limit=-1":                        "limit",
+		"?limit=1.5":                       "limit",
+		"?limit=99999999999999999999":      "limit",
+		"?offset=-3":                       "offset",
+		"?offset=ten":                      "offset",
+		"?since=yesterday":                 "since",
+		"?since=2026-10-11":                "since",
+		"?since=2026-10-11T02:58:00+00:00": "since", // the + decodes to a space
+		"?until=2026-13-01T00:00:00Z":      "until",
+		"?until=1760000000":                "until",
+		"?limit=5&since=2026-01-02T03:04:05Z&until=x": "until",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/events"+q, nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var e struct {
+			Error string `json:"error"`
+		}
+		if rec.Code != http.StatusBadRequest || rec.Header().Get("Content-Type") != "application/json" ||
+			json.Unmarshal(rec.Body.Bytes(), &e) != nil || !strings.HasPrefix(e.Error, param+" must be") {
+			t.Errorf("%s: %d %q %s, want 400 with an error naming %s", q, rec.Code, rec.Header().Get("Content-Type"), rec.Body, param)
+		}
+	}
+	if _, body := polDo(t, h, http.MethodGet, "/api/v1/events?since=2026-10-11T02:58:00+00:00", ""); !strings.Contains(body, "%2B") {
+		t.Errorf("a + turned into a space: the error does not say to write %%2B: %s", body)
+	}
+	st.mu.Lock()
+	if len(st.filters) != queries {
+		t.Errorf("the store was queried %d times for refused requests", len(st.filters)-queries)
+	}
+	st.mu.Unlock()
+
+	// Zero is a valid limit and offset: the store reads limit 0 as 100.
+	if code, body := polDo(t, h, http.MethodGet, "/api/v1/events?limit=0&offset=0", ""); code != http.StatusOK {
+		t.Errorf("limit=0&offset=0: %d %s", code, body)
 	}
 
 	// No events is [], not null.
@@ -236,6 +345,17 @@ func TestStoreFailures_Are500(t *testing.T) {
 	}
 	if n := rl.n(); n != 0 {
 		t.Errorf("policy reloaded %d times after failed writes", n)
+	}
+
+	// The event list's 500 is a JSON error like the others; it used to be
+	// sent with Content-Type text/plain.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError || rec.Header().Get("Content-Type") != "application/json" ||
+		strings.TrimSpace(rec.Body.String()) != `{"error":"internal server error"}` {
+		t.Errorf("GET events, store down: %d %q %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
 	}
 }
 

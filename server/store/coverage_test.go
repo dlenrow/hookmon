@@ -64,8 +64,8 @@ func t7hEvents(base time.Time) []*event.HookEvent {
 	return evs
 }
 
-// t7hJSON is an event as JSON, with its timestamp in UTC: pgx reads
-// TIMESTAMPTZ back in the local zone, the same instant.
+// t7hJSON is an event as JSON, with its timestamp in UTC, as the store
+// reads TIMESTAMPTZ back (TestStore_TimesReadBackInUTC).
 func t7hJSON(t *testing.T, e *event.HookEvent) string {
 	t.Helper()
 	c := *e
