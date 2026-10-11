@@ -416,3 +416,25 @@ Design:
 Fixed while merging:
 - `hookmon-init.sh` printed the enrollment command with the secret in `--enroll-token`. It now prints `--enroll-token-file`.
 - The deployment guide now asks for clock sync, because certificates are valid from the moment they are made. u9's clock running 38 s slow made one check fail until it caught up.
+
+### Step 7h: Tests (2026-10-11)
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| Coverage for the packages the plan names | `go test -cover` with `HOOKMON_TEST_PG_DSN`, on drl-nuc8i3bek | server/api 85.0% → 94.6%; server/store 69.3% → 86.6%; pkg/crypto 74.3% → 95.2%; agent/enrichment 87.5% → 93.0%; cmd/hookmon-collector 45.6% → 84.2%. | Verified |
+| Full path: canary → bus (not console) → enrollment → gRPC → server → Postgres → policy → connector → WebSocket | `make test-e2e-full` (`TestFullPath_*`), 3 runs in a row on the NUC | 3 of 3 pass. The bus enrolls with a single-use token file (key and certificate 0600, CN = host ID, token use recorded) and reports 8 sensors. The canary loads twice, before and after an ALLOW entry is added through the API. Each event is found by ID in Postgres, at a webhook receiver and on a WebSocket client, with the same policy result everywhere: CRITICAL/ALERT the first time, INFO/ALLOW with the entry's ID the second. | Verified |
+| Postgres tests run in CI | GitHub Actions run at 9c8be31: Go job with a pinned Postgres service, plus a guard step that fails if they skip | Pass. The guard step confirms they ran. | Verified |
+| The dashboard e2e runs in CI against a fresh appliance with a real bus | GitHub Actions job "Dashboard e2e (appliance + bus)" at 9c8be31 | On the GitHub runner (Azure kernel 6.17), the eBPF objects built. A root bus enrolled into the fresh compose appliance with 8 of 8 sensors alive, and all Playwright tests passed. This includes the smoke test's temporary-policy path on a fresh server. | Verified |
+| e2e as a separate job | `.github/workflows/e2e.yml` | `workflow_dispatch` only, on `[self-hosted, linux, hookmon-e2e]`. No runner is registered: registering one is David's call. CONTRIBUTING.md explains how, and why fork PRs can't trigger it. | Code reading |
+| No regressions | `make test-e2e` on the NUC; full suite as root with the DSN, `-race` | e2e: 38 pass, 4 skip (env-gated), 0 fail. Full suite: 680 pass, 0 fail, 1 skip (on purpose). | Verified |
+
+### Deferred docs: API reference and allowlist guide (2026-10-11)
+
+`docs/api-reference.md` covers all 20 routes, the WebSocket, event JSON, query parameters, settings, learning, approve/reject and allowlist-from-event, with CLI equivalents. `docs/allowlist-guide.md` covers matching, the dedupe key, learning mode, review, scopes, severity and bootstrapping, and lists the pitfalls. Every curl and `hookmon-cli` example in both ran against a real TLS `hookmon-server` on drl-nuc8i3bek (Verified). Not run: the browser JavaScript WebSocket snippet, and the 503 response.
+
+Bugs found while writing them, and handed to a fix-up:
+- An empty API token authenticated.
+- `hosts.last_event_at` was never written.
+- A duplicate policy ID returned 500 instead of 409.
+- Unparseable `since`/`until` were ignored.
+- 401 responses had a text/plain content type.
