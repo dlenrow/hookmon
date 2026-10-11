@@ -47,7 +47,7 @@ build-collector:
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-collector ./cmd/hookmon-collector
 
-# C helper the bus runs to fire the dlopen uprobe (the bus itself is static Go).
+# C helper the bus runs to fire the dlopen uprobe (the bus is Go and does not call dlopen itself).
 # The bus looks for it next to its own binary unless dlopen_probe_path is set.
 build-dlopen-probe:
 	@mkdir -p $(BIN_DIR)

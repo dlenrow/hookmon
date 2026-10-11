@@ -345,6 +345,11 @@ The stack runs `hookmon-server` (dashboard and API on :8443, buses on :9443, enr
 
 Then enroll each bus with the printed command (see [Server Path](#server-path) for what enrollment does), and open `https://hookmon.internal:8443` with the CA from `/etc/hookmon/tls/ca.crt` trusted, or Grafana on :3000.
 
+List the buses for the monitoring side, or Grafana's fleet panels stay empty:
+
+- **Prometheus** scrapes each bus's `/metrics` from `prometheus/buses.yml` in the `hookmon-init.sh` output directory (for example `- targets: ["web-01.example.internal:2112"]`). Prometheus re-reads the file when it changes.
+- **The collector** polls each bus's `/status` from the `hosts:` list in `collector.yaml` (`hostname` and `status_url`, for example `http://web-01.example.internal:2112/status`). Restart the collector after editing it: `docker compose -f deploy/appliance/docker-compose.yml restart collector`.
+
 ## Appliance Image
 
 A VM image with the server path: Ubuntu 24.04, `hookmon-server`, the dashboard and PostgreSQL 16. Three formats are shipped, all built from one Packer build:

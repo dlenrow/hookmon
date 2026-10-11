@@ -1,0 +1,40 @@
+# The Fleet Health banner's query (dashboards/hookmon.json). Pushgateway
+# series carry labels, so each side is summed before `or vector(0)`;
+# otherwise the banner shows two tiles, or green with hosts unreachable.
+rule_files:
+  - ../hookmon-alerts.yaml
+evaluation_interval: 1m
+tests:
+  # Both metrics pushed (labels from Pushgateway), one host degraded.
+  - interval: 1m
+    input_series:
+      - series: 'hookmon_fleet_hosts_degraded{job="hookmon-collector",instance=""}'
+        values: '1x5'
+      - series: 'hookmon_fleet_hosts_unreachable{job="hookmon-collector",instance=""}'
+        values: '0x5'
+    promql_expr_test:
+      - expr: (sum(hookmon_fleet_hosts_degraded) or vector(0)) + (sum(hookmon_fleet_hosts_unreachable) or vector(0))
+        eval_time: 2m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # Only unreachable is pushed: degraded missing, still one series.
+  - interval: 1m
+    input_series:
+      - series: 'hookmon_fleet_hosts_unreachable{job="hookmon-collector",instance=""}'
+        values: '2x5'
+    promql_expr_test:
+      - expr: (sum(hookmon_fleet_hosts_degraded) or vector(0)) + (sum(hookmon_fleet_hosts_unreachable) or vector(0))
+        eval_time: 2m
+        exp_samples:
+          - labels: '{}'
+            value: 2
+  # Nothing pushed yet: one series, 0 (green).
+  - interval: 1m
+    input_series: []
+    promql_expr_test:
+      - expr: (sum(hookmon_fleet_hosts_degraded) or vector(0)) + (sum(hookmon_fleet_hosts_unreachable) or vector(0))
+        eval_time: 2m
+        exp_samples:
+          - labels: '{}'
+            value: 0

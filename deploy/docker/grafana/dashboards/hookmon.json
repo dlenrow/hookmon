@@ -39,7 +39,7 @@
       },
       "targets": [
         {
-          "expr": "(hookmon_fleet_hosts_degraded or vector(0)) + (hookmon_fleet_hosts_unreachable or vector(0))",
+          "expr": "(sum(hookmon_fleet_hosts_degraded) or vector(0)) + (sum(hookmon_fleet_hosts_unreachable) or vector(0))",
           "legendFormat": "affected"
         }
       ]
