@@ -517,7 +517,7 @@ Not covered: `BPF_LINK_UPDATE`, and attaches that don't go through `bpf()` (perf
 ```c
 // Simplified from agent/sensors/bpf_syscall.c
 SEC("tracepoint/syscalls/sys_enter_bpf")
-int trace_bpf_enter(struct trace_event_raw_sys_enter *ctx) {
+int trace_bpf_enter(struct syscall_trace_enter *ctx) {
     u32 cmd = (u32)ctx->args[0];
     if (cmd != BPF_PROG_LOAD && cmd != BPF_PROG_ATTACH &&
         cmd != BPF_LINK_CREATE && cmd != BPF_RAW_TRACEPOINT_OPEN)
@@ -528,7 +528,7 @@ int trace_bpf_enter(struct trace_event_raw_sys_enter *ctx) {
 }
 
 SEC("tracepoint/syscalls/sys_exit_bpf")
-int trace_bpf_exit(struct trace_event_raw_sys_exit *ctx) {
+int trace_bpf_exit(struct syscall_trace_exit *ctx) {
     // For a stored PROG_LOAD with ret >= 0, read the new program's ID and
     // bpf_prog->tag through the returned fd. Emit every stored record.
 }

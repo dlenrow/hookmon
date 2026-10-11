@@ -160,8 +160,10 @@ static __always_inline int emit_shm_event(const char *path, u32 flags, u32 mode)
     return 0;
 }
 
+// The context is struct syscall_trace_enter, this tracepoint's own record;
+// bpf_syscall.c says why not struct trace_event_raw_sys_enter.
 SEC("tracepoint/syscalls/sys_enter_openat")
-int trace_shm_open(struct trace_event_raw_sys_enter *ctx)
+int trace_shm_open(struct syscall_trace_enter *ctx)
 {
     hookmon_heartbeat(&hookmon_heartbeat_shm_monitor);
     // sys_enter_openat args: [0]=dfd, [1]=filename, [2]=flags, [3]=mode
@@ -172,7 +174,7 @@ int trace_shm_open(struct trace_event_raw_sys_enter *ctx)
 }
 
 SEC("tracepoint/syscalls/sys_enter_openat2")
-int trace_shm_openat2(struct trace_event_raw_sys_enter *ctx)
+int trace_shm_openat2(struct syscall_trace_enter *ctx)
 {
     hookmon_heartbeat(&hookmon_heartbeat_shm_monitor_openat2);
     // sys_enter_openat2 args: [0]=dfd, [1]=filename, [2]=struct open_how *,

@@ -133,8 +133,14 @@ static __always_inline void prog_from_fd(s32 fd, struct hook_event *e)
     BPF_CORE_READ_INTO(&e->tag, prog, tag);
 }
 
+// A syscalls:sys_enter_*/sys_exit_* tracepoint's record is struct
+// syscall_trace_enter/_exit, not struct trace_event_raw_sys_enter/_exit (the
+// raw_syscalls record). Upstream both put args and ret at byte 16, but RHEL 9
+// grows the common header, which moves the raw_syscalls fields to 24: CO-RE
+// on the wrong struct reads 8 bytes off, and the kernel refuses the attach
+// when the last read runs past the record.
 SEC("tracepoint/syscalls/sys_enter_bpf")
-int trace_bpf_enter(struct trace_event_raw_sys_enter *ctx)
+int trace_bpf_enter(struct syscall_trace_enter *ctx)
 {
     hookmon_heartbeat(&hookmon_heartbeat_bpf_syscall);
     u32 cmd = (u32)ctx->args[0];
@@ -197,7 +203,7 @@ int trace_bpf_enter(struct trace_event_raw_sys_enter *ctx)
 }
 
 SEC("tracepoint/syscalls/sys_exit_bpf")
-int trace_bpf_exit(struct trace_event_raw_sys_exit *ctx)
+int trace_bpf_exit(struct syscall_trace_exit *ctx)
 {
     hookmon_heartbeat(&hookmon_heartbeat_bpf_syscall_exit);
     u64 pid_tgid = bpf_get_current_pid_tgid();

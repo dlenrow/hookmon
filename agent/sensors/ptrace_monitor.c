@@ -90,8 +90,10 @@ static __always_inline u32 pidns_inum(struct task_struct *task)
     return BPF_CORE_READ(upid.ns, ns.inum);
 }
 
+// The context is struct syscall_trace_enter, this tracepoint's own record;
+// bpf_syscall.c says why not struct trace_event_raw_sys_enter.
 SEC("tracepoint/syscalls/sys_enter_ptrace")
-int trace_ptrace_enter(struct trace_event_raw_sys_enter *ctx)
+int trace_ptrace_enter(struct syscall_trace_enter *ctx)
 {
     hookmon_heartbeat(&hookmon_heartbeat_ptrace_monitor);
     u32 request = (u32)ctx->args[0];
