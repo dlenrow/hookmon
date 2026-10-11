@@ -30,7 +30,7 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | mTLS enrollment | `server/ingestion` Postgres integration tests; real `hookmon-bus` and `hookmon-server` on drl-nuc8i3bek | Since step 7a: the bus enrolls on a separate port (9444) that authenticates the server only, using a token from the server config (constant-time compare, expiry, optional single-use). The server signs the CSR and assigns the HostID as the certificate CN. Every other RPC (port 9443) requires a CA-signed client certificate, and the HostID comes from that certificate, never from the message. Since 7b, TLS is the default: the server and the bus refuse plaintext unless `--insecure` is given. | Verified |
 | SIEM connectors (Syslog/CEF, Splunk HEC, Elastic, webhook, Kafka) | `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` on drl-nuc8i3bek; `server/connectors` tests | Since step 7d, connectors are configured in the server config, and a bad setting fails startup. Each connector delivers asynchronously from its own queue. A BPF canary reached real syslog and webhook receivers: an RFC 5424 line with valid CEF fields, and the full JSON event. AGENT_OFFLINE reached both after the bus stopped. Splunk HEC, Elastic (bulk, auth, ILM policy and index template) and Kafka are tested only against stand-ins (`httptest` servers and sarama's mock producer), not real products. Syslog has no TLS, and Kafka has no TLS or SASL. | Verified |
 | Allowlist scopes and learning mode on the server | `test/integration/policy_test.go`; `pkg/allowlist` tests; real stack on drl-nuc8i3bek | Since step 7c, candidates are approved or rejected through the API and CLI, either for the fleet or for one host (a `host_id`-scoped entry). After all 14 PENDING entries were approved, the only non-ALLOW events came from a newly loaded BPF canary. A policy change through the API takes effect in about 26 ms, with no restart; SIGHUP also reloads. The dashboard approval page comes in 7e. | Verified |
-| Dashboard pages (event feed, policies, hosts, investigation, settings) | Audit of `dashboard/`; `curl` against the server on drl-nuc8i3bek | Since 7b the server serves the built dashboard over TLS, with client-side routes falling back to `index.html`. The pages call the real API. Still open until 7e: the WebSocket feed accepts any token and splits events across tabs, and Settings is static. | Not true |
+| Dashboard pages (event feed, policies, hosts, investigation, settings) | `dashboard/e2e/smoke.spec.ts` (Playwright) against the real server on drl-nuc8i3bek; `TestIntegration_WebSocketFanOut` | Since step 7e, all six pages render real data from a seeded server: events (200 rows, live feed), investigation (BPF program tag), "allowlist this event", hosts (8 of 8 sensors alive), policies (edit, enable/disable), pending approvals (42), and settings (real enrollment command, connector status). The WebSocket checks the same token as REST, sent as a subprotocol so it never appears in a URL. It also checks Origin, and fans every event out to every tab: two tabs each received the same 62 live events. | Verified |
 | Appliance and package formats (OVA, QCOW2, VHD, ISO, DEB, RPM, Ansible, compose) | Audit of `appliance/`, `deploy/` | Only the compose monitoring stack runs. Packer targets QEMU only and would fail, the ISO builder is a stub, the RPM spec and Ansible roles are broken, and the DEB ships the old binary. Fixed in 7g. | Not true |
 
 ## Step log
@@ -295,3 +295,27 @@ Fixed while merging: AGENT_OFFLINE timestamps were in local time; they are now U
 Still open:
 - No AGENT_RECOVERED event is sent.
 - The hostname in events (syslog HOSTNAME, CEF `shost`) is what the bus reports. The host ID comes from its certificate (7f).
+
+### Step 7e: API and dashboard (2026-10-11)
+
+The real server and Postgres ran on drl-nuc8i3bek, seeded by a 3-minute learning run with a real root bus. Playwright ran on the Mac against it over the tailnet, with browsers installed under the session scratchpad.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| Two browser tabs both receive every event | Playwright (two pages); two raw WebSocket clients against the server binary; `TestIntegration_WebSocketFanOut` | Same events in the same order in each: 62 in Playwright, 78 for the raw clients, 40 of 40 in the integration test. | Verified |
+| An unauthenticated WebSocket is rejected | Raw clients against the server binary | No token, a wrong token, or a token in the URL get 401. A foreign Origin gets 403. | Verified |
+| Playwright smoke test opens every page and sees real data | `npx playwright test` with `HOOKMON_E2E_URL` | 2 of 2 tests pass: events, investigation, allowlist-from-event (created and then deleted), hosts, policies (toggled), pending (42), and settings. | Verified |
+| Policy edits are validated | Go tests | PUT/PATCH work. Bodies over 64 KiB get 413. Unknown fields and bad actions are refused. PENDING entries can't be edited. | Verified |
+| Lists return `[]` when empty | Go tests | Pass. | Verified |
+| No regressions | `make build-all`, `go vet ./...`, `go test -race ./...`, root agent tests, 23 Postgres tests, `make test-e2e`, `npx tsc --noEmit`, `npx vite build` | Pass. e2e: 38 pass, 3 skip, 0 fail. | Verified |
+
+Design:
+- The WebSocket token travels as a `hookmon.bearer.<base64url>` subprotocol, and the server answers with `hookmon.v1`.
+- Each subscriber gets a 256-event buffer. A subscriber that falls behind is disconnected (close code 1013), and the dashboard reconnects and reloads.
+- `api.allowed_origins` adds origins beyond the server's own.
+- The Vite dev server moved to port 5173, with an HTTPS proxy and `ws: true`.
+
+Still open, for 7f:
+- A missing event and a database error both return 404 (`server/store/postgres.go:395`).
+- The 256-event buffer between ingestion and the hub drops events silently when full (`server/ingestion/grpc.go:274`).
+- The event feed loads its history twice on first load.
