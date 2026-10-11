@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
@@ -28,6 +30,29 @@ type Store interface {
 	UpdateHostHeartbeat(ctx context.Context, hb *event.HostHeartbeat) error
 }
 
+// HeartbeatRecorder is implemented by a Store that can report what a
+// heartbeat changed. The ingestion server then uses RecordHeartbeat instead
+// of UpdateHostHeartbeat, and raises AGENT_RECOVERED when a host the
+// watchdog marked UNRESPONSIVE (or OFFLINE) heartbeats again.
+type HeartbeatRecorder interface {
+	// RecordHeartbeat does what UpdateHostHeartbeat does, in one statement,
+	// and returns the host's status and last heartbeat from before it.
+	RecordHeartbeat(ctx context.Context, hb *event.HostHeartbeat) (HeartbeatChange, error)
+}
+
+// HeartbeatChange is a host's state from before a heartbeat was recorded.
+type HeartbeatChange struct {
+	PrevStatus    event.HostStatus
+	PrevHeartbeat time.Time
+}
+
+// HostLookup is implemented by a Store that can return an enrolled host.
+// The ingestion server uses it to name a certificate's host by the hostname
+// recorded at enrollment, rather than by the hostname each message carries.
+type HostLookup interface {
+	GetHost(ctx context.Context, id string) (*event.Host, error)
+}
+
 // PolicyEngine evaluates events against the allowlist and returns a policy result.
 type PolicyEngine interface {
 	Evaluate(evt *event.HookEvent) *event.PolicyResult
@@ -38,19 +63,34 @@ type Connector interface {
 	Send(evt *event.HookEvent) error
 }
 
+// StatusSink receives the host status events the server raises itself
+// (AGENT_RECOVERED here, AGENT_OFFLINE in the watchdog). The connector
+// dispatcher implements it and sends them to every connector.
+type StatusSink interface {
+	Dispatch(evt *event.HookEvent)
+}
+
 // hostState tracks per-host liveness metadata protected by IngestionServer's mutex.
 type hostState struct {
 	lastHeartbeat time.Time
 	agentVersion  string
 }
 
+// broadcastDropLogEvery bounds how often a full broadcast channel is logged.
+const broadcastDropLogEvery = 10 * time.Second
+
+// hostnameRetry is how long a stream waits before it looks up its host's
+// enrolled hostname again after a failed lookup.
+const hostnameRetry = 30 * time.Second
+
 // IngestionServer implements the event stream of hookmonv1.AgentService on
 // the mutual-TLS listener. Enrollment is served separately, by Enroller.
 //
 // The host ID of every event and heartbeat is the CN of the bus's verified
 // client certificate. A host ID inside a message is ignored, so one host
-// cannot send as another. A stream without a verified host certificate is
-// refused, unless Insecure is set.
+// cannot send as another. The hostname stored with each event is the one
+// recorded when that host enrolled, not the one in the message. A stream
+// without a verified host certificate is refused, unless Insecure is set.
 type IngestionServer struct {
 	hookmonv1.UnimplementedAgentServiceServer
 
@@ -58,13 +98,20 @@ type IngestionServer struct {
 	policyEngine PolicyEngine
 	logger       *zap.Logger
 	connectors   []Connector
+	statusSink   StatusSink
 	rateLimiter  *RateLimiter
 	insecure     bool
+	now          func() time.Time
 
 	// eventCh broadcasts processed events for WebSocket consumers.
 	// Sent events have already been validated, enriched with policy results,
-	// and persisted.
+	// and persisted. When it is full, Publish drops the event and counts it.
 	eventCh chan *event.HookEvent
+
+	broadcastDrops atomic.Uint64
+	dropLogMu      sync.Mutex
+	dropLogAt      time.Time
+	dropsAtLastLog uint64
 
 	// hostTracker keeps an in-memory map of host ID to liveness state.
 	// Protected by hostMu.
@@ -78,7 +125,10 @@ type IngestionConfig struct {
 	PolicyEngine PolicyEngine
 	Logger       *zap.Logger
 	Connectors   []Connector
-	RateLimiter  *RateLimiter
+	// StatusSink receives AGENT_RECOVERED. Nil: the event is stored and
+	// published to the WebSocket feed only.
+	StatusSink  StatusSink
+	RateLimiter *RateLimiter
 
 	// Insecure accepts streams that carry no verified client certificate and
 	// takes the host ID from each message instead. Any host can then report
@@ -88,6 +138,9 @@ type IngestionConfig struct {
 	// EventChannelSize controls the buffer size of the event broadcast channel.
 	// Defaults to 256 if zero.
 	EventChannelSize int
+
+	// Now is the clock. Nil means time.Now.
+	Now func() time.Time
 }
 
 // NewIngestionServer creates a fully initialized IngestionServer ready for
@@ -95,6 +148,9 @@ type IngestionConfig struct {
 func NewIngestionServer(cfg IngestionConfig) *IngestionServer {
 	if cfg.Logger == nil {
 		cfg.Logger = zap.NewNop()
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	chanSize := cfg.EventChannelSize
 	if chanSize <= 0 {
@@ -105,8 +161,10 @@ func NewIngestionServer(cfg IngestionConfig) *IngestionServer {
 		policyEngine: cfg.PolicyEngine,
 		logger:       cfg.Logger,
 		connectors:   cfg.Connectors,
+		statusSink:   cfg.StatusSink,
 		rateLimiter:  cfg.RateLimiter,
 		insecure:     cfg.Insecure,
+		now:          cfg.Now,
 		eventCh:      make(chan *event.HookEvent, chanSize),
 		hostTracker:  make(map[string]*hostState),
 	}
@@ -114,9 +172,41 @@ func NewIngestionServer(cfg IngestionConfig) *IngestionServer {
 
 // GetEventChannel returns a read-only channel of processed events for use by
 // the WebSocket real-time feed. Events are delivered on a best-effort basis;
-// if the consumer is slow, events may be dropped.
+// if the consumer is slow, events are dropped and counted (BroadcastDrops).
 func (s *IngestionServer) GetEventChannel() <-chan *event.HookEvent {
 	return s.eventCh
+}
+
+// Publish offers a stored event to the WebSocket feed without blocking. If
+// the feed's buffer is full the event is dropped: the count goes up, and a
+// warning is logged at most once per broadcastDropLogEvery. The event is
+// still in the store and with the connectors.
+func (s *IngestionServer) Publish(evt *event.HookEvent) {
+	select {
+	case s.eventCh <- evt:
+		return
+	default:
+	}
+	total := s.broadcastDrops.Add(1)
+	s.dropLogMu.Lock()
+	defer s.dropLogMu.Unlock()
+	now := s.now()
+	if !s.dropLogAt.IsZero() && now.Sub(s.dropLogAt) < broadcastDropLogEvery {
+		return
+	}
+	s.logger.Warn("WebSocket feed buffer full; events dropped from the live feed (they are stored)",
+		zap.Uint64("dropped_since_last_warning", total-s.dropsAtLastLog),
+		zap.Uint64("dropped_total", total),
+		zap.String("last_dropped_event_id", evt.ID),
+	)
+	s.dropLogAt = now
+	s.dropsAtLastLog = total
+}
+
+// BroadcastDrops returns how many events Publish has dropped because the
+// WebSocket feed's buffer was full.
+func (s *IngestionServer) BroadcastDrops() uint64 {
+	return s.broadcastDrops.Load()
 }
 
 // StreamEvents implements the bidirectional streaming RPC through which agents
@@ -134,7 +224,8 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 		s.logger.Warn("agent stream refused", zap.String("peer", peerAddr), zap.Error(err))
 		return status.Errorf(codes.Unauthenticated, "%v", err)
 	}
-	s.logger.Info("agent stream connected", zap.String("peer", peerAddr), zap.String("host_id", id.hostID))
+	s.logger.Info("agent stream connected", zap.String("peer", peerAddr), zap.String("host_id", id.hostID),
+		zap.String("hostname", id.hostname))
 
 	for {
 		msg, err := stream.Recv()
@@ -178,23 +269,61 @@ type streamIdentity struct {
 	// on an Insecure server for a peer without one; the host ID in each
 	// message is then used as sent.
 	hostID string
-	// mismatchLogged limits the "message names another host" warning to
-	// once per stream.
+	// limitKey is what the rate limiter counts this stream's events
+	// against: the certificate's host ID, or on an Insecure server without
+	// one, the peer's IP address. Never a value from a message.
+	limitKey string
+	// hostname is the hostname recorded when hostID enrolled. Empty until
+	// it has been looked up, and in insecure mode without a certificate.
+	hostname string
+	// lookedUp is when the hostname was last looked up without success;
+	// zero before the first attempt.
+	lookedUp time.Time
+	// mismatchLogged and hostnameLogged limit the "message names another
+	// host" warnings to once per stream.
 	mismatchLogged bool
+	hostnameLogged bool
 }
 
 // identify returns the host ID from the stream's verified client
-// certificate. Without one, the stream is refused unless the server is
-// Insecure.
+// certificate, and that host's enrolled hostname. Without a certificate,
+// the stream is refused unless the server is Insecure.
 func (s *IngestionServer) identify(ctx context.Context) (*streamIdentity, error) {
 	hostID, err := hcrypto.HostIDFromPeer(ctx)
 	if err == nil {
-		return &streamIdentity{hostID: hostID}, nil
+		id := &streamIdentity{hostID: hostID, limitKey: hostID}
+		s.lookupHostname(ctx, id)
+		return id, nil
 	}
 	if s.insecure {
-		return &streamIdentity{}, nil
+		return &streamIdentity{limitKey: "peer:" + peerIP(ctx)}, nil
 	}
 	return nil, err
+}
+
+// lookupHostname fills id.hostname from the host's enrollment record, if
+// the store can look hosts up. After a failure it tries again no sooner
+// than hostnameRetry later.
+func (s *IngestionServer) lookupHostname(ctx context.Context, id *streamIdentity) {
+	if id.hostID == "" || id.hostname != "" {
+		return
+	}
+	lookup, ok := s.store.(HostLookup)
+	if !ok {
+		return
+	}
+	now := s.now()
+	if !id.lookedUp.IsZero() && now.Sub(id.lookedUp) < hostnameRetry {
+		return
+	}
+	h, err := lookup.GetHost(ctx, id.hostID)
+	if err != nil || h == nil || h.Hostname == "" {
+		id.lookedUp = now
+		s.logger.Warn("no enrolled hostname for this certificate's host; its events are stored without one",
+			zap.String("host_id", id.hostID), zap.Error(err))
+		return
+	}
+	id.hostname = h.Hostname
 }
 
 // resolve returns the host ID to record for a message that names claimed.
@@ -213,14 +342,36 @@ func (s *IngestionServer) resolve(id *streamIdentity, claimed, what string) stri
 	return id.hostID
 }
 
+// resolveHostname returns the hostname to record for an event whose
+// message says claimed: the enrolled hostname for a certificate's host,
+// or claimed on an Insecure stream without a certificate.
+func (s *IngestionServer) resolveHostname(ctx context.Context, id *streamIdentity, claimed string) string {
+	if id.hostID == "" {
+		return claimed
+	}
+	s.lookupHostname(ctx, id)
+	if id.hostname != "" && claimed != "" && claimed != id.hostname && !id.hostnameLogged {
+		id.hostnameLogged = true
+		s.logger.Warn("bus reports a different hostname than it enrolled with; recording the enrolled one",
+			zap.String("host_id", id.hostID),
+			zap.String("enrolled_hostname", id.hostname),
+			zap.String("reported_hostname", claimed),
+		)
+	}
+	return id.hostname
+}
+
 // handleEvent processes a single event from the agent stream. It validates
 // the event, checks rate limits, evaluates policy, persists the event, fans
 // out to connectors and the WebSocket channel, and sends an ack back to
 // the agent.
 func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEventsServer, id *streamIdentity, protoEvt *hookmonv1.HookEvent) error {
+	ctx := stream.Context()
+
 	// Convert from proto representation to canonical event model.
 	evt := protoToEvent(protoEvt)
 	evt.HostID = s.resolve(id, evt.HostID, "event")
+	evt.Hostname = s.resolveHostname(ctx, id, evt.Hostname)
 
 	// Validate required fields.
 	if err := ValidateEvent(evt); err != nil {
@@ -231,8 +382,8 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 		return fmt.Errorf("validation: %w", err)
 	}
 
-	// Apply per-host rate limiting.
-	if s.rateLimiter != nil && !s.rateLimiter.Allow(evt.HostID) {
+	// Apply per-host rate limiting, keyed by the authenticated identity.
+	if s.rateLimiter != nil && !s.rateLimiter.Allow(id.limitKey) {
 		s.logger.Warn("event rate limited",
 			zap.String("host_id", evt.HostID),
 			zap.String("event_id", evt.ID),
@@ -247,7 +398,6 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 	}
 
 	// Persist the event.
-	ctx := stream.Context()
 	if s.store != nil {
 		if err := s.store.InsertEvent(ctx, evt); err != nil {
 			s.logger.Error("failed to insert event",
@@ -270,13 +420,7 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 	}
 
 	// Broadcast to the WebSocket event channel (non-blocking).
-	select {
-	case s.eventCh <- evt:
-	default:
-		s.logger.Debug("event channel full, dropping broadcast",
-			zap.String("event_id", evt.ID),
-		)
-	}
+	s.Publish(evt)
 
 	// Send positive acknowledgement back to the agent.
 	if err := s.sendEventAck(stream, evt.ID, true); err != nil {
@@ -295,7 +439,8 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 // handleHeartbeat updates the in-memory host tracker and records the
 // heartbeat and its sensor snapshot in the store. The time recorded is the
 // server's receive time: the bus's own timestamp could hold a host "online"
-// past the watchdog timeout if its clock ran ahead.
+// past the watchdog timeout if its clock ran ahead. If the watchdog had
+// marked the host UNRESPONSIVE, it raises AGENT_RECOVERED.
 func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentity, hb *hookmonv1.Heartbeat) {
 	hostID := s.resolve(id, hb.HostId, "heartbeat")
 	if hostID == "" {
@@ -303,7 +448,7 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentit
 		return
 	}
 
-	now := time.Now().UTC()
+	now := s.now().UTC()
 
 	// Update in-memory tracker.
 	s.hostMu.Lock()
@@ -321,7 +466,17 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentit
 			AgentVersion: hb.AgentVersion,
 			Sensors:      protoToSensors(hb.Sensors),
 		}
-		if err := s.store.UpdateHostHeartbeat(ctx, rec); err != nil {
+		if recorder, ok := s.store.(HeartbeatRecorder); ok {
+			change, err := recorder.RecordHeartbeat(ctx, rec)
+			if err != nil {
+				s.logger.Error("failed to update host heartbeat",
+					zap.String("host_id", hostID),
+					zap.Error(err),
+				)
+			} else if change.PrevStatus == event.HostUnresponsive || change.PrevStatus == event.HostOffline {
+				s.hostRecovered(ctx, id, hostID, change, now)
+			}
+		} else if err := s.store.UpdateHostHeartbeat(ctx, rec); err != nil {
 			s.logger.Error("failed to update host heartbeat",
 				zap.String("host_id", hostID),
 				zap.Error(err),
@@ -335,6 +490,53 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentit
 		zap.Uint64("events_sent", hb.EventsSent),
 		zap.Int("sensors", len(hb.Sensors)),
 	)
+}
+
+// hostRecovered raises AGENT_RECOVERED for a host whose heartbeat has just
+// set it back ONLINE: it stores the event, sends it to every connector
+// (StatusSink) and to the WebSocket feed, as the watchdog does with
+// AGENT_OFFLINE. The heartbeat's single UPDATE reads the previous status,
+// so each outage the watchdog recorded gets exactly one recovery.
+func (s *IngestionServer) hostRecovered(ctx context.Context, id *streamIdentity, hostID string, change HeartbeatChange, now time.Time) {
+	hostname := id.hostname
+	if hostname == "" {
+		if lookup, ok := s.store.(HostLookup); ok {
+			if h, err := lookup.GetHost(ctx, hostID); err == nil && h != nil {
+				hostname = h.Hostname
+			}
+		}
+	}
+	reason := fmt.Sprintf("Heartbeats resumed; the host was %s", change.PrevStatus)
+	if !change.PrevHeartbeat.IsZero() {
+		gap := now.Sub(change.PrevHeartbeat).Round(time.Second)
+		reason = fmt.Sprintf("Heartbeats resumed after %s without one (last at %s); the host was %s, and events from that time may be missing",
+			gap, change.PrevHeartbeat.UTC().Format(time.RFC3339), change.PrevStatus)
+	}
+	evt := &event.HookEvent{
+		ID:        uuid.New().String(),
+		Timestamp: now,
+		HostID:    hostID,
+		Hostname:  hostname,
+		EventType: event.EventAgentRecovered,
+		Severity:  event.SeverityInfo,
+		PolicyResult: &event.PolicyResult{
+			Action: event.ActionAlert,
+			Reason: reason,
+		},
+	}
+	s.logger.Info("host heartbeating again — generating AGENT_RECOVERED",
+		zap.String("host_id", hostID),
+		zap.String("hostname", hostname),
+		zap.String("previous_status", string(change.PrevStatus)),
+		zap.Time("previous_heartbeat", change.PrevHeartbeat),
+	)
+	if err := s.store.InsertEvent(ctx, evt); err != nil {
+		s.logger.Error("failed to store AGENT_RECOVERED event", zap.String("host_id", hostID), zap.Error(err))
+	}
+	if s.statusSink != nil {
+		s.statusSink.Dispatch(evt)
+	}
+	s.Publish(evt)
 }
 
 // protoToSensors converts a heartbeat's sensor snapshot. Nil entries are
@@ -438,10 +640,13 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 		evt.Timestamp = pe.Timestamp.AsTime()
 	}
 
-	// Map proto enum to domain string type.
+	// Map proto enum to domain string type. UNSPECIFIED (the zero value, a
+	// message without a type) stays empty so validation reports it missing;
+	// a value this server does not know keeps its name, and validation
+	// refuses it.
 	if mapped, ok := protoEventTypeToEventType[pe.EventType]; ok {
 		evt.EventType = mapped
-	} else {
+	} else if pe.EventType != hookmonv1.EventType_EVENT_TYPE_UNSPECIFIED {
 		evt.EventType = event.EventType(pe.EventType.String())
 	}
 
@@ -544,15 +749,20 @@ func protoToEvent(pe *hookmonv1.HookEvent) *event.HookEvent {
 		}
 	}
 	if pe.ElfRpathDetail != nil {
-		entries := make([]event.RpathEntry, len(pe.ElfRpathDetail.Entries))
-		for i, e := range pe.ElfRpathDetail.Entries {
-			entries[i] = event.RpathEntry{
+		// Entries never arrive nil off the wire, but a nil element must
+		// not stop the server if one ever reaches here; it is skipped.
+		entries := make([]event.RpathEntry, 0, len(pe.ElfRpathDetail.Entries))
+		for _, e := range pe.ElfRpathDetail.Entries {
+			if e == nil {
+				continue
+			}
+			entries = append(entries, event.RpathEntry{
 				Path:    e.Path,
 				Risk:    event.RpathRisk(e.Risk),
 				Reason:  e.Reason,
 				Exists:  e.Exists,
 				IsRpath: e.IsRpath,
-			}
+			})
 		}
 		evt.ElfRpathDetail = &event.ElfRpathDetail{
 			HasRpath:       pe.ElfRpathDetail.HasRpath,

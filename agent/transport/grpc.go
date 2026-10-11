@@ -66,10 +66,15 @@ type GRPCTransport struct {
 	retry    RetryConfig
 	queue    chan outbound
 
-	// mu guards connected. enqueue holds it while it queues a message, so
-	// once Run marks the stream down nothing new can enter the queue.
+	// mu guards connected and connectedOnce. enqueue holds it while it
+	// queues a message, so once Run marks the stream down nothing new can
+	// enter the queue.
 	mu        sync.Mutex
 	connected bool
+	// connectedOnce is set once a stream has been up. Until then a server
+	// certificate that does not verify stops Run (ErrServerNotTrusted);
+	// afterwards it is retried like any other failure.
+	connectedOnce bool
 
 	// inflight holds events sent on the current stream and not yet acked.
 	inflightMu sync.Mutex
@@ -118,7 +123,10 @@ func (t *GRPCTransport) SetSensorSource(fn func() []event.SensorHealth) {
 // cancelled. After any stream failure it reconnects with RetryLoop's
 // exponential backoff. It returns nil once ctx is cancelled, and
 // ErrNoIdentity at once if the bus has no client certificate and is not in
-// insecure mode. Call Close only after Run has returned.
+// insecure mode. If the server's certificate does not verify against the
+// CA file before the first stream is up, it returns ErrServerNotTrusted
+// (wrapped) instead of retrying: that is a configuration error. Call Close
+// only after Run has returned.
 func (t *GRPCTransport) Run(ctx context.Context) error {
 	// Never fall back to plaintext: without --insecure the bus needs a
 	// client certificate, which EnsureIdentity provides.
@@ -134,6 +142,9 @@ func (t *GRPCTransport) Run(ctx context.Context) error {
 		err := RetryLoop(ctx, t.retry, t.logger, func(ctx context.Context) error {
 			var err error
 			s, err = t.connect(ctx)
+			if errors.Is(err, ErrServerNotTrusted) && !t.wasConnected() {
+				return &stopRetrying{err}
+			}
 			return err
 		})
 		if err != nil {
@@ -163,7 +174,7 @@ func (t *GRPCTransport) Run(ctx context.Context) error {
 // fresh ClientConn so that RetryLoop alone paces reconnection, without gRPC's
 // own reconnect backoff on a reused conn stacked on top.
 func (t *GRPCTransport) connect(ctx context.Context) (*session, error) {
-	opts, err := t.dialOptions()
+	opts, verify, err := t.dialOptions()
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +193,11 @@ func (t *GRPCTransport) connect(ctx context.Context) (*session, error) {
 		stopTimer()
 		cancel()
 		conn.Close()
+		if verify != nil {
+			if verr := verify.take(); verr != nil {
+				return nil, notTrusted(t.cfg.ServerAddr, t.cfg.TLS.CAFile, verr)
+			}
+		}
 		return nil, fmt.Errorf("open stream: %w", err)
 	}
 	return &session{
@@ -193,20 +209,22 @@ func (t *GRPCTransport) connect(ctx context.Context) (*session, error) {
 	}, nil
 }
 
-// dialOptions returns mutual-TLS credentials, or plaintext only when
-// TLS.Insecure is set.
-func (t *GRPCTransport) dialOptions() ([]grpc.DialOption, error) {
+// dialOptions returns mutual-TLS credentials, with the recorder that
+// notes a server certificate that does not verify, or plaintext (and no
+// recorder) only when TLS.Insecure is set.
+func (t *GRPCTransport) dialOptions() ([]grpc.DialOption, *verifyRecorder, error) {
 	if t.cfg.TLS.Insecure {
-		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
+		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil, nil
 	}
 	creds, err := hcrypto.LoadClientTLS(
 		t.cfg.TLS.CertFile, t.cfg.TLS.KeyFile,
 		t.cfg.TLS.CAFile, t.cfg.TLS.ServerName,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("load TLS credentials: %w", err)
+		return nil, nil, fmt.Errorf("load TLS credentials: %w", err)
 	}
-	return []grpc.DialOption{grpc.WithTransportCredentials(creds)}, nil
+	verify := watchVerify(creds)
+	return []grpc.DialOption{grpc.WithTransportCredentials(verify)}, verify, nil
 }
 
 // serve runs one stream until it breaks or ctx is cancelled, then tears it
@@ -319,7 +337,17 @@ func (t *GRPCTransport) recvLoop(s *session) {
 func (t *GRPCTransport) setConnected(v bool) {
 	t.mu.Lock()
 	t.connected = v
+	if v {
+		t.connectedOnce = true
+	}
 	t.mu.Unlock()
+}
+
+// wasConnected reports whether a stream has ever been up.
+func (t *GRPCTransport) wasConnected() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.connectedOnce
 }
 
 // enqueue queues m for the sender without blocking.

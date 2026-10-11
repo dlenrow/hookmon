@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -18,6 +19,7 @@ import (
 
 	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
 	"github.com/dlenrow/hookmon/pkg/event"
+	"github.com/dlenrow/hookmon/server/ingestion"
 )
 
 //go:embed migrations/*.sql
@@ -371,7 +373,8 @@ func scanEvent(rows pgx.Rows) (*event.HookEvent, error) {
 	return &ev, nil
 }
 
-// GetEvent retrieves a single event by ID.
+// GetEvent retrieves a single event by ID. A missing event is ErrNotFound
+// (wrapped); any other error is a database failure.
 func (s *Store) GetEvent(ctx context.Context, id string) (*event.HookEvent, error) {
 	const query = `
 		SELECT id, timestamp, host_id, hostname,
@@ -392,9 +395,16 @@ func (s *Store) GetEvent(ctx context.Context, id string) (*event.HookEvent, erro
 	defer rows.Close()
 
 	if !rows.Next() {
-		return nil, fmt.Errorf("event not found: %s", id)
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("query event: %w", err)
+		}
+		return nil, fmt.Errorf("event %s: %w", id, ErrNotFound)
 	}
-	return scanEvent(rows)
+	ev, err := scanEvent(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan event: %w", err)
+	}
+	return ev, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -536,36 +546,53 @@ func (s *Store) GetHosts(ctx context.Context) ([]*event.Host, error) {
 }
 
 // UpdateHostHeartbeat records a heartbeat: the receive time, the bus
-// version and the sensor snapshot, and sets the host ONLINE. It returns an
-// error if the host is not enrolled.
+// version and the sensor snapshot, and sets the host ONLINE. It returns
+// ErrNotFound (wrapped) if the host is not enrolled.
 func (s *Store) UpdateHostHeartbeat(ctx context.Context, hb *event.HostHeartbeat) error {
+	_, err := s.RecordHeartbeat(ctx, hb)
+	return err
+}
+
+// RecordHeartbeat is UpdateHostHeartbeat, and also returns the host's
+// status and last heartbeat from before this one. The read and the update
+// are one statement that locks the row, so a heartbeat and the watchdog's
+// MarkHostUnresponsive are ordered: either the watchdog sees the new
+// heartbeat and leaves the host ONLINE, or the heartbeat sees UNRESPONSIVE
+// and the caller raises AGENT_RECOVERED. Each outage is reported once.
+func (s *Store) RecordHeartbeat(ctx context.Context, hb *event.HostHeartbeat) (ingestion.HeartbeatChange, error) {
 	sensorsJSON, err := json.Marshal(hb.Sensors)
 	if err != nil {
-		return fmt.Errorf("marshal sensors: %w", err)
+		return ingestion.HeartbeatChange{}, fmt.Errorf("marshal sensors: %w", err)
 	}
 	if hb.Sensors == nil {
 		sensorsJSON = nil
 	}
 
 	const query = `
+		WITH prev AS (
+			SELECT id, status, last_heartbeat FROM hosts WHERE id = $5 FOR UPDATE
+		)
 		UPDATE hosts
 		SET last_heartbeat = $1,
 			status = $2,
-			agent_version = CASE WHEN $3 = '' THEN agent_version ELSE $3 END,
+			agent_version = CASE WHEN $3 = '' THEN hosts.agent_version ELSE $3 END,
 			sensors = $4
-		WHERE id = $5`
+		FROM prev
+		WHERE hosts.id = prev.id
+		RETURNING prev.status, prev.last_heartbeat`
 
-	tag, err := s.pool.Exec(ctx, query,
-		hb.ReceivedAt, string(event.HostOnline), hb.AgentVersion, sensorsJSON, hb.HostID)
+	var prevStatus string
+	var prevHeartbeat time.Time
+	err = s.pool.QueryRow(ctx, query,
+		hb.ReceivedAt, string(event.HostOnline), hb.AgentVersion, sensorsJSON, hb.HostID,
+	).Scan(&prevStatus, &prevHeartbeat)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ingestion.HeartbeatChange{}, fmt.Errorf("host %s: %w", hb.HostID, ErrNotFound)
+	}
 	if err != nil {
-		return fmt.Errorf("update heartbeat for host %s: %w", hb.HostID, err)
+		return ingestion.HeartbeatChange{}, fmt.Errorf("update heartbeat for host %s: %w", hb.HostID, err)
 	}
-
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("host %s not found", hb.HostID)
-	}
-
-	return nil
+	return ingestion.HeartbeatChange{PrevStatus: event.HostStatus(prevStatus), PrevHeartbeat: prevHeartbeat}, nil
 }
 
 // MarkHostUnresponsive sets an ONLINE host UNRESPONSIVE if its last

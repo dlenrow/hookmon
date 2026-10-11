@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
 	"github.com/dlenrow/hookmon/pkg/event"
 )
@@ -11,7 +12,8 @@ import (
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	hosts, err := s.store.GetHosts(r.Context())
 	if err != nil {
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		s.logger.Error("list hosts failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	if hosts == nil {
@@ -24,7 +26,7 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	host, err := s.store.GetHost(r.Context(), id)
 	if err != nil {
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		s.storeError(w, "get host", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, host)

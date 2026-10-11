@@ -49,13 +49,14 @@ type ptraceMonitorEvent struct {
 // registers (PTRACE_POKETEXT, PTRACE_POKEDATA, PTRACE_POKEUSER,
 // PTRACE_SETREGS, PTRACE_SETREGSET).
 type PtraceMonitorSensor struct {
-	eventCh chan *event.HookEvent
-	tp      link.Link
-	reader  *ringbuf.Reader
-	coll    *ebpf.Collection
-	prog    *ebpf.Program
-	done    chan struct{}
-	selfNS  uint64 // the bus's PID namespace inode; 0 if unknown
+	eventCh  chan *event.HookEvent
+	tp       link.Link
+	reader   *ringbuf.Reader
+	coll     *ebpf.Collection
+	prog     *ebpf.Program
+	done     chan struct{}
+	readErrs readErrors // ring buffer read errors; see CheckAttached
+	selfNS   uint64     // the bus's PID namespace inode; 0 if unknown
 }
 
 func NewPtraceMonitorSensor() *PtraceMonitorSensor {
@@ -132,19 +133,25 @@ func (s *PtraceMonitorSensor) HeartbeatNs() (uint64, error) {
 }
 
 // CheckAttached implements BPFHealth.
-func (s *PtraceMonitorSensor) CheckAttached() error { return checkAttached(s.prog, s.tp) }
+func (s *PtraceMonitorSensor) CheckAttached() error {
+	if err := s.readErrs.err(); err != nil {
+		return err
+	}
+	return checkAttached(s.prog, s.tp)
+}
 
 func (s *PtraceMonitorSensor) readLoop() {
 	for {
 		record, err := s.reader.Read()
 		if err != nil {
-			select {
-			case <-s.done:
+			// Closed: stop. Anything else: back off, and let
+			// CheckAttached report it while it lasts.
+			if !s.readErrs.handle(err, s.done) {
 				return
-			default:
-				continue
 			}
+			continue
 		}
+		s.readErrs.ok()
 
 		var raw ptraceMonitorEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {

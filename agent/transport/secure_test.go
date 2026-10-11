@@ -82,7 +82,7 @@ func TestGRPCTransport_RefusesPlaintext(t *testing.T) {
 		t.Errorf("Run took %v to refuse; it should not dial", d)
 	}
 
-	opts, err := (&GRPCTransport{cfg: cfg}).dialOptions()
+	opts, _, err := (&GRPCTransport{cfg: cfg}).dialOptions()
 	if err == nil {
 		t.Errorf("dialOptions without a certificate or --insecure returned %d options and no error", len(opts))
 	}

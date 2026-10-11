@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"math"
 	"time"
 
@@ -27,7 +28,8 @@ func DefaultRetryConfig() RetryConfig {
 }
 
 // RetryLoop calls connectFn repeatedly with exponential backoff until it
-// succeeds or the context is cancelled.
+// succeeds or the context is cancelled. An error connectFn wraps in
+// stopRetrying ends the loop at once with its cause.
 func RetryLoop(ctx context.Context, cfg RetryConfig, logger *zap.Logger, connectFn func(context.Context) error) error {
 	delay := cfg.InitialDelay
 	attempt := 0
@@ -37,6 +39,10 @@ func RetryLoop(ctx context.Context, cfg RetryConfig, logger *zap.Logger, connect
 		if err := connectFn(ctx); err == nil {
 			return nil
 		} else {
+			var stop *stopRetrying
+			if errors.As(err, &stop) {
+				return stop.err
+			}
 			logger.Warn("connection attempt failed",
 				zap.Int("attempt", attempt),
 				zap.Duration("next_retry", delay),

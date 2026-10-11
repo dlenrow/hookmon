@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import type { Severity, HookEvent } from './api/types';
 import { getEvents, connectWebSocket } from './api/client';
@@ -69,12 +69,18 @@ export function App() {
     }));
   }, []);
 
-  // Each (re)connect starts a new feed; pages reload history to cover the gap.
+  // resync changes each time the live feed starts, and once more if it
+  // cannot start at first (no token, or the first connection failed). Pages
+  // load history when it changes: the first load waits for the feed, so no
+  // event falls between the two and history is fetched once, and each
+  // reconnect reloads to cover the gap.
+  const firstWsState = useRef(true);
   const handleWsState = useCallback((state: WebSocketState) => {
     setWsState(state);
-    if (state === 'live') {
+    if (state === 'live' || firstWsState.current) {
       setResync((n) => n + 1);
     }
+    firstWsState.current = false;
   }, []);
 
   useEffect(() => {

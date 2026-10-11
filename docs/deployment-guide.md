@@ -122,12 +122,15 @@ Use `--console` if you run no server.
 | `--dlopen-probe` | `hookmon-dlopen-probe` next to the bus binary | Path to the dlopen helper |
 | `--scan-rpath <dir>` | — | Scan a directory's ELF binaries for RPATH issues, print JSON, and exit |
 | `--server-addr` | `localhost:9443` (from config) | `hookmon-server` gRPC address |
-| `--enroll-token` | — | Enrollment secret. Used on the first start, when the bus has no certificate yet |
+| `--enroll-token-file` | — | File holding the enrollment secret (mode 0600). Used on the first start, when the bus has no certificate yet. Preferred: the secret stays out of the process list |
+| `--enroll-token` | — | The enrollment secret itself. Visible in the process list while the bus enrolls; prefer `--enroll-token-file` or `HOOKMON_ENROLL_TOKEN` |
 | `--enroll-addr` | the `--server-addr` host, port 9444 | `hookmon-server` enrollment address |
 | `--ca-file` | — | CA certificate that signed the server's certificate. Required to enroll |
 | `--state-dir` | `/var/lib/hookmon` (from config) | Where the enrolled key and certificates are stored |
 | `--insecure` | false | Connect to the server without TLS. Development only |
 | `--version` | — | Print version and exit |
+
+The environment variable `HOOKMON_ENROLL_TOKEN` also gives the enrollment secret, when neither token flag does. It is readable by root and the bus's own user (`/proc/<pid>/environ`), not by everyone; the bus unsets it once read, so the helpers it runs do not inherit it.
 
 `hookmon-bus` has no `--prometheus-port` flag. Only the deprecated `hookmon-agent` binary still accepts it (as an alias for the status port); `hookmon-agent` reads `/etc/hookmon/agent.yaml` by default.
 
@@ -228,14 +231,24 @@ hosts:
 For SSH transport (when direct HTTP is not allowed):
 
 ```yaml
+ssh_known_hosts: /etc/hookmon/collector_known_hosts
 hosts:
   - hostname: prod-web-01
     ssh_host: 10.0.1.101
     ssh_user: hookmon-collector
     ssh_key: /etc/hookmon/collector_rsa
+    status_port: 2112            # the bus's status_port on this host (default 2112)
+    # ssh_known_hosts: /etc/hookmon/other_known_hosts   # per-host override
 ```
 
-In SSH mode the collector runs `curl -s http://localhost:2112/status` on the host, so the bus must use port 2112 there and `curl` must be installed. The SSH user needs no other privileges. The collector does not verify the SSH host key. SSH mode returns the same `/status` answer as HTTP mode; it is not an independent check.
+SSH mode verifies each host's key against `ssh_known_hosts` (OpenSSH's known_hosts format; hashed entries work). It fails closed: the collector refuses to start if a host uses SSH and no known_hosts file is set or readable, and a host whose key is missing from the file, or does not match it, is reported unreachable with the presented key's fingerprint. Build the file with `ssh-keyscan`, and check each fingerprint against the host's own (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the host) before you trust it:
+
+```bash
+ssh-keyscan -t ed25519 10.0.1.101 | sudo tee -a /etc/hookmon/collector_known_hosts
+ssh-keygen -lf /etc/hookmon/collector_known_hosts
+```
+
+A file that lists only some of a host's key types is enough. The collector then runs `curl -s http://localhost:<status_port>/status` on the host, so `curl` must be installed there. The SSH user needs no other privileges. SSH mode proves the collector reached the real host, but it returns the same `/status` answer as HTTP mode; it is not an independent check of the bus.
 
 ### Run
 
@@ -370,16 +383,26 @@ no TLS certificate configured: set tls.cert_file, tls.key_file and tls.ca_file (
 
 ### Enroll Each Sensor Bus
 
-Copy `ca.crt` (not `ca.key`) to the host, then start the bus once with an enrollment token:
+Copy `ca.crt` (not `ca.key`) to the host, put the enrollment token in a root-only file, then start the bus once with it:
 
 ```bash
-sudo hookmon-bus --enroll-token <secret> \
+sudo install -m 0600 /dev/null /etc/hookmon/enroll.token
+sudo sh -c 'cat > /etc/hookmon/enroll.token'    # paste the secret, then Ctrl-D
+sudo hookmon-bus --enroll-token-file /etc/hookmon/enroll.token \
   --server-addr hookmon.internal:9443 \
   --ca-file /path/to/ca.crt \
   --loki-url http://<stack-host>:3100
 ```
 
-The bus generates a key, enrolls on port 9444, and stores `bus.key`, `bus.crt` and `ca.crt` in `/var/lib/hookmon` (mode 0600). The server assigns the host's ID and writes it into the certificate. Later starts use the stored identity and need no token, so the systemd unit above works without `--console` once `server_addr` is set in `/etc/hookmon/bus.yaml`. The token shows in the process list while the first start runs.
+`HOOKMON_ENROLL_TOKEN=<secret>` works too (for example from a systemd `EnvironmentFile=` with mode 0600). `--enroll-token <secret>` also works, but the secret then shows in the process list while the first start runs. The bus warns about that, and about a token file other users can read.
+
+The bus generates a key, enrolls on port 9444, and stores `bus.key`, `bus.crt` and `ca.crt` in `/var/lib/hookmon` (mode 0600). The server assigns the host's ID and writes it into the certificate, and records the host's hostname; events from this host are stored under that hostname, whatever the bus later reports. Later starts use the stored identity and need no token, so the systemd unit above works without `--console` once `server_addr` is set in `/etc/hookmon/bus.yaml`. Delete the token file once the host has enrolled.
+
+If `--ca-file` is not the CA that signed the server's certificate, or the server address is not a name in that certificate, the bus exits at once:
+
+```
+enrollment: enroll with hookmon.internal:9444: the server's TLS certificate does not verify against the CA file: ...; check that --ca-file (tls.ca_file) is the CA that signed the server's certificate, and that the server address is a name in that certificate (or set tls.server_name)
+```
 
 Check the inventory:
 
@@ -388,7 +411,7 @@ curl --cacert /etc/hookmon/tls/ca.crt -H "Authorization: Bearer <api-token>" \
   https://hookmon.internal:8443/api/v1/hosts
 ```
 
-The host shows `ONLINE` with its sensors' health. If its heartbeats stop for `watchdog.heartbeat_timeout` (default 60 s), the server marks it `UNRESPONSIVE` and stores an AGENT_OFFLINE event.
+The host shows `ONLINE` with its sensors' health. If its heartbeats stop for `watchdog.heartbeat_timeout` (default 60 s), the server marks it `UNRESPONSIVE` and stores an AGENT_OFFLINE event. When the bus heartbeats again the host goes back to `ONLINE` and the server stores an AGENT_RECOVERED event. Both appear in the dashboard's live feed and go to every connector.
 
 `hookmon-cli` defaults to `https://localhost:8443`. Pass `--server https://hookmon.internal:8443 --token <api-token> --ca-file ca.crt`, or set `HOOKMON_CA_FILE`.
 
@@ -434,7 +457,7 @@ connectors:
     min_severity: INFO       # every event, not only alerts
 ```
 
-`min_severity` decides what a connector gets. With `ALERT` (the default) or `CRITICAL`, it gets alerts: events at or above that severity that no allowlist entry allowed, sent once per 5 minutes per host, binary and subject. With `INFO` or `WARN`, it gets every stored event at or above that severity. Every connector also gets AGENT_OFFLINE when a host stops sending heartbeats.
+`min_severity` decides what a connector gets. With `ALERT` (the default) or `CRITICAL`, it gets alerts: events at or above that severity that no allowlist entry allowed, sent once per 5 minutes per host, binary and subject. With `INFO` or `WARN`, it gets every stored event at or above that severity. Every connector also gets AGENT_OFFLINE when a host stops sending heartbeats, and AGENT_RECOVERED when it starts again.
 
 The other connectors:
 
@@ -509,4 +532,4 @@ The bus drops events whose PID or parent PID is its own: its own `bpf()` calls w
 
 **Collector shows a host unreachable but the host is up:**
 - Check that the firewall lets the collector reach the bus on port 2112.
-- For SSH transport, check the SSH credentials and that `curl -s http://localhost:2112/status` works on the host as the collector's user.
+- For SSH transport, check the SSH credentials and that `curl -s http://localhost:<status_port>/status` works on the host as the collector's user. An error saying the host key "is not in" or "does not match" the known_hosts file means the collector refused the host: add its key after checking the fingerprint, or find out why it changed.

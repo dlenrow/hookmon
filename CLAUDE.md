@@ -647,8 +647,11 @@ Agent gRPC stream
             Event-feed connectors (min_severity INFO or WARN) get every
             event at or above it.
 
-Watchdog AGENT_OFFLINE → every connector
+Watchdog AGENT_OFFLINE, and AGENT_RECOVERED on the next heartbeat
+    → every connector (whatever its min_severity) and the WebSocket feed
 ```
+
+The host ID and the hostname stored with each event come from the bus's certificate and the host's enrollment record, not from the event. The rate limit is keyed by the certificate's host ID and keeps at most 10,000 hosts. Recovery interceptors on both gRPC listeners turn a handler panic into an error for that call.
 
 Server-side enrichment (reverse DNS, asset DB lookup) is not built.
 
@@ -770,19 +773,19 @@ Console-based setup wizard on first boot:
      sudo bash -s -- --token <enrollment-token>
    ```
 
-The `/enroll` script and `curl` command above do not exist (fix plan step 7g). A bus enrolls with `hookmon-bus --enroll-token` instead.
+The `/enroll` script and `curl` command above do not exist (fix plan step 7g). A bus enrolls with `hookmon-bus --enroll-token-file` instead.
 
 ### Agent Enrollment Protocol
 
 **Status: working (fix plan step 7a).** There is no enrollment script or package install yet (step 7g); the operator installs the bus and runs it once with a token.
 
 1. The server config (`/etc/hookmon/server.yaml`) lists enrollment tokens: name, secret (at least 32 characters), expiry, optional `single_use`. With tokens configured, the server listens for enrollment on 9444 (TLS, server authentication only, `Enroll` RPC only).
-2. On first start, `hookmon-bus --enroll-token <secret> --server-addr <host>:9443 --ca-file ca.crt` generates an ECDSA P-256 keypair and sends a CSR to `--enroll-addr` (default: the server host on 9444), verifying the server against `--ca-file`.
+2. On first start, `hookmon-bus --enroll-token-file <file> --server-addr <host>:9443 --ca-file ca.crt` generates an ECDSA P-256 keypair and sends a CSR to `--enroll-addr` (default: the server host on 9444), verifying the server against `--ca-file`. The token can also come from `HOOKMON_ENROLL_TOKEN` or `--enroll-token` (visible in the process list). A server certificate that does not verify against `--ca-file` stops the bus with an error instead of a retry loop.
 3. The server checks the token in constant time, rejects it if expired or already used (single-use tokens are recorded in PostgreSQL), assigns a UUID host ID, and signs a client certificate with that ID as CN. It creates the host in the inventory and returns the certificate and the CA certificate.
 4. The bus checks the certificate against its key and its CA, stores `bus.key`, `bus.crt` and `ca.crt` in `/var/lib/hookmon` (`--state-dir`) with mode 0600, and connects to 9443 with mutual TLS.
 5. On every later RPC the server takes the host ID from the client certificate and ignores the one in the message. Heartbeats carry the sensor-registry snapshot. Later starts reuse the stored identity.
 
-Gaps: the token is visible in the process list during the first start; certificates are not renewed; no AGENT_RECOVERED event is sent when a host comes back.
+Gaps: certificates are not renewed.
 
 ## Build System
 
@@ -930,7 +933,7 @@ A sophisticated attacker will attempt to disable HookMon before proceeding. The 
 
 - **Active probes and heartbeat maps:** Every 10 seconds the bus fires each eBPF sensor's hook itself, and the hook writes a kernel timestamp to its heartbeat map. A sensor is alive only if its map moved forward and its program and link are still attached. A hook that stops running is marked dead after `dead_threshold` (15 s), about 20 s in the worst case. On kernel 5.19, `bpftool link detach` is refused for these links, so the dead path is covered by unit tests only.
 - **Server-side polling:** The `hookmon-collector` polls each host's `/status` endpoint every 30 seconds. If the sensor bus process is killed, the endpoint becomes unreachable — the collector detects this within one poll interval.
-- **Out-of-band verification:** not built, and not in the fix plan. The collector's SSH mode runs `curl -s http://localhost:2112/status` on the host, so it sees the same answer as HTTP mode. It does not run `bpftool`, and it does not verify SSH host keys.
+- **Out-of-band verification:** not built, and not in the fix plan. The collector's SSH mode verifies the host's key against `ssh_known_hosts` (fail closed) and runs `curl -s http://localhost:<status_port>/status` on the host, so it sees the same answer as HTTP mode. It does not run `bpftool`.
 - **Prometheus alerting:** rules in `deploy/docker/grafana/alerts/hookmon-alerts.yaml` route to Alertmanager. `HookMonSensorDead` and `HookMonFleetDegraded` fire after 1 minute, `HookMonHostUnreachable` after 2 minutes, and `HookMonCollectorSilent` when the collector has not pushed for 90 s. The Grafana Fleet Health panel shows the state.
 - **Limit:** root on the host can kill the bus and serve a fake `/status`, or write fresh timestamps into a heartbeat map. HookMon does not detect either.
 

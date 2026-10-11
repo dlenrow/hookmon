@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/dlenrow/hookmon/pkg/allowlist"
 	"github.com/dlenrow/hookmon/pkg/event"
+	"github.com/dlenrow/hookmon/server/store"
 )
 
 // allowlistEventRequest is the body of POST /api/v1/events/{id}/allowlist:
@@ -68,9 +70,13 @@ func (s *Server) handleAllowlistEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	evt, err := s.store.GetEvent(r.Context(), id)
-	if err != nil {
-		s.logger.Debug("allowlist event: get event failed", zap.String("id", id), zap.Error(err))
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "event not found")
+		return
+	case err != nil:
+		s.logger.Error("allowlist event: get event failed", zap.String("id", id), zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	switch evt.EventType {

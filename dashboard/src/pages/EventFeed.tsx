@@ -6,7 +6,11 @@ import { EventCard } from '../components/EventCard';
 interface EventFeedProps {
   liveEvents: HookEvent[];
   wsConnected: boolean;
-  /** Changes each time the live feed (re)connects, so history is reloaded to cover any gap. */
+  /**
+   * Changes each time the live feed (re)connects, so history is reloaded to
+   * cover any gap. 0 until the feed's first attempt has an outcome; history
+   * is not loaded before then.
+   */
   resync: number;
 }
 
@@ -40,8 +44,11 @@ export function EventFeed({ liveEvents, wsConnected, resync }: EventFeedProps) {
 
   const feedTopRef = useRef<HTMLDivElement>(null);
 
-  // Load historical events
+  // Load historical events once the live feed is up (or cannot be), and
+  // again on each reconnect or filter change. Loading at mount as well
+  // fetched the same history twice on every first visit.
   useEffect(() => {
+    if (resync === 0) return;
     let cancelled = false;
 
     async function loadEvents() {

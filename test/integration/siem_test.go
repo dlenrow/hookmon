@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -197,10 +198,15 @@ func TestSIEM_AlertsReachSyslogAndWebhook(t *testing.T) {
 	if m == nil {
 		t.Fatalf("not RFC 5424 with CEF: %q", msg)
 	}
-	// PRI 130 is local0 (16) * 8 + critical (2); HOSTNAME is the event's
-	// host as the bus named it.
-	if m[1] != "130" || m[3] != "bus" || m[4] != "BPF_LOAD" {
-		t.Errorf("header: PRI %s, HOSTNAME %s, MSGID %s", m[1], m[3], m[4])
+	// PRI 130 is local0 (16) * 8 + critical (2); HOSTNAME is the hostname
+	// the host enrolled with. Since step 7f the "bus" the event itself
+	// carries is not used: it is self-asserted.
+	enrolledName, _ := os.Hostname()
+	if m[1] != "130" || m[3] != enrolledName || m[4] != "BPF_LOAD" {
+		t.Errorf("header: PRI %s, HOSTNAME %s (want the enrolled %s), MSGID %s", m[1], m[3], enrolledName, m[4])
+	}
+	if !strings.Contains(m[5], "shost="+enrolledName+" ") {
+		t.Errorf("CEF shost is not the enrolled hostname %s: %s", enrolledName, m[5])
 	}
 	for _, want := range []string{"|BPF_LOAD|BPF Program Loaded|10|", "cs2Label=ProgName cs2=hello_count", "cs5Label=ProgTag cs5=a04f5eef06a7f555",
 		"deviceExternalId=" + bus.HostID, "cs4Label=PolicyResult cs4=ALERT", "suid=0", "sproc=/usr/local/bin/siem-loader"} {

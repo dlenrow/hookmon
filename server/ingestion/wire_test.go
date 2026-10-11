@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net"
 	"reflect"
@@ -71,6 +72,20 @@ func (m *memStore) UpdateHostHeartbeat(_ context.Context, hb *event.HostHeartbea
 	return nil
 }
 
+// GetHost returns an enrolled host (HostLookup), so the ingestion server
+// can name a certificate's host by the hostname it enrolled with.
+func (m *memStore) GetHost(_ context.Context, id string) (*event.Host, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, h := range m.hosts {
+		if h.ID == id {
+			c := *h
+			return &c, nil
+		}
+	}
+	return nil, fmt.Errorf("host %s is not enrolled", id)
+}
+
 // enrWire serves an AgentService implementation over an in-memory bufconn
 // listener with real TLS, so the server sees real peer certificates.
 type enrWire struct {
@@ -133,6 +148,9 @@ func TestWire_StreamEvents(t *testing.T) {
 	w := enrServe(t, pki, ing, tls.RequireAndVerifyClientCert, false)
 	hostID := uuid.New().String()
 	client := w.enrDial(t, enrHostCert(t, pki, hostID), false)
+	// The host enrolled as "web-enrolled". The messages below say "web-01";
+	// since step 7f the server records the enrolled name, not the bus's.
+	store.hosts = append(store.hosts, &event.Host{ID: hostID, Hostname: "web-enrolled"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -264,7 +282,7 @@ func TestWire_StreamEvents(t *testing.T) {
 		ID:          "evt-exec-1",
 		Timestamp:   ts,
 		HostID:      hostID,
-		Hostname:    "web-01",
+		Hostname:    "web-enrolled",
 		EventType:   event.EventExecInjection,
 		Severity:    event.SeverityAlert,
 		PID:         4242,
@@ -290,7 +308,7 @@ func TestWire_StreamEvents(t *testing.T) {
 		ID:        "evt-rpath-1",
 		Timestamp: ts,
 		HostID:    hostID,
-		Hostname:  "web-01",
+		Hostname:  "web-enrolled",
 		EventType: event.EventElfRpath,
 		Severity:  event.SeverityCritical,
 		PID:       4243,

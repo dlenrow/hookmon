@@ -91,6 +91,10 @@ type Agent struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 
+	// fatalErr is why the transport stopped the bus, if it did.
+	fatalMu  sync.Mutex
+	fatalErr error
+
 	registry   *registry.Registry
 	health     *healthChecker
 	filter     probeFilter
@@ -193,12 +197,19 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 
 		// Keep the stream to the server up, reconnecting with backoff after
-		// any failure, until ctx is cancelled.
+		// any failure, until ctx is cancelled. The transport returns an
+		// error only for what retrying cannot fix (no certificate, or a
+		// server certificate that does not verify against the CA file
+		// before the first connection); that stops the bus with the error.
 		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
 			if err := a.transport.Run(ctx); err != nil {
-				a.logger.Error("transport stopped", zap.Error(err))
+				a.logger.Error("transport stopped; stopping the sensor bus", zap.Error(err))
+				a.fatalMu.Lock()
+				a.fatalErr = err
+				a.fatalMu.Unlock()
+				a.cancel()
 			}
 		}()
 	}
@@ -255,7 +266,13 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	a.logger.Info("sensor bus shutting down")
-	return a.shutdown()
+	err := a.shutdown()
+	a.fatalMu.Lock()
+	defer a.fatalMu.Unlock()
+	if a.fatalErr != nil {
+		return fmt.Errorf("server connection: %w", a.fatalErr)
+	}
+	return err
 }
 
 // Stop gracefully shuts down the agent.

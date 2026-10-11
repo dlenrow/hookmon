@@ -58,6 +58,7 @@ type BPFSyscallSensor struct {
 	progEnter *ebpf.Program
 	progExit  *ebpf.Program
 	done      chan struct{}
+	readErrs  readErrors // ring buffer read errors; see CheckAttached
 	wg        sync.WaitGroup
 }
 
@@ -156,6 +157,9 @@ func (s *BPFSyscallSensor) HeartbeatNs() (uint64, error) {
 
 // CheckAttached implements BPFHealth for both hooks.
 func (s *BPFSyscallSensor) CheckAttached() error {
+	if err := s.readErrs.err(); err != nil {
+		return err
+	}
 	if err := checkAttached(s.progEnter, s.enter); err != nil {
 		return fmt.Errorf("sys_enter_bpf: %w", err)
 	}
@@ -170,13 +174,14 @@ func (s *BPFSyscallSensor) readLoop() {
 	for {
 		record, err := s.reader.Read()
 		if err != nil {
-			select {
-			case <-s.done:
+			// Closed: stop. Anything else: back off, and let
+			// CheckAttached report it while it lasts.
+			if !s.readErrs.handle(err, s.done) {
 				return
-			default:
-				continue
 			}
+			continue
 		}
+		s.readErrs.ok()
 
 		var raw bpfSyscallEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {

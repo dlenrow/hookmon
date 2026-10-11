@@ -17,6 +17,7 @@ import (
 
 	hookmonv1 "github.com/dlenrow/hookmon/gen/hookmon/v1"
 	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
+	"github.com/dlenrow/hookmon/pkg/event"
 	"github.com/dlenrow/hookmon/server/api"
 	"github.com/dlenrow/hookmon/server/connectors"
 	"github.com/dlenrow/hookmon/server/ingestion"
@@ -170,6 +171,7 @@ func (s *Server) Run(ctx context.Context) error {
 		PolicyEngine: s.policy,
 		Logger:       s.logger,
 		Connectors:   []ingestion.Connector{s.dispatcher},
+		StatusSink:   s.dispatcher,
 		RateLimiter:  ingestion.NewRateLimiter(100, 200),
 		Insecure:     !useTLS,
 	})
@@ -188,7 +190,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// the TLS handshake. Enrollment has its own listener, where the server
 	// authenticates itself but the bus, which has no certificate yet, does
 	// not; only the Enroll RPC is registered there.
-	var grpcOpts []grpc.ServerOption
+	// A panic in a handler fails that call or stream, not the server.
+	grpcOpts := []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(ingestion.RecoveryUnaryInterceptor(s.logger)),
+		grpc.ChainStreamInterceptor(ingestion.RecoveryStreamInterceptor(s.logger)),
+	}
 	if useTLS {
 		creds, err := hcrypto.LoadServerTLS(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile, s.cfg.TLS.CAFile)
 		if err != nil {
@@ -205,7 +211,10 @@ func (s *Server) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("load enrollment TLS: %w", err)
 		}
-		enrollServer = grpc.NewServer(grpc.Creds(creds))
+		enrollServer = grpc.NewServer(grpc.Creds(creds),
+			grpc.ChainUnaryInterceptor(ingestion.RecoveryUnaryInterceptor(s.logger)),
+			grpc.ChainStreamInterceptor(ingestion.RecoveryStreamInterceptor(s.logger)),
+		)
 		hookmonv1.RegisterAgentServiceServer(enrollServer, ingestion.NewEnroller(ingestion.EnrollerConfig{
 			Store:        s.store,
 			Tokens:       tokens,
@@ -286,7 +295,7 @@ func (s *Server) Run(ctx context.Context) error {
 		defer wg.Done()
 		hub.Run(ctx, s.ingestion.GetEventChannel())
 	}()
-	s.httpServer = &http.Server{Handler: apiSrv.Router(s.cfg.API.Tokens, dashHandler)}
+	s.httpServer = newHTTPServer(apiSrv.Router(s.cfg.API.Tokens, dashHandler))
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -301,8 +310,9 @@ func (s *Server) Run(ctx context.Context) error {
 		reloadOnSignal(ctx, hup, s.policy.Reload, s.logger)
 	}()
 
-	// Watchdog: AGENT_OFFLINE goes to every connector.
-	s.watchdog = NewWatchdog(s.cfg.Watchdog, s.store, s.dispatcher, s.logger)
+	// Watchdog: AGENT_OFFLINE goes to every connector and to the WebSocket
+	// feed, as AGENT_RECOVERED does from the ingestion server.
+	s.watchdog = NewWatchdog(s.cfg.Watchdog, s.store, statusFanout{s.dispatcher, s.ingestion}, s.logger)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -325,6 +335,43 @@ func (s *Server) Run(ctx context.Context) error {
 	<-ctx.Done()
 	wg.Wait()
 	return nil
+}
+
+// HTTP server timeouts. ReadHeaderTimeout bounds a client that opens a
+// connection and sends its headers slowly (Slowloris); ReadTimeout bounds
+// the whole request, whose body is at most 64 KiB; IdleTimeout closes
+// keep-alive connections nobody uses. There is no WriteTimeout, because the
+// WebSocket feed is a response that lasts as long as the dashboard is open;
+// the hub closes a client that stops reading.
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpReadTimeout       = 30 * time.Second
+	httpIdleTimeout       = 120 * time.Second
+	httpMaxHeaderBytes    = 64 << 10
+)
+
+// newHTTPServer returns the REST API, WebSocket and dashboard server for
+// handler, with the timeouts above.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
+	}
+}
+
+// statusFanout sends a host status event the server raised (AGENT_OFFLINE)
+// to every connector and to the WebSocket feed.
+type statusFanout struct {
+	connectors AlertSink
+	feed       interface{ Publish(*event.HookEvent) }
+}
+
+func (f statusFanout) Dispatch(evt *event.HookEvent) {
+	f.connectors.Dispatch(evt)
+	f.feed.Publish(evt)
 }
 
 // reloadOnSignal calls reload for every signal on sig until ctx is done.

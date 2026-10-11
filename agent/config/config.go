@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,9 +28,10 @@ type AgentConfig struct {
 	// bus.crt and ca.crt, each mode 0600.
 	StateDir string `yaml:"state_dir"`
 
-	// EnrollToken is the enrollment secret from --enroll-token. With no
-	// certificate configured or in StateDir, the bus enrolls with it on
-	// start. Never read from the config file.
+	// EnrollToken is the enrollment secret, from --enroll-token-file,
+	// $HOOKMON_ENROLL_TOKEN or --enroll-token (see ResolveEnrollToken).
+	// With no certificate configured or in StateDir, the bus enrolls with
+	// it on start. Never read from the config file.
 	EnrollToken string `yaml:"-"`
 
 	// TLS configuration for mTLS. When CertFile is empty, the bus uses the
@@ -148,6 +151,63 @@ func (c *AgentConfig) ApplyEnrollFlags(token, serverAddr, enrollAddr, caFile, st
 	if stateDir != "" {
 		c.StateDir = stateDir
 	}
+}
+
+// EnrollTokenEnv is the environment variable the bus reads an enrollment
+// token from when neither --enroll-token-file nor --enroll-token is given.
+const EnrollTokenEnv = "HOOKMON_ENROLL_TOKEN"
+
+// Where ResolveEnrollToken found the token.
+const (
+	TokenFromFile = "--enroll-token-file"
+	TokenFromEnv  = "$" + EnrollTokenEnv
+	TokenFromFlag = "--enroll-token"
+)
+
+// ResolveEnrollToken returns the enrollment token and where it came from:
+// the file named by --enroll-token-file, the --enroll-token flag, or the
+// HOOKMON_ENROLL_TOKEN environment variable, in that order of preference.
+// Giving both flags is an error. With none, the token is "".
+//
+// A token on the command line is visible to every user in the process list
+// while the first start runs; the file (mode 0600, owned by root) and the
+// environment (readable by root and the bus's own user, through
+// /proc/<pid>/environ) are not. ResolveEnrollToken also returns a warning
+// for a token file that other users can read.
+func ResolveEnrollToken(flagToken, tokenFile string, getenv func(string) string) (token, source, warning string, err error) {
+	switch {
+	case flagToken != "" && tokenFile != "":
+		return "", "", "", errors.New("give the enrollment token with either --enroll-token-file or --enroll-token, not both")
+	case tokenFile != "":
+		info, err := os.Stat(tokenFile)
+		if err != nil {
+			return "", "", "", fmt.Errorf("enrollment token file: %w", err)
+		}
+		data, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return "", "", "", fmt.Errorf("enrollment token file: %w", err)
+		}
+		token = strings.TrimSpace(string(data))
+		if token == "" {
+			return "", "", "", fmt.Errorf("enrollment token file %s is empty", tokenFile)
+		}
+		if strings.ContainsAny(token, "\r\n") {
+			return "", "", "", fmt.Errorf("enrollment token file %s has more than one line", tokenFile)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			warning = fmt.Sprintf("enrollment token file %s has mode %#o; other users can read it (use 0600)", tokenFile, info.Mode().Perm())
+		}
+		return token, TokenFromFile, warning, nil
+	case flagToken != "":
+		return flagToken, TokenFromFlag,
+			"--enroll-token is visible in the process list while the bus enrolls; prefer --enroll-token-file or " + EnrollTokenEnv, nil
+	}
+	if getenv != nil {
+		if v := strings.TrimSpace(getenv(EnrollTokenEnv)); v != "" {
+			return v, TokenFromEnv, "", nil
+		}
+	}
+	return "", "", "", nil
 }
 
 // Load reads an AgentConfig from a YAML file.

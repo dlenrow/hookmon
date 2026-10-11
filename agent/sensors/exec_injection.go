@@ -59,13 +59,14 @@ type execInjectionEvent struct {
 // scans the environment the kernel copied onto the new process's stack,
 // before the process runs.
 type ExecInjectionSensor struct {
-	eventCh chan *event.HookEvent
-	tp      link.Link
-	reader  *ringbuf.Reader
-	coll    *ebpf.Collection
-	prog    *ebpf.Program
-	done    chan struct{}
-	libs    *libraryHasher
+	eventCh  chan *event.HookEvent
+	tp       link.Link
+	reader   *ringbuf.Reader
+	coll     *ebpf.Collection
+	prog     *ebpf.Program
+	done     chan struct{}
+	readErrs readErrors // ring buffer read errors; see CheckAttached
+	libs     *libraryHasher
 
 	// bounded loads the bounded-loop program even where bpf_loop exists.
 	// Tests set it to cover the older-kernel path.
@@ -155,19 +156,25 @@ func (s *ExecInjectionSensor) HeartbeatNs() (uint64, error) {
 }
 
 // CheckAttached implements BPFHealth.
-func (s *ExecInjectionSensor) CheckAttached() error { return checkAttached(s.prog, s.tp) }
+func (s *ExecInjectionSensor) CheckAttached() error {
+	if err := s.readErrs.err(); err != nil {
+		return err
+	}
+	return checkAttached(s.prog, s.tp)
+}
 
 func (s *ExecInjectionSensor) readLoop() {
 	for {
 		record, err := s.reader.Read()
 		if err != nil {
-			select {
-			case <-s.done:
+			// Closed: stop. Anything else: back off, and let
+			// CheckAttached report it while it lasts.
+			if !s.readErrs.handle(err, s.done) {
 				return
-			default:
-				continue
 			}
+			continue
 		}
+		s.readErrs.ok()
 
 		var raw execInjectionEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {

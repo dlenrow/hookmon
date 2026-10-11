@@ -74,15 +74,16 @@ type dlopenEvent struct {
 // Not covered: musl (Alpine) and statically linked binaries, which have no
 // glibc dlopen to hook; dlmopen; and loaders that map code without dlopen.
 type DlopenMonitorSensor struct {
-	eventCh chan *event.HookEvent
-	reader  *ringbuf.Reader
-	coll    *ebpf.Collection
-	prog    *ebpf.Program
-	libcs   *dlopenAttachments
-	dedupe  *dlopenDedupe
-	hashes  *dlopenHashes
-	done    chan struct{}
-	wg      sync.WaitGroup
+	eventCh  chan *event.HookEvent
+	reader   *ringbuf.Reader
+	coll     *ebpf.Collection
+	prog     *ebpf.Program
+	libcs    *dlopenAttachments
+	dedupe   *dlopenDedupe
+	hashes   *dlopenHashes
+	done     chan struct{}
+	readErrs readErrors // ring buffer read errors; see CheckAttached
+	wg       sync.WaitGroup
 }
 
 func NewDlopenMonitorSensor() *DlopenMonitorSensor {
@@ -238,6 +239,9 @@ func (s *DlopenMonitorSensor) HeartbeatNs() (uint64, error) {
 // CheckAttached implements BPFHealth for every libc the program is attached
 // to; see DlopenMonitorSensor.
 func (s *DlopenMonitorSensor) CheckAttached() error {
+	if err := s.readErrs.err(); err != nil {
+		return err
+	}
 	if s.libcs == nil {
 		return errors.New("sensor not started")
 	}
@@ -254,13 +258,14 @@ func (s *DlopenMonitorSensor) readLoop() {
 	for {
 		record, err := s.reader.Read()
 		if err != nil {
-			select {
-			case <-s.done:
+			// Closed: stop. Anything else: back off, and let
+			// CheckAttached report it while it lasts.
+			if !s.readErrs.handle(err, s.done) {
 				return
-			default:
-				continue
 			}
+			continue
 		}
+		s.readErrs.ok()
 
 		var raw dlopenEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {

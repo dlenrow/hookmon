@@ -52,15 +52,16 @@ type rpathExecEvent struct {
 // which the file sensors read when a writer has exited before they could
 // read /proc.
 type ElfRpathSensor struct {
-	eventCh chan *event.HookEvent
-	tp      link.Link
-	reader  *ringbuf.Reader
-	coll    *ebpf.Collection
-	prog    *ebpf.Program
-	done    chan struct{}
-	cache   *RpathCache
-	procs   *proccache.Cache
-	feeding bool
+	eventCh  chan *event.HookEvent
+	tp       link.Link
+	reader   *ringbuf.Reader
+	coll     *ebpf.Collection
+	prog     *ebpf.Program
+	done     chan struct{}
+	readErrs readErrors // ring buffer read errors; see CheckAttached
+	cache    *RpathCache
+	procs    *proccache.Cache
+	feeding  bool
 }
 
 func NewElfRpathSensor() *ElfRpathSensor {
@@ -137,19 +138,25 @@ func (s *ElfRpathSensor) HeartbeatNs() (uint64, error) {
 }
 
 // CheckAttached implements BPFHealth.
-func (s *ElfRpathSensor) CheckAttached() error { return checkAttached(s.prog, s.tp) }
+func (s *ElfRpathSensor) CheckAttached() error {
+	if err := s.readErrs.err(); err != nil {
+		return err
+	}
+	return checkAttached(s.prog, s.tp)
+}
 
 func (s *ElfRpathSensor) readLoop() {
 	var record ringbuf.Record
 	for {
 		if err := s.reader.ReadInto(&record); err != nil {
-			select {
-			case <-s.done:
+			// Closed: stop. Anything else: back off, and let
+			// CheckAttached report it while it lasts.
+			if !s.readErrs.handle(err, s.done) {
 				return
-			default:
-				continue
 			}
+			continue
 		}
+		s.readErrs.ok()
 
 		var raw rpathExecEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {

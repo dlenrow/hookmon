@@ -128,10 +128,11 @@ func enroll(ctx context.Context, cfg *config.AgentConfig, keyPath, certPath, caP
 	if err != nil {
 		return fmt.Errorf("read CA certificate: %w", err)
 	}
-	creds, err := hcrypto.EnrollClientTLS(caPEM, cfg.TLS.ServerName)
+	enrollCreds, err := hcrypto.EnrollClientTLS(caPEM, cfg.TLS.ServerName)
 	if err != nil {
 		return fmt.Errorf("CA certificate %s: %w", cfg.TLS.CAFile, err)
 	}
+	creds := watchVerify(enrollCreds)
 	addr, err := enrollAddr(cfg)
 	if err != nil {
 		return err
@@ -170,6 +171,10 @@ func enroll(ctx context.Context, cfg *config.AgentConfig, keyPath, certPath, caP
 		defer cancel()
 		var err error
 		resp, err = client.Enroll(callCtx, req)
+		if verr := creds.take(); err != nil && verr != nil {
+			// A wrong --ca-file: say so, and do not retry.
+			return notTrusted(addr, cfg.TLS.CAFile, verr)
+		}
 		return err
 	})
 	if err != nil {
@@ -219,8 +224,12 @@ func retryEnroll(ctx context.Context, cfg RetryConfig, logger *zap.Logger, fn fu
 }
 
 // permanentEnrollError reports whether retrying the same request cannot
-// help: the server rejected the token or the request.
+// help: the server rejected the token or the request, or the bus could not
+// verify the server's certificate.
 func permanentEnrollError(err error) bool {
+	if errors.Is(err, ErrServerNotTrusted) {
+		return true
+	}
 	switch status.Code(err) {
 	case codes.InvalidArgument, codes.PermissionDenied, codes.Unauthenticated,
 		codes.FailedPrecondition, codes.Unimplemented, codes.NotFound, codes.AlreadyExists:

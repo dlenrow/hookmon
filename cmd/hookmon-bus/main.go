@@ -25,7 +25,8 @@ func main() {
 	statusAddr := flag.String("status-addr", "", "bind address for /status and /metrics (e.g. 127.0.0.1); overrides config")
 	dlopenProbe := flag.String("dlopen-probe", "", "path to the hookmon-dlopen-probe helper; overrides config")
 	scanRpath := flag.String("scan-rpath", "", "scan a directory for ELF RPATH issues and exit (e.g. /usr/bin)")
-	enrollToken := flag.String("enroll-token", "", "enrollment token: with no certificate yet, enroll with the server on start")
+	enrollTokenFile := flag.String("enroll-token-file", "", "file holding the enrollment token (mode 0600): with no certificate yet, enroll with the server on start; preferred over --enroll-token and $"+config.EnrollTokenEnv)
+	enrollToken := flag.String("enroll-token", "", "enrollment token (visible in the process list; prefer --enroll-token-file or $"+config.EnrollTokenEnv+")")
 	serverAddr := flag.String("server-addr", "", "hookmon-server gRPC address (host:port); overrides config")
 	enrollAddr := flag.String("enroll-addr", "", "hookmon-server enrollment address (host:port); default: the server-addr host on port 9444")
 	caFile := flag.String("ca-file", "", "CA certificate that signed the server's certificate; overrides config")
@@ -75,7 +76,19 @@ func main() {
 	if *dlopenProbe != "" {
 		cfg.DlopenProbePath = *dlopenProbe
 	}
-	cfg.ApplyEnrollFlags(*enrollToken, *serverAddr, *enrollAddr, *caFile, *stateDir)
+	token, source, warning, err := config.ResolveEnrollToken(*enrollToken, *enrollTokenFile, os.Getenv)
+	if err != nil {
+		logger.Fatal("enrollment token", zap.Error(err))
+	}
+	// Helpers the bus runs (the hook probes) must not inherit the token.
+	os.Unsetenv(config.EnrollTokenEnv)
+	if warning != "" {
+		logger.Warn(warning)
+	}
+	if source != "" {
+		logger.Info("enrollment token given", zap.String("source", source))
+	}
+	cfg.ApplyEnrollFlags(token, *serverAddr, *enrollAddr, *caFile, *stateDir)
 	if *insecure {
 		cfg.TLS.Insecure = true
 	}

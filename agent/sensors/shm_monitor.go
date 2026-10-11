@@ -45,6 +45,7 @@ type SHMMonitorSensor struct {
 	prog      *ebpf.Program
 	progOat2  *ebpf.Program
 	done      chan struct{}
+	readErrs  readErrors // ring buffer read errors; see CheckAttached
 }
 
 func NewSHMMonitorSensor() *SHMMonitorSensor {
@@ -139,6 +140,9 @@ func (s *SHMMonitorSensor) HeartbeatNs() (uint64, error) {
 
 // CheckAttached implements BPFHealth for both hooks.
 func (s *SHMMonitorSensor) CheckAttached() error {
+	if err := s.readErrs.err(); err != nil {
+		return err
+	}
 	if err := checkAttached(s.prog, s.tp); err != nil {
 		return fmt.Errorf("sys_enter_openat: %w", err)
 	}
@@ -152,13 +156,14 @@ func (s *SHMMonitorSensor) readLoop() {
 	for {
 		record, err := s.reader.Read()
 		if err != nil {
-			select {
-			case <-s.done:
+			// Closed: stop. Anything else: back off, and let
+			// CheckAttached report it while it lasts.
+			if !s.readErrs.handle(err, s.done) {
 				return
-			default:
-				continue
 			}
+			continue
 		}
+		s.readErrs.ok()
 
 		var raw shmEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {

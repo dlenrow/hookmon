@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -28,8 +29,9 @@ type Store interface {
 	// UpdateAllowlistEntry writes an entry's editable fields;
 	// store.ErrPending if the entry is a PENDING candidate.
 	UpdateAllowlistEntry(ctx context.Context, entry *event.AllowlistEntry) error
-	// DeleteAllowlistEntry and the calls below return store.ErrNotFound
-	// (wrapped) for a missing row.
+	// GetEvent, GetHost, GetAllowlistEntry, DeleteAllowlistEntry and the
+	// calls below return store.ErrNotFound (wrapped) for a missing row; any
+	// other error is a store failure (500).
 	DeleteAllowlistEntry(ctx context.Context, id string) error
 	// DecideCandidate approves or rejects a PENDING entry for the fleet
 	// (hostID "") or one host; store.ErrNotPending if it is not PENDING.
@@ -85,10 +87,23 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	evt, err := s.store.GetEvent(r.Context(), id)
 	if err != nil {
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		s.storeError(w, "get event", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, evt)
+}
+
+// storeError answers a failed single-row store read: 404 when the row does
+// not exist (store.ErrNotFound), and 500 for anything else, such as the
+// database being unreachable, so an outage is never reported as a missing
+// record.
+func (s *Server) storeError(w http.ResponseWriter, what string, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	s.logger.Error(what+" failed", zap.Error(err))
+	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
 func intParam(s string, defaultVal int) int {

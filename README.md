@@ -156,7 +156,7 @@ sudo bin/hookmon-bus --console \
 
 Keep `hookmon-dlopen-probe` in the same directory as `hookmon-bus`, or pass `--dlopen-probe <path>`. Without it, `dlopen_monitor` is reported `unverifiable` and the host `degraded`.
 
-`--console` prints events to stdout and stops the bus from connecting to a server. Without it, the bus streams events to `hookmon-server` at `server_addr` (default `localhost:9443`) over mutual TLS, and writes the events it can't send to `fallback_log_path`. It needs a client certificate for that: on first start it enrolls with `--enroll-token`. A bus with no certificate and no token refuses to start unless `--insecure` is given, which connects in plaintext (development only).
+`--console` prints events to stdout and stops the bus from connecting to a server. Without it, the bus streams events to `hookmon-server` at `server_addr` (default `localhost:9443`) over mutual TLS, and writes the events it can't send to `fallback_log_path`. It needs a client certificate for that: on first start it enrolls with a token from `--enroll-token-file` (preferred: a 0600 file keeps the secret out of the process list), `HOOKMON_ENROLL_TOKEN` or `--enroll-token`. A bus with no certificate and no token refuses to start unless `--insecure` is given, which connects in plaintext (development only). A `--ca-file` that did not sign the server's certificate stops the bus with an error rather than a retry loop.
 
 ### 3. Run the Collector
 
@@ -175,7 +175,7 @@ EOF
 sudo bin/hookmon-collector --config /etc/hookmon/collector.yaml
 ```
 
-The collector polls each host's `/status` every 30 seconds.
+The collector polls each host's `/status` every 30 seconds. It can also reach a host over SSH (`ssh_host`, `ssh_user`, `ssh_key`); that needs a known_hosts file (`ssh_known_hosts`), and the collector refuses any host whose key is not in it (see the [deployment guide](docs/deployment-guide.md)).
 
 ### 4. View the Dashboard
 
@@ -186,7 +186,7 @@ Open `http://<appliance>:3000/d/hookmon-main/hookmon` in your browser.
 - **Appliance images (ISO, OVA, QCOW2, VHD).** None of them builds a working image. The Packer template defines only a QEMU (qcow2) build, `make appliance-ova` names a VMware build that does not exist, and the ISO's `appliance/iso/user-data.yaml` is missing. Today the only "appliance" is the compose stack above. (fix plan step 7g)
 - **DEB and RPM packages.** They ship `hookmon-agent`, not `hookmon-bus`, with no systemd unit, default config or dlopen helper. (step 7g)
 - **Ansible.** The agent role (`deploy/ansible/roles/hookmon-agent`) and the appliance playbook (`appliance/ansible/playbook.yml`) refer to templates and files that do not exist. (step 7g)
-- **Enrollment script.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists. A bus enrolls with `hookmon-bus --enroll-token` instead (see the [deployment guide](docs/deployment-guide.md#server-path)). Installing the bus from a package is step 7g.
+- **Enrollment script.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists. A bus enrolls with `hookmon-bus --enroll-token-file` instead (see the [deployment guide](docs/deployment-guide.md#server-path)). Installing the bus from a package is step 7g.
 
 ## Allowlist Workflow
 
@@ -210,7 +210,7 @@ The allowlist guide (`docs/allowlist-guide.md`) and the API reference (`docs/api
 - **Webhook**: JSON POST to any URL, with custom headers and optional batching.
 - **Kafka**: JSON messages keyed by host ID. There are no TLS or SASL settings yet.
 
-A connector gets alerts or the full event feed, depending on its `min_severity`. With `ALERT` (the default) or `CRITICAL`, it gets events at or above that severity that no allowlist entry allowed. A repeat of the same alert within 5 minutes is not sent again. With `INFO` or `WARN`, it gets every stored event at or above that severity. Every connector gets AGENT_OFFLINE when a host stops sending heartbeats.
+A connector gets alerts or the full event feed, depending on its `min_severity`. With `ALERT` (the default) or `CRITICAL`, it gets events at or above that severity that no allowlist entry allowed. A repeat of the same alert within 5 minutes is not sent again. With `INFO` or `WARN`, it gets every stored event at or above that severity. Every connector gets AGENT_OFFLINE when a host stops sending heartbeats, and AGENT_RECOVERED when it starts again.
 
 Delivery never holds up ingestion. Each connector has its own bounded queue and worker. Transient failures (network errors, HTTP 429 and 5xx) are retried with backoff. When a queue is full, new events for that connector are dropped and counted in the log. If a connector can't start, the server stops at startup.
 

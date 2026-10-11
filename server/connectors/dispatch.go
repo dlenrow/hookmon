@@ -20,8 +20,9 @@ type AlertFilter interface {
 }
 
 // Dispatcher routes events to the connectors' queues. Ingestion calls Send
-// for every stored event and the watchdog calls Dispatch for AGENT_OFFLINE;
-// both only enqueue, so they never wait for a sink.
+// for every stored event; the watchdog calls Dispatch for AGENT_OFFLINE and
+// the heartbeat handler for AGENT_RECOVERED. Both only enqueue, so they
+// never wait for a sink.
 //
 // Routing, per connector (see Delivery.MinSeverity):
 //   - Alert connectors (min_severity ALERT or CRITICAL) receive alerts:
@@ -29,8 +30,11 @@ type AlertFilter interface {
 //     repeat of an alert sent within the AlertFilter's window is dropped.
 //   - Event-feed connectors (min_severity INFO or WARN) receive every event
 //     at or above min_severity, allowed or not, repeats included.
-//   - Watchdog events (Dispatch) are never treated as repeats: each one
-//     marks a host going from ONLINE to UNRESPONSIVE.
+//   - Host status events (Dispatch) go to every connector, whatever its
+//     min_severity, and are never treated as repeats: each AGENT_OFFLINE
+//     marks a host going UNRESPONSIVE, and each AGENT_RECOVERED (INFO) the
+//     end of that outage, which an alert connector that got the
+//     AGENT_OFFLINE needs to close it.
 type Dispatcher struct {
 	mu     sync.RWMutex
 	closed bool
@@ -164,17 +168,28 @@ func (d *Dispatcher) Len() int { return len(d.queues) }
 // Send queues a stored event for the connectors that take it. It never
 // blocks and never fails; it implements ingestion.Connector.
 func (d *Dispatcher) Send(evt *event.HookEvent) error {
-	d.route(evt, true)
+	d.route(evt)
 	return nil
 }
 
-// Dispatch queues a watchdog event (AGENT_OFFLINE) for every connector at
-// or below its severity. It implements the watchdog's AlertSink.
+// Dispatch queues a host status event the server raised (AGENT_OFFLINE,
+// AGENT_RECOVERED) for every connector. It implements the watchdog's
+// AlertSink and the ingestion server's StatusSink.
 func (d *Dispatcher) Dispatch(evt *event.HookEvent) {
-	d.route(evt, false)
+	if evt == nil {
+		return
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed {
+		return
+	}
+	for _, q := range d.queues {
+		q.enqueue(evt)
+	}
 }
 
-func (d *Dispatcher) route(evt *event.HookEvent, dedup bool) {
+func (d *Dispatcher) route(evt *event.HookEvent) {
 	if evt == nil || len(d.queues) == 0 {
 		return
 	}
@@ -185,7 +200,7 @@ func (d *Dispatcher) route(evt *event.HookEvent, dedup bool) {
 	alert := sev >= severityRank(event.SeverityAlert) &&
 		(evt.PolicyResult == nil || evt.PolicyResult.Action != event.ActionAllow)
 	fresh := true
-	if alert && dedup && d.dedup && d.alerts != nil {
+	if alert && d.dedup && d.alerts != nil {
 		fresh = d.alerts.Admit(evt)
 	}
 
