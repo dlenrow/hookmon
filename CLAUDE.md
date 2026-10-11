@@ -61,7 +61,7 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     HOOKMON APPLIANCE                                │
-│                     (today: compose stack; images: step 7g)          │
+│                     (compose stack, VM image or Ansible role)        │
 │                                                                     │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐    │
 │  │ Ingestion    │  │ Policy       │  │ Dashboard              │    │
@@ -91,7 +91,7 @@ Loading an eBPF program or setting up an LD_PRELOAD harness is a **vanishingly r
 │  │  enrolled hosts (30s)     │  └────────────┬───────────────┘  │
 │  └────────────────────────────┘               │ scraped by       │
 │                                               ▼ Prometheus       │
-│  Planned (step 7g): nginx, systemd units, auto-update               │
+│  VM image: systemd units, ufw, unattended-upgrades; no nginx        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -257,21 +257,25 @@ hookmon/
 │
 ├── gen/hookmon/v1/            # Generated protobuf + gRPC code (`cd proto && buf generate`)
 │
-├── appliance/                 # Virtual appliance / ISO build — none works yet (step 7g)
+├── appliance/                 # Server-path VM image (QCOW2, VHD, OVA; no ISO) and Ansible role
 │   ├── packer/
-│   │   ├── hookmon.pkr.hcl    # Packer template (only a QEMU/qcow2 source today)
+│   │   ├── hookmon.pkr.hcl    # Packer template: Ubuntu 24.04 cloud image, QEMU builder
+│   │   ├── convert.sh         # qcow2 → VHD, OVA (OVF + manifest + streamOptimized VMDK)
+│   │   ├── seed/              # NoCloud user-data for the build user
+│   │   ├── files/             # hookmon-firstboot + unit, netplan, sshd and cloud-init settings
 │   │   └── scripts/
-│   │       ├── base.sh        # OS hardening, package install
-│   │       ├── hookmon.sh     # Server install + systemd units
-│   │       ├── postgres.sh    # PostgreSQL setup
-│   │       ├── nginx.sh       # TLS termination
-│   │       └── firstboot.sh   # First-boot configuration wizard
-│   ├── iso/
-│   │   ├── build-iso.sh       # ISO builder (cloud-init + autoinstall)
-│   │   └── user-data.yaml     # cloud-init configuration — missing (step 7g)
+│   │       ├── base.sh        # Upgrades, unattended-upgrades, ufw, sshd, sysctl
+│   │       ├── postgres.sh    # PostgreSQL 16, loopback only
+│   │       ├── hookmon.sh     # Server, dashboard, hookmon-init.sh, systemd unit
+│   │       ├── firstboot.sh   # Installs hookmon-firstboot.service
+│   │       └── cleanup.sh     # Removes build user state, host keys, machine ID
 │   └── ansible/
-│       ├── playbook.yml       # Alternative: deploy to existing server
-│       └── roles/hookmon/     # Referenced roles and templates — missing (step 7g)
+│       ├── playbook.yml       # Server path on an existing Ubuntu 24.04 host
+│       ├── inventory.example.ini
+│       └── roles/
+│           ├── hookmon_postgres/  # PostgreSQL 16
+│           └── hookmon_server/    # Server, dashboard, hookmon-init.sh, hookmon-db-setup;
+│                                  #   files/ has the unit and script the image uses too
 │
 ├── deploy/                    # Agent deployment artifacts
 │   ├── deb/                   # hookmon-bus DEB: control, conffiles, maintainer scripts
@@ -739,42 +743,31 @@ Synchronous producer to a configured topic, JSON messages keyed by host ID (`ser
 
 ## Virtual Appliance Build
 
-**Status: none of this works yet (fix plan step 7g).** Today the only appliance is the observability compose stack (`deploy/docker/docker-compose.grafana.yml`). The Packer template defines only a QEMU (qcow2) source; `make appliance-ova` names a VMware source that does not exist; `appliance/iso/user-data.yaml` is missing; `firstboot.sh` writes a config file nothing reads; the server binary is not uploaded. Step 7g makes qcow2 work and either fixes OVA, VHD and ISO or removes them.
+**Status: QCOW2, VHD and OVA work (fix plan step 7g); there is no ISO.** Three ways to run the server path: the compose appliance (`deploy/appliance/`, with the observability stack), the VM image below, and the Ansible appliance role (`appliance/ansible/playbook.yml`) for an existing Ubuntu 24.04 host. All three write their certificates, tokens and `server.yaml` with `deploy/appliance/hookmon-init.sh`. Details are in `docs/deployment-guide.md`.
 
 ### Target Formats
-- OVA (VMware vSphere / ESXi) — not built
-- QCOW2 (KVM / Proxmox / OpenStack) — template exists, not working
-- VHD (Hyper-V / Azure) — not built
-- ISO (bare-metal install) — not working
+- QCOW2 (KVM / Proxmox / OpenStack): `make appliance-qcow2` (Packer, QEMU builder, needs KVM). Boots to a healthy server under QEMU/KVM.
+- VHD (Hyper-V): `make appliance-vhd`, a dynamic VHD converted from the qcow2 with `qemu-img`. The disk boots under QEMU/KVM; Hyper-V import untested. Azure wants a fixed VHD (`appliance/packer/convert.sh`).
+- OVA (VMware): `make appliance-ova`, an OVF descriptor with cloud-init properties, a SHA-256 manifest and a streamOptimized VMDK. The VMDK boots under QEMU/KVM; import into VMware or VirtualBox untested.
+- ISO (bare-metal install): not shipped. It would need a remastered Ubuntu installer ISO and a second install path; on bare metal, use the Ansible role.
 
 ### Base OS
-Ubuntu Server 24.04 LTS (minimal). Rationale: widest enterprise acceptance, long-term support, straightforward security patching.
+Ubuntu 24.04 LTS cloud image, pinned by URL and SHA-256 in `appliance/packer/hookmon.pkr.hcl`. Packer boots it with a NoCloud seed served by its own HTTP server, so there is no installer to drive; packages are upgraded at build time. cloud-init stays in the image, so platforms with a datasource can set the hostname and SSH keys.
 
 ### Appliance Components
 
-Bundled and configured automatically:
-- **hookmon-server** binary (Go, statically linked)
-- **PostgreSQL 16** (local, dedicated DB)
-- **nginx** (TLS termination, static dashboard serving, reverse proxy to API). `hookmon-server` now terminates TLS and serves the dashboard itself, and `nginx.sh` still proxies to plain `http://127.0.0.1:8443` (step 7g)
-- **systemd** units for all services
-- **certbot** or self-signed TLS cert generation
-- **unattended-upgrades** for security patches
+- **hookmon-server** (`/usr/local/bin`), as user `hookmon`, with `--config /etc/hookmon/server.yaml`. The unit (`appliance/ansible/roles/hookmon_server/files/hookmon-server.service`, shared by the image and the role) is sandboxed and hands `server.yaml` and the private keys to `hookmon` before each start.
+- **Dashboard** in `/usr/share/hookmon/dashboard`, served by the server.
+- **PostgreSQL 16**, loopback only. The role, password and database are made on first boot (`hookmon-db-setup`).
+- **No nginx.** The server terminates TLS on 8443 and serves the dashboard; a proxy would add a second TLS hop and nothing else.
+- **ufw**: 22, 8443, 9443 and 9444 only. **unattended-upgrades** for security patches.
+- Not in the VM: the collector, Grafana, Prometheus, Loki (use the compose appliance for the observability path).
 
 ### First-Boot Configuration
 
-Console-based setup wizard on first boot:
-1. Network configuration (static IP recommended for appliance)
-2. Admin password
-3. TLS certificate (self-signed, provide own, or Let's Encrypt)
-4. SIEM connector configuration (optional, can defer to web UI)
-5. Generate agent enrollment token
-6. Display enrollment command for agents:
-   ```
-   curl -sSL https://hookmon.internal:9443/enroll | \
-     sudo bash -s -- --token <enrollment-token>
-   ```
+No wizard. `hookmon-firstboot.service` runs once, after cloud-init has set the hostname: `hookmon-init.sh --mode host` with the VM's FQDN and global IP addresses (CA, server certificate, enrollment and API tokens, database password, `server.yaml`), then `hookmon-db-setup`; then `hookmon-server` starts. The console shows the dashboard URL and the CA fingerprint; `/etc/hookmon/secrets/firstboot.txt` (root only) holds `hookmon-init.sh`'s report with the bus enrollment command. The image ships no keys, tokens, passwords, SSH host keys or machine ID. Login is SSH keys only, as `ubuntu`, through cloud-init. The network is DHCP on every Ethernet interface (`/etc/netplan/01-hookmon.yaml`).
 
-The `/enroll` script and `curl` command above do not exist (fix plan step 7g). A bus enrolls with `hookmon-bus --enroll-token-file` instead.
+A bus enrolls with `hookmon-bus --enroll-token-file` (see below). There is no `/enroll` script.
 
 ### Agent Enrollment Protocol
 
@@ -797,7 +790,8 @@ Gaps: certificates are not renewed.
 - buf (protobuf code generator)
 - Node.js 20+ (dashboard build)
 - Docker (images, compose stack)
-- Packer (appliance image build; not working yet, step 7g)
+- Packer 1.11+, QEMU with KVM and qemu-img (appliance images; Linux build host)
+- ansible-core (Ansible appliance role; tested with 2.20)
 
 ### Key Make Targets
 
@@ -826,9 +820,11 @@ make package-rpm       # hookmon-bus .rpm, the same (PREBUILT=1 scripts/build-ag
 make docker-agent      # Build agent container image
 make docker-server     # Build server container image
 
-make appliance-ova     # Broken: the Packer template has no VMware source (step 7g)
-make appliance-qcow2   # Build QCOW2 image (not working yet; step 7g)
-make appliance-iso     # Build install ISO (user-data.yaml missing; step 7g)
+make appliance-server # hookmon-server for linux/amd64 (image and Ansible role input)
+make appliance-qcow2   # Build the QCOW2 appliance image (Packer + KVM; Linux build host)
+make appliance-vhd     # Convert it to VHD (Hyper-V)
+make appliance-ova     # Convert it to OVA (VMware)
+                       # No ISO: not shipped
 ```
 
 ## Development Workflow
@@ -878,12 +874,12 @@ Status: configured from the server config and delivered off the ingestion path (
 
 ### Phase 5: Virtual Appliance
 
-Status: not working (step 7g). Enrollment itself works (7a); the appliance does not set it up.
+Status: working (step 7g), except the ISO, which is not shipped. Hypervisor imports of the VHD and OVA are untested.
 
-1. Packer template
-2. First-boot wizard
-3. Agent enrollment flow
-4. ISO builder
+1. Packer template (QCOW2; VHD and OVA converted from it)
+2. First boot: `hookmon-init.sh --mode host` and the database, no wizard
+3. Agent enrollment flow: the first-boot report prints the `hookmon-bus` enrollment command
+4. Ansible appliance role for existing Ubuntu 24.04 hosts (instead of an ISO builder)
 
 ### Phase 6: Advanced Sensors (Complete)
 
@@ -923,7 +919,7 @@ Mitigations, with their status today:
 - Private key is root-readable only: enrollment writes `bus.key`, `bus.crt` and `ca.crt` with mode 0600.
 - The server refuses to start without a TLS certificate unless `--insecure`. REST, the WebSocket and the dashboard are served over HTTPS on 8443.
 - Server API requires a token on every endpoint except `/api/v1/health`. The WebSocket checks the same tokens, sent as a subprotocol or an Authorization header, and refuses pages from other origins. Writes are limited to 64 KiB and validate the action.
-- Appliance firewall rules (only ports 9443 gRPC, 443 HTTPS, 2112 status) — not built (step 7g).
+- Appliance firewall rules — the VM image enables ufw with 22, 8443 (HTTPS), 9443 (gRPC) and 9444 (enrollment) only. The Ansible role and the compose appliance change no firewall settings.
 - All inter-component communication TLS-encrypted — bus to server and REST, yes; Loki pushes, `/status`, `/metrics` and the default PostgreSQL connection (`sslmode=disable`) are not.
 - PostgreSQL listens only on localhost — the default connection string, not enforced.
 - Binary integrity: server verifies the sensor bus binary hash at enrollment — not built.
@@ -949,7 +945,7 @@ A sophisticated attacker will attempt to disable HookMon before proceeding. The 
 | Database | PostgreSQL | Reliable, JSON support for flexible event payloads, enterprise-accepted |
 | Dashboard | React + TypeScript | Standard, large component ecosystem |
 | Appliance base | Ubuntu Server 24.04 LTS | Enterprise acceptance, 10-year support window |
-| Image build | Packer | Multi-format output (OVA, QCOW2, VHD, ISO) from single template (only a qcow2 source exists; step 7g) |
+| Image build | Packer | One QEMU build of the QCOW2 image; VHD and OVA are converted from it with qemu-img. No ISO |
 | Agent deployment | DEB/RPM + Ansible | Standard enterprise Linux deployment patterns (`make package-deb`/`package-rpm`, `deploy/ansible/roles/hookmon-agent`) |
 
 ## Non-Goals (Explicitly Out of Scope)

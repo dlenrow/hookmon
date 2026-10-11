@@ -151,6 +151,10 @@ sudo docker compose -f deploy/appliance/docker-compose.yml up -d --build --wait
 
 The stack runs `hookmon-server` (dashboard and API on :8443, buses on :9443, enrollment on :9444), PostgreSQL (internal only), the collector, Grafana (:3000), Loki (:3100), and Prometheus, Pushgateway and Alertmanager (127.0.0.1 only, since they have no authentication). Every image is pinned by digest. `deploy/appliance/check-stack.sh` checks a running stack; CI runs it on every push.
 
+### Or: the Appliance Image or the Ansible Role (Server Path Only)
+
+`make appliance-qcow2` builds a VM image (Ubuntu 24.04, `hookmon-server`, the dashboard, PostgreSQL 16) with Packer on a Linux host with KVM; `make appliance-vhd` and `make appliance-ova` convert it for Hyper-V and VMware. On first boot the VM runs `hookmon-init.sh` for its own hostname and addresses, so every appliance has its own CA and tokens. For an existing Ubuntu 24.04 host, `appliance/ansible/playbook.yml` sets up the same server. Neither includes Grafana or the collector. See [Appliance Image](docs/deployment-guide.md#appliance-image) and [Ansible Appliance Role](docs/deployment-guide.md#ansible-appliance-role).
+
 ### 2. Build and Run the Sensor Bus
 
 On each monitored Linux host (kernel with BTF; tested on 5.19):
@@ -213,8 +217,7 @@ The Ansible role `deploy/ansible/roles/hookmon-agent` does the same on many host
 
 ### Not Working Yet: Appliance Images
 
-- **Appliance images (ISO, OVA, QCOW2, VHD).** None of them builds a working image. The Packer template defines only a QEMU (qcow2) build, `make appliance-ova` names a VMware build that does not exist, and the ISO's `appliance/iso/user-data.yaml` is missing. Today the only "appliance" is the compose stack above. (fix plan step 7g)
-- **Appliance Ansible.** The appliance playbook (`appliance/ansible/playbook.yml`) refers to roles and templates that do not exist. (step 7g)
+- **Appliance images: no ISO, and two imports untested.** QCOW2, VHD and OVA are built and each boots to a healthy server under QEMU/KVM. Importing the OVA into VMware or VirtualBox, and the VHD into Hyper-V, has not been tested. There is no ISO (bare-metal installer); on bare metal, install Ubuntu 24.04 and use the Ansible appliance role.
 - **Enrollment script.** Earlier docs showed `curl -sSL https://hookmon.internal:9443/enroll | sudo bash -s -- --token <token>`. No such endpoint or script exists. A bus enrolls with `hookmon-bus --enroll-token-file` instead (see the [deployment guide](docs/deployment-guide.md#server-path)); the packages pass it the token file.
 
 ## Allowlist Workflow

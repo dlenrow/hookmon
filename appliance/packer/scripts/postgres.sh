@@ -1,25 +1,25 @@
 #!/bin/bash
+# PostgreSQL 16 (Ubuntu 24.04's own), local connections only. The hookmon
+# role, its password and the database are made on first boot
+# (hookmon-db-setup), so every appliance has its own password.
 set -euo pipefail
 
-echo "==> Installing PostgreSQL 16..."
+echo "==> PostgreSQL 16..."
 
 export DEBIAN_FRONTEND=noninteractive
+apt-get -y -q -o DPkg::Lock::Timeout=600 install --no-install-recommends postgresql-16 postgresql-client-16
 
-# Install PostgreSQL
-apt-get install -y --no-install-recommends postgresql-16
-
-# Configure PostgreSQL to listen only on localhost
-sed -i "s/#listen_addresses = 'localhost'/listen_addresses = 'localhost'/" /etc/postgresql/16/main/postgresql.conf
-
-# Create hookmon database and user
-sudo -u postgres psql <<EOF
-CREATE USER hookmon WITH PASSWORD 'hookmon_changeme';
-CREATE DATABASE hookmon OWNER hookmon;
-GRANT ALL PRIVILEGES ON DATABASE hookmon TO hookmon;
+# Listen on the loopback only. TLS is off: nothing reaches PostgreSQL from
+# outside the VM, and hookmon-server connects over localhost. This also
+# keeps PostgreSQL from depending on the snakeoil key, which cleanup.sh
+# removes so that appliances do not share one.
+cat >/etc/postgresql/16/main/conf.d/hookmon.conf <<'EOF'
+# HookMon appliance (appliance/packer/scripts/postgres.sh)
+listen_addresses = 'localhost'
+ssl = off
 EOF
 
-# Restart PostgreSQL
-systemctl restart postgresql
 systemctl enable postgresql
+systemctl restart postgresql
 
-echo "==> PostgreSQL setup complete."
+echo "==> PostgreSQL done."

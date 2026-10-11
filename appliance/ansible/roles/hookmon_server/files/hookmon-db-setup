@@ -1,0 +1,50 @@
+#!/bin/sh
+# hookmon-db-setup: make the hookmon role and database in the local
+# PostgreSQL, and give the role the password hookmon-init.sh wrote to
+# CONFIG_DIR/secrets/db-password (the one in server.yaml).
+#
+# Usage: hookmon-db-setup [CONFIG_DIR]      (default /etc/hookmon; as root)
+#
+# Safe to re-run. Prints one line per change and nothing when there is
+# none. The appliance image runs it on first boot, and the Ansible
+# appliance role on every run.
+set -eu
+
+DIR=${1:-/etc/hookmon}
+
+die() {
+	echo "hookmon-db-setup: $*" >&2
+	exit 1
+}
+
+[ "$(id -u)" = 0 ] || die "run as root"
+[ -r "$DIR/secrets/db-password" ] || die "no $DIR/secrets/db-password; run hookmon-init.sh first"
+PW=$(cat "$DIR/secrets/db-password")
+# hookmon-init.sh makes it from openssl rand -hex, so it needs no quoting.
+case $PW in '' | *[!0-9a-f]*) die "$DIR/secrets/db-password is not the hex string hookmon-init.sh writes" ;; esac
+
+cd /
+sql() {
+	runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d postgres "$@"
+}
+
+i=0
+until runuser -u postgres -- pg_isready -q; do
+	i=$((i + 1))
+	[ "$i" -lt 60 ] || die "PostgreSQL is not accepting connections"
+	sleep 1
+done
+
+# The password goes to psql on stdin, so it is not in the process list.
+if [ -z "$(sql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'hookmon'")" ]; then
+	printf "CREATE ROLE hookmon LOGIN PASSWORD '%s';\n" "$PW" | sql
+	echo "hookmon-db-setup: created role hookmon"
+elif ! PGPASSWORD=$PW PGCONNECT_TIMEOUT=5 psql -X -q -h localhost -U hookmon -d postgres -tAc 'SELECT 1' >/dev/null 2>&1; then
+	printf "ALTER ROLE hookmon LOGIN PASSWORD '%s';\n" "$PW" | sql
+	echo "hookmon-db-setup: set the password of role hookmon"
+fi
+
+if [ -z "$(sql -tAc "SELECT 1 FROM pg_database WHERE datname = 'hookmon'")" ]; then
+	sql -c 'CREATE DATABASE hookmon OWNER hookmon'
+	echo "hookmon-db-setup: created database hookmon"
+fi

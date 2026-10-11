@@ -1,0 +1,13 @@
+# HookMon appliance network: DHCP (IPv4 and IPv6) on every Ethernet
+# interface, matched by name so a new VM's MAC address does not matter.
+# For a static address, replace this with your own config and run
+# `sudo netplan apply`. cloud-init does not write network config on this
+# image (/etc/cloud/cloud.cfg.d/99-hookmon-network.cfg).
+network:
+  version: 2
+  ethernets:
+    ethernet:
+      match:
+        name: "e*"
+      dhcp4: true
+      dhcp6: true

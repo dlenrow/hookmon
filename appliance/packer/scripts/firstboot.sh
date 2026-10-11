@@ -1,101 +1,22 @@
 #!/bin/bash
+# Installs hookmon-firstboot, which runs once on the appliance's first boot:
+# hookmon-init.sh --mode host for this VM's hostname and addresses, then the
+# database role and password. hookmon-server starts after it.
 set -euo pipefail
 
-echo "==> Configuring first-boot setup wizard..."
+echo "==> First-boot service..."
 
-cat > /usr/local/bin/hookmon-firstboot <<'WIZARD'
-#!/bin/bash
-set -euo pipefail
+UP=/tmp/hookmon-upload/files
 
-echo "============================================"
-echo "  HookMon Appliance — First Boot Setup"
-echo "============================================"
-echo ""
+install -m 0755 "$UP/hookmon-firstboot" /usr/local/sbin/hookmon-firstboot
+install -m 0644 "$UP/hookmon-firstboot.service" /etc/systemd/system/hookmon-firstboot.service
 
-# 1. Admin password
-echo "Step 1: Set admin password for HookMon API"
-read -sp "Enter admin password: " ADMIN_PASS
-echo ""
-read -sp "Confirm password: " ADMIN_PASS2
-echo ""
-if [ "$ADMIN_PASS" != "$ADMIN_PASS2" ]; then
-    echo "Passwords do not match. Re-run setup."
-    exit 1
-fi
-
-# Generate API token from password hash
-API_TOKEN=$(echo -n "$ADMIN_PASS" | sha256sum | cut -d' ' -f1)
-echo "API Token: $API_TOKEN"
-echo "Save this token — you'll need it for CLI and dashboard access."
-
-# 2. TLS certificate
-echo ""
-echo "Step 2: TLS Certificate"
-echo "  1) Keep self-signed certificate"
-echo "  2) Provide your own certificate"
-read -p "Choice [1]: " TLS_CHOICE
-TLS_CHOICE=${TLS_CHOICE:-1}
-
-if [ "$TLS_CHOICE" = "2" ]; then
-    read -p "Path to certificate file: " CERT_PATH
-    read -p "Path to private key file: " KEY_PATH
-    cp "$CERT_PATH" /etc/hookmon/tls/server.crt
-    cp "$KEY_PATH" /etc/hookmon/tls/server.key
-    systemctl restart nginx
-fi
-
-# 3. Generate enrollment token
-ENROLL_TOKEN=$(openssl rand -hex 32)
-echo ""
-echo "Step 3: Agent Enrollment"
-echo "Enrollment token: $ENROLL_TOKEN"
-echo ""
-echo "To enroll agents, run on each host:"
-echo "  curl -sSL https://$(hostname):9443/enroll | sudo bash -s -- --token $ENROLL_TOKEN"
-
-# Save config
-cat > /etc/hookmon/server-setup.conf <<EOF
-api_token=$API_TOKEN
-enrollment_token=$ENROLL_TOKEN
-setup_complete=true
-EOF
-chmod 600 /etc/hookmon/server-setup.conf
-
-# Restart server with token
-systemctl restart hookmon-server
-
-echo ""
-echo "============================================"
-echo "  Setup complete! HookMon is running."
-echo "  Dashboard: https://$(hostname)"
-echo "============================================"
-
-# Disable firstboot
-systemctl disable hookmon-firstboot
-WIZARD
-
-chmod +x /usr/local/bin/hookmon-firstboot
-
-# Create systemd service for first-boot
-cat > /etc/systemd/system/hookmon-firstboot.service <<EOF
-[Unit]
-Description=HookMon First Boot Setup
-After=multi-user.target
-ConditionPathExists=!/etc/hookmon/server-setup.conf
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/hookmon-firstboot
-StandardInput=tty
-StandardOutput=tty
-TTYPath=/dev/tty1
-RemainAfterExit=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# Make SSH host keys at boot if none exist. cloud-init makes them when the
+# platform offers it a datasource; without one, sshd would have no keys.
+install -d -m 0755 /etc/systemd/system/ssh.service.d
+install -m 0644 "$UP/hookmon-hostkeys.conf" /etc/systemd/system/ssh.service.d/hookmon-hostkeys.conf
 
 systemctl daemon-reload
-systemctl enable hookmon-firstboot
+systemctl enable hookmon-firstboot.service
 
-echo "==> First-boot wizard installed."
+echo "==> First-boot service done."

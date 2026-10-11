@@ -4,11 +4,11 @@
 
 This guide sets up the observability path, which works today, and then the server path. The observability path has three parts:
 
-1. **Observability stack:** Grafana, Loki, Prometheus, Pushgateway and Alertmanager, run with Docker Compose (`deploy/docker/docker-compose.grafana.yml`). For the whole server path on one host, use the [compose appliance](#compose-appliance) instead. The appliance images (ISO, OVA, QCOW2, VHD) do not build a working image yet (fix plan step 7g).
+1. **Observability stack:** Grafana, Loki, Prometheus, Pushgateway and Alertmanager, run with Docker Compose (`deploy/docker/docker-compose.grafana.yml`). For the whole server path on one host, use the [compose appliance](#compose-appliance) instead. For the server path alone, there is also an [appliance image](#appliance-image) (QCOW2, VHD, OVA; no ISO) and an [Ansible role](#ansible-appliance-role) for an existing Ubuntu 24.04 host.
 2. **Sensor buses:** `hookmon-bus` on each monitored Linux host. Each detects eBPF loads, linker environment injection, ptrace abuse, library tampering and more, and pushes events to Loki.
 3. **Collector:** `hookmon-collector`, run on the stack's host but outside Compose. It polls each host's `/status` endpoint and pushes fleet health to Pushgateway.
 
-[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet; see [architecture.md](architecture.md#server). For the server path, the bus can be installed from a DEB or RPM package or with an Ansible role ([Install the Sensor Bus from a Package](#install-the-sensor-bus-from-a-package)). The server is built from source.
+[Server Path](#server-path) sets up `hookmon-server`, PostgreSQL, bus enrollment and the dashboard. Parts of the server path don't work yet; see [architecture.md](architecture.md#server). For the server path, the bus can be installed from a DEB or RPM package or with an Ansible role ([Install the Sensor Bus from a Package](#install-the-sensor-bus-from-a-package)). The server comes from source, the [compose appliance](#compose-appliance), the [appliance image](#appliance-image) or the [Ansible appliance role](#ansible-appliance-role).
 
 All sensors are read-only. They observe and report, and cannot block or change anything. There is no enforcement mode.
 
@@ -23,13 +23,16 @@ All sensors are read-only. They observe and report, and cannot block or change a
 - Go 1.23 or newer to build the collector
 
 ### Sensor Bus Host
-- Linux with BTF (`/sys/kernel/btf/vmlinux`). Tested on 5.19 only.
+- Linux with BTF (`/sys/kernel/btf/vmlinux`). The e2e suite has run on 5.19 (Ubuntu 22.10) and 6.17 (Ubuntu 24.04).
   - 5.9 or newer is required: the file sensors need fanotify directory-entry events.
   - On kernels before 5.15 there are no perf-event link objects, so the health check skips the link and only asks the kernel which program the perf event has attached.
   - On kernels before 5.17, `exec_injection` scans fewer environment variables (512 reads instead of 8192).
 - Root (eBPF, fanotify)
 - To build: Go 1.23+, make, clang, llvm-strip, libbpf headers, bpftool and a C compiler
 - Can reach the stack host on port 3100
+
+### All Hosts
+- Clocks kept in sync (NTP). Certificates are valid from the moment they are made, so a host whose clock runs behind rejects a new server or bus certificate until it catches up.
 
 ## Step 1: Deploy the Observability Stack
 
@@ -341,6 +344,87 @@ sudo docker compose -f deploy/appliance/docker-compose.yml up -d --build --wait
 The stack runs `hookmon-server` (dashboard and API on :8443, buses on :9443, enrollment on :9444), PostgreSQL (internal only), the collector, Grafana (:3000), Loki (:3100), and Prometheus, Pushgateway and Alertmanager (127.0.0.1 only, since they have no authentication). Every image is pinned by digest. `deploy/appliance/check-stack.sh` checks a running stack; CI runs it on every push.
 
 Then enroll each bus with the printed command (see [Server Path](#server-path) for what enrollment does), and open `https://hookmon.internal:8443` with the CA from `/etc/hookmon/tls/ca.crt` trusted, or Grafana on :3000.
+
+## Appliance Image
+
+A VM image with the server path: Ubuntu 24.04, `hookmon-server`, the dashboard and PostgreSQL 16. Three formats are shipped, all built from one Packer build:
+
+| Format | File | For | Tested |
+|--------|------|-----|--------|
+| QCOW2 | `hookmon-appliance.qcow2` | KVM, Proxmox, OpenStack | Booted under QEMU/KVM |
+| VHD (dynamic) | `hookmon-appliance.vhd` | Hyper-V | The disk booted under QEMU/KVM; Hyper-V import not tested |
+| OVA | `hookmon-appliance.ova` | VMware | The VMDK booted under QEMU/KVM; import into VMware or VirtualBox not tested |
+
+There is no ISO (bare-metal installer). For bare metal, install Ubuntu 24.04 and use the [Ansible appliance role](#ansible-appliance-role).
+
+### Build
+
+On a Linux host with KVM, [Packer](https://developer.hashicorp.com/packer/install) 1.11 or newer, `qemu-system-x86` and `qemu-utils`, Go and Node.js 20+:
+
+```bash
+make appliance-qcow2   # builds hookmon-server and the dashboard, then the image (a few minutes)
+make appliance-vhd     # converts the qcow2 (qemu-img)
+make appliance-ova     # converts the qcow2: OVF descriptor, SHA-256 manifest, streamOptimized VMDK
+```
+
+The images are written to `appliance/packer/output/`. The base is Ubuntu's 24.04 cloud image, pinned by URL and SHA-256 in `appliance/packer/hookmon.pkr.hcl`. Packer boots it with a NoCloud seed, upgrades its packages, installs PostgreSQL, the server, the dashboard and `hookmon-init.sh`, and removes the build user, SSH host keys, machine ID and cloud-init state. The image holds no keys, tokens or passwords. For Azure, which wants a fixed-size VHD, see the comment in `appliance/packer/convert.sh`.
+
+### What Runs in the VM
+
+- `hookmon-server` as user `hookmon`, with `--config /etc/hookmon/server.yaml`: dashboard and REST API on 8443 (HTTPS), bus gRPC on 9443 (mutual TLS), enrollment on 9444. The server terminates TLS itself and serves the dashboard, so there is no nginx.
+- PostgreSQL 16, on the loopback interface only.
+- ufw, allowing only 22, 8443, 9443 and 9444. Unattended security upgrades are on.
+- No collector, Grafana, Prometheus or Loki. For the observability path, run the [compose appliance](#compose-appliance) or the observability stack elsewhere.
+
+### First Boot
+
+`hookmon-firstboot` runs once, after cloud-init has set the hostname (when the platform provides one):
+
+1. `hookmon-init.sh --mode host`, with the VM's FQDN (or hostname) and each global IP address it has: the CA, the server certificate, the enrollment and API tokens, the database password, and `server.yaml`.
+2. `hookmon-db-setup`: the `hookmon` database role, with that password, and the database.
+3. `hookmon-server` starts.
+
+The console then shows the dashboard URL, the certificate's names and the CA's SHA-256 fingerprint. `sudo cat /etc/hookmon/secrets/firstboot.txt` shows `hookmon-init.sh`'s full report, with the bus enrollment command. The API token is in `/etc/hookmon/secrets/api-token`. If first boot fails, it runs again at the next boot.
+
+### Logging In
+
+There are no passwords. Log in over SSH as `ubuntu`, with a key that cloud-init installs on first boot:
+
+- **KVM, Proxmox, OpenStack:** the platform's own cloud-init key settings.
+- **VMware (OVA):** the `public-keys` property at deploy time. `hostname` sets the hostname the certificate is made for.
+- **Hyper-V, VirtualBox, or KVM without cloud-init support:** attach a NoCloud seed ISO (volume label `cidata`) holding `meta-data` and a `user-data` with `ssh_authorized_keys`, for example made with `cloud-localds seed.iso user-data meta-data`.
+
+Without any of these, the appliance still comes up and serves on 8443, but nobody can log in to read the tokens.
+
+### Addresses and Tokens
+
+The network is DHCP on every Ethernet interface (`/etc/netplan/01-hookmon.yaml`; edit it for a static address). The server certificate names the hostname and addresses the VM had at first boot. If they change, or for a new enrollment token, run `hookmon-init.sh` again and restart the server; it keeps the CA and every token you don't ask it to replace:
+
+```bash
+sudo hookmon-init.sh --mode host --hostname hookmon.example.internal --ip 10.0.0.5   # new names
+sudo hookmon-init.sh --mode host --hostname hookmon.example.internal --ip 10.0.0.5 --new-enroll-token
+sudo systemctl restart hookmon-server
+```
+
+Give the same `--hostname`, `--dns` and `--ip` values as before (`/etc/hookmon/tls/server.san`) unless you mean to change them: different values issue a new server certificate. `hookmon-init.sh` writes `server.yaml` and the private keys as root; the server's unit hands them to the `hookmon` user at every start, so a restart is all a re-run needs.
+
+## Ansible Appliance Role
+
+`appliance/ansible/playbook.yml` sets up the same server on an existing Ubuntu 24.04 host, with the same systemd unit and first-run steps as the image. It needs `ansible-core` (tested with 2.20) and no collections. From the repository root:
+
+```bash
+make appliance-server build-dashboard    # bin/linux-amd64/hookmon-server, dashboard/dist
+cp appliance/ansible/inventory.example.ini inventory.ini   # then edit it
+ansible-playbook -i inventory.ini appliance/ansible/playbook.yml
+```
+
+- `hookmon_postgres` installs PostgreSQL 16 and starts it. It leaves the PostgreSQL config alone; Ubuntu's default listens on localhost only.
+- `hookmon_server` installs `hookmon-server`, the dashboard, `hookmon-init.sh` and `hookmon-db-setup`, runs `hookmon-init.sh --mode host` and `hookmon-db-setup`, installs the unit and waits for `/api/v1/health` over TLS.
+- Variables (`roles/hookmon_server/defaults/main.yml`): `hookmon_server_hostname` (default: the host's FQDN), `hookmon_server_ip_addresses` (default: its default IPv4 address), `hookmon_server_dns_names`, `hookmon_server_init_extra_args`, and the controller paths of the binary, the dashboard and `hookmon-init.sh`.
+- A second run with nothing changed reports `changed=0`. Changing the hostname or address lists issues a new server certificate from the same CA and restarts the server.
+- **Firewall:** the roles change none. Open TCP 8443 to browsers and `hookmon-cli`, and 9443 and 9444 to bus hosts (see [Network Requirements](#network-requirements)). Keep PostgreSQL on localhost.
+
+The tokens and the CA are in `/etc/hookmon` on the host, as on the image. `sudo hookmon-init.sh` with the same arguments prints the enrollment command again and changes nothing.
 
 ## Server Path
 

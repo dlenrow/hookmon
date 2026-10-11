@@ -1,0 +1,23 @@
+# HookMon appliance first boot: this VM's certificates, tokens, server.yaml
+# and database password (/usr/local/sbin/hookmon-firstboot). Runs until it
+# succeeds once. hookmon-server is ordered after it.
+[Unit]
+Description=HookMon appliance first boot (certificates, secrets, database)
+Documentation=https://github.com/dlenrow/hookmon/blob/main/docs/deployment-guide.md
+Wants=network-online.target postgresql.service
+# cloud-config.service: when cloud-init runs, the platform's hostname is set
+# before the server certificate is made for it.
+After=network-online.target postgresql.service cloud-config.service
+Before=hookmon-server.service
+ConditionPathExists=!/var/lib/hookmon/appliance-firstboot.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hookmon-firstboot
+TimeoutStartSec=10min
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

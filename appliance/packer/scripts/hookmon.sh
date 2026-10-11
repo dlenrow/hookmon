@@ -1,53 +1,36 @@
 #!/bin/bash
+# hookmon-server, the dashboard, hookmon-init.sh and the server's systemd
+# unit, from the files Packer uploaded to /tmp/hookmon-upload. The same unit
+# and database script are what the Ansible appliance role installs.
 set -euo pipefail
 
-echo "==> Installing HookMon server..."
+echo "==> HookMon server..."
 
-# Create hookmon user
-useradd --system --no-create-home --shell /usr/sbin/nologin hookmon || true
+UP=/tmp/hookmon-upload
 
-# Create directories
-mkdir -p /etc/hookmon /var/log/hookmon /var/www/hookmon/dashboard
-chown hookmon:hookmon /var/log/hookmon
+getent group hookmon >/dev/null || groupadd --system hookmon
+getent passwd hookmon >/dev/null ||
+	useradd --system --gid hookmon --home-dir /nonexistent --no-create-home \
+		--shell /usr/sbin/nologin hookmon
 
-# Copy server binary (expected to be uploaded by Packer)
-# In production, this would be copied from the build output
-if [ -f /tmp/hookmon-server ]; then
-    cp /tmp/hookmon-server /usr/bin/hookmon-server
-    chmod 755 /usr/bin/hookmon-server
-fi
+install -d -m 0755 /etc/hookmon /var/lib/hookmon /usr/share/hookmon
+install -m 0755 "$UP/hookmon-server" /usr/local/bin/hookmon-server
+install -m 0755 "$UP/files/hookmon-init.sh" /usr/local/sbin/hookmon-init.sh
+install -m 0755 "$UP/files/hookmon-db-setup" /usr/local/sbin/hookmon-db-setup
 
-# Create systemd service for hookmon-server
-cat > /etc/systemd/system/hookmon-server.service <<EOF
-[Unit]
-Description=HookMon Security Server
-After=network.target postgresql.service
-Requires=postgresql.service
+# The server's default dashboard_dir, and the one hookmon-init.sh writes.
+rm -rf /usr/share/hookmon/dashboard
+cp -R "$UP/dashboard" /usr/share/hookmon/dashboard
+chown -R root:root /usr/share/hookmon/dashboard
+find /usr/share/hookmon/dashboard -type d -exec chmod 0755 {} +
+find /usr/share/hookmon/dashboard -type f -exec chmod 0644 {} +
+test -f /usr/share/hookmon/dashboard/index.html
 
-[Service]
-Type=simple
-User=hookmon
-Group=hookmon
-ExecStart=/usr/bin/hookmon-server \
-    --grpc-addr :9443 \
-    --http-addr :8443 \
-    --db "postgres://hookmon:hookmon_changeme@localhost:5432/hookmon?sslmode=disable"
-Restart=always
-RestartSec=5
-LimitNOFILE=65536
-
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/hookmon
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+install -m 0644 "$UP/files/hookmon-server.service" /etc/systemd/system/hookmon-server.service
 systemctl daemon-reload
-systemctl enable hookmon-server
+# Enabled now; it starts once hookmon-firstboot has written server.yaml.
+systemctl enable hookmon-server.service
 
-echo "==> HookMon server install complete."
+/usr/local/bin/hookmon-server --version
+
+echo "==> HookMon server done."

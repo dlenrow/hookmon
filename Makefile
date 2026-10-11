@@ -33,7 +33,7 @@ endif
 .PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dlopen-probe build-dashboard build-canaries build-canaries-noebpf
 .PHONY: bpf generate test test-unit test-registry test-collector test-integration test-e2e smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
-.PHONY: appliance-ova appliance-qcow2 appliance-iso appliance-compose
+.PHONY: appliance-server appliance-qcow2 appliance-vhd appliance-ova appliance-compose
 
 ## Build targets
 
@@ -148,14 +148,25 @@ docker-server:
 
 ## Appliance
 
+# hookmon-server for the appliance image and the Ansible appliance role
+# (appliance/ansible): linux/amd64 whatever the build host.
+APPLIANCE_SERVER := $(BIN_DIR)/linux-amd64/hookmon-server
+appliance-server:
+	@mkdir -p $(dir $(APPLIANCE_SERVER))
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(LDFLAGS) -o $(APPLIANCE_SERVER) ./cmd/hookmon-server
+
+# QCOW2 image in appliance/packer/output, built from this tree. Needs packer,
+# qemu and KVM, so a Linux build host. -force replaces an earlier build.
+appliance-qcow2: appliance-server build-dashboard
+	cd appliance/packer && packer init hookmon.pkr.hcl && packer build -force hookmon.pkr.hcl
+
+# VHD (Hyper-V) and OVA (VMware), converted from that qcow2: run
+# make appliance-qcow2 first. Need qemu-img. There is no ISO image.
+appliance-vhd:
+	appliance/packer/convert.sh vhd $(VERSION)
+
 appliance-ova:
-	cd appliance/packer && packer build -only='*.vmware-iso' hookmon.pkr.hcl
-
-appliance-qcow2:
-	cd appliance/packer && packer build -only='*.qemu' hookmon.pkr.hcl
-
-appliance-iso:
-	./appliance/iso/build-iso.sh
+	appliance/packer/convert.sh ova $(VERSION)
 
 # Compose appliance: builds the server and collector images and starts the
 # stack. Run deploy/appliance/hookmon-init.sh --mode compose first, with

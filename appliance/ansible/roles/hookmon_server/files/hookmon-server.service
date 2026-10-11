@@ -1,0 +1,55 @@
+# hookmon-server on the HookMon appliance image and on hosts set up by the
+# Ansible appliance role. Its config, certificates and secrets are written by
+# hookmon-init.sh --mode host (deploy/appliance/hookmon-init.sh).
+[Unit]
+Description=HookMon server (dashboard, REST API, bus gRPC and enrollment)
+Documentation=https://github.com/dlenrow/hookmon/blob/main/docs/deployment-guide.md
+Wants=network-online.target
+# hookmon-firstboot.service exists only on the appliance image.
+After=network-online.target postgresql.service hookmon-firstboot.service
+Requires=postgresql.service
+ConditionPathExists=/etc/hookmon/server.yaml
+
+[Service]
+Type=simple
+User=hookmon
+Group=hookmon
+# hookmon-init.sh writes server.yaml and the two private keys as root, mode
+# 0600. Hand them to the service user before every start, so a re-run of
+# hookmon-init.sh (a new enrollment token, a new server certificate) needs
+# only a restart. The "+" runs this one command as root.
+ExecStartPre=+/usr/bin/chown hookmon:hookmon /etc/hookmon/server.yaml /etc/hookmon/tls/server.key /etc/hookmon/tls/ca.key
+ExecStart=/usr/local/bin/hookmon-server --config /etc/hookmon/server.yaml
+# SIGHUP rereads the allowlist and learning windows from the database.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+
+# The server reads its files and listens on 8443, 9443 and 9444 (all above
+# 1024); it needs no privileges and writes nothing to disk.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,137 @@
+---
+# hookmon-server on an existing Ubuntu 24.04 host, set up as the appliance
+# image is: the binary and dashboard from this tree, hookmon-init.sh
+# --mode host for the certificates, tokens and server.yaml, the database role
+# and password, and the systemd unit. Runs again without changes.
+- name: Install packages hookmon-init.sh and the health check need
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - openssl
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+
+- name: Create the hookmon group
+  ansible.builtin.group:
+    name: hookmon
+    system: true
+
+- name: Create the hookmon user
+  ansible.builtin.user:
+    name: hookmon
+    group: hookmon
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+    create_home: false
+
+- name: Create directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/hookmon
+    - /usr/share/hookmon
+    - /usr/share/hookmon/dashboard
+
+- name: Install hookmon-server
+  ansible.builtin.copy:
+    src: "{{ hookmon_server_binary }}"
+    dest: /usr/local/bin/hookmon-server
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart hookmon-server
+
+# The server reads index.html on every request, so a new dashboard needs no
+# restart.
+- name: Install the dashboard
+  ansible.builtin.copy:
+    src: "{{ hookmon_server_dashboard_dir }}/"
+    dest: /usr/share/hookmon/dashboard/
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+
+- name: Install hookmon-init.sh and hookmon-db-setup
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "/usr/local/sbin/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - { src: "{{ hookmon_server_init_script }}", dest: hookmon-init.sh }
+    - { src: hookmon-db-setup, dest: hookmon-db-setup }
+
+# Keeps every file that exists, so this changes something only on the first
+# run or when the certificate's names change. It reports what it made on the
+# "created:" line of its summary.
+- name: Write certificates, tokens and server.yaml (hookmon-init.sh --mode host)
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/local/sbin/hookmon-init.sh', '--mode', 'host', '--out-dir', '/etc/hookmon',
+          '--hostname', hookmon_server_hostname]
+         + (['--dns'] | product(hookmon_server_dns_names) | flatten)
+         + (['--ip'] | product(hookmon_server_ip_addresses) | flatten)
+         + hookmon_server_init_extra_args }}
+  register: hookmon_server_init
+  changed_when: "hookmon_server_init.stdout is search('created: [A-Za-z]')"
+  notify: Restart hookmon-server
+
+- name: Create the database role and database (hookmon-db-setup)
+  ansible.builtin.command: /usr/local/sbin/hookmon-db-setup /etc/hookmon
+  register: hookmon_server_db
+  changed_when: hookmon_server_db.stdout | length > 0
+
+- name: Install the hookmon-server unit
+  ansible.builtin.copy:
+    src: hookmon-server.service
+    dest: /etc/systemd/system/hookmon-server.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart hookmon-server
+
+- name: Apply pending restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start hookmon-server
+  ansible.builtin.systemd_service:
+    name: hookmon-server
+    enabled: true
+    state: started
+
+# uri cannot dial 127.0.0.1 while checking the certificate against
+# hookmon_server_hostname, which may not resolve on the host itself; curl can.
+- name: Wait for /api/v1/health over TLS
+  ansible.builtin.command: # noqa: command-instead-of-module
+    argv:
+      - curl
+      - -sS
+      - --max-time
+      - "5"
+      - --cacert
+      - /etc/hookmon/tls/ca.crt
+      - --resolve
+      - "{{ hookmon_server_hostname }}:8443:127.0.0.1"
+      - "https://{{ hookmon_server_hostname }}:8443/api/v1/health"
+  register: hookmon_server_health
+  until: hookmon_server_health.stdout == '{"status":"ok"}'
+  retries: 30
+  delay: 2
+  changed_when: false
+
+- name: Show where things are
+  ansible.builtin.debug:
+    msg:
+      - "Dashboard and REST API: https://{{ hookmon_server_hostname }}:8443/ (health: {{ hookmon_server_health.stdout }})"
+      - "CA certificate: /etc/hookmon/tls/ca.crt (copy it to each bus host and to browsers)"
+      - "API token: /etc/hookmon/secrets/api-token; enrollment token: /etc/hookmon/secrets/enroll-token"
+      - "Firewall: this role changes none. Open TCP 8443 (dashboard, API) to browsers and 9443 (bus gRPC) and 9444 (enrollment) to bus hosts."

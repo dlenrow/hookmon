@@ -1,0 +1,18 @@
+---
+# Files on the Ansible controller. Build them first with
+# `make appliance-server build-dashboard` (hookmon-server for linux/amd64,
+# and dashboard/dist).
+hookmon_server_binary: "{{ playbook_dir }}/../../bin/linux-amd64/hookmon-server"
+hookmon_server_dashboard_dir: "{{ playbook_dir }}/../../dashboard/dist"
+hookmon_server_init_script: "{{ playbook_dir }}/../../deploy/appliance/hookmon-init.sh"
+
+# The name sensor buses and browsers use for the server: the server
+# certificate's CN and first SAN. Must be a DNS name.
+hookmon_server_hostname: "{{ ansible_facts['fqdn'] }}"
+# More SANs for the server certificate. Changing either list issues a new
+# server certificate from the same CA on the next run.
+hookmon_server_dns_names: []
+hookmon_server_ip_addresses: "{{ [ansible_facts['default_ipv4']['address']] if ansible_facts['default_ipv4']['address'] is defined else [] }}"
+# Other hookmon-init.sh options, for example ["--token-ttl", "30d"]. They
+# apply when it makes a file: the first run, or after you delete one.
+hookmon_server_init_extra_args: []

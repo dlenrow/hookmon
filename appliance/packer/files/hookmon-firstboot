@@ -1,0 +1,67 @@
+#!/bin/sh
+# hookmon-firstboot: runs once, on a HookMon appliance's first boot
+# (hookmon-firstboot.service), before hookmon-server.
+#
+#   1. Makes this VM's snakeoil key (the image ships without one).
+#   2. Runs hookmon-init.sh --mode host with the VM's hostname and its
+#      global IP addresses: the CA, the server certificate, the enrollment
+#      and API tokens, the database password and /etc/hookmon/server.yaml.
+#   3. Creates the database role and database, with that password
+#      (hookmon-db-setup).
+#
+# hookmon-init.sh's full report, with the enrollment command, is saved in
+# /etc/hookmon/secrets/firstboot.txt (root only). The console gets a summary
+# without secrets. If any step fails, the next boot tries again.
+set -eu
+
+OUT=/etc/hookmon
+DONE=/var/lib/hookmon/appliance-firstboot.done
+
+valid_dns() {
+	case $1 in
+	'' | -* | .* | *. | *..* | *[!A-Za-z0-9.-]*) return 1 ;;
+	esac
+	return 0
+}
+
+if command -v make-ssl-cert >/dev/null 2>&1; then
+	make-ssl-cert generate-default-snakeoil --force-overwrite
+fi
+
+# The certificate's name: the FQDN if there is one, else the hostname.
+# cloud-init has set the hostname by now when the platform gave one.
+NAME=$(hostname -f 2>/dev/null || true)
+valid_dns "$NAME" || NAME=$(hostname)
+valid_dns "$NAME" || NAME=hookmon
+set -- --mode host --out-dir "$OUT" --hostname "$NAME"
+SHORT=${NAME%%.*}
+if [ "$SHORT" != "$NAME" ]; then
+	set -- "$@" --dns "$SHORT"
+fi
+for ip in $(ip -o addr show scope global | awk '{ sub(/\/.*/, "", $4); print $4 }'); do
+	set -- "$@" --ip "$ip"
+done
+
+umask 077
+REPORT=$(mktemp)
+trap 'rm -f "$REPORT"' EXIT
+/usr/local/sbin/hookmon-init.sh "$@" >"$REPORT"
+install -m 0600 "$REPORT" "$OUT/secrets/firstboot.txt"
+
+/usr/local/sbin/hookmon-db-setup "$OUT"
+
+install -d -m 0755 "$(dirname "$DONE")"
+date -u +%Y-%m-%dT%H:%M:%SZ >"$DONE"
+
+FINGERPRINT=$(openssl x509 -noout -fingerprint -sha256 -in "$OUT/tls/ca.crt" | sed 's/^[^=]*=//')
+cat <<EOF
+
+HookMon appliance: first boot done.
+  Dashboard and REST API: https://$NAME:8443/
+  Server certificate SANs: $(cat "$OUT/tls/server.san")
+  CA certificate: $OUT/tls/ca.crt
+    SHA-256 fingerprint $FINGERPRINT
+  API token, enrollment token and the sensor bus enrollment command:
+    sudo cat $OUT/secrets/firstboot.txt
+
+EOF
