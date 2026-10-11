@@ -432,9 +432,13 @@ Fixed while merging:
 
 `docs/api-reference.md` covers all 20 routes, the WebSocket, event JSON, query parameters, settings, learning, approve/reject and allowlist-from-event, with CLI equivalents. `docs/allowlist-guide.md` covers matching, the dedupe key, learning mode, review, scopes, severity and bootstrapping, and lists the pitfalls. Every curl and `hookmon-cli` example in both ran against a real TLS `hookmon-server` on drl-nuc8i3bek (Verified). Not run: the browser JavaScript WebSocket snippet, and the 503 response.
 
-Bugs found while writing them, and handed to a fix-up:
+Bugs found while writing them, all fixed in the follow-up commit (`10e0f4f` on its branch; each has a named test, and the NUC ran the full suite with Postgres and a live server under `TZ=America/New_York`):
 - An empty API token authenticated.
 - `hosts.last_event_at` was never written.
 - A duplicate policy ID returned 500 instead of 409.
 - Unparseable `since`/`until` were ignored.
 - 401 responses had a text/plain content type.
+
+Also fixed in that commit: timestamps now read back in UTC whatever the server's time zone (`TestStore_TimesReadBackInUTC`). Malformed `limit` and `offset` now return 400, as `since` and `until` do. Still documented as known issues in `docs/api-reference.md`:
+- A policy created without `enabled` is stored disabled.
+- `event_type` and `severity` filters accept any string.
