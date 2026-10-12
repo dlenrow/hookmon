@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -30,8 +31,10 @@ const linkerConfigDir = "ld.so.conf.d"
 // writes, creates, deletes and renames over them (sed -i, mv, ln -sf). It
 // marks /etc and /etc/ld.so.conf.d with fanotify; see fanWatcher.
 //
-// A change is CRITICAL, or INFO when a package manager is in the writer's
-// process ancestry (see procReader for what happens when the writer exited).
+// A change is CRITICAL. A change with a package manager in the writer's
+// process ancestry (ldconfig after an install, a package's ld.so.conf.d
+// file) is not reported, only counted as suppressed; see procReader for
+// what happens when the writer exited.
 type LinkerConfigSensor struct {
 	etcDir   string
 	procRoot string
@@ -161,11 +164,12 @@ func (s *LinkerConfigSensor) handleEvent(ev dirEvent) {
 	if op == "delete" {
 		newHash = ""
 	}
+	// The baseline moves on either way, so the next reported change carries
+	// the package's version as its old hash.
 	oldHash := s.baseline.swap(path, newHash)
-
-	severity := event.SeverityCritical
 	if ev.Proc.PkgMgr != "" {
-		severity = event.SeverityInfo
+		suppress.Add(s.Name(), suppress.PackageManager)
+		return
 	}
 	uid, gid, ppid, comm := procIDs(ev.Proc)
 
@@ -173,7 +177,7 @@ func (s *LinkerConfigSensor) handleEvent(ev dirEvent) {
 		ID:        uuid.New().String(),
 		Timestamp: time.Now(),
 		EventType: event.EventLinkerConfig,
-		Severity:  severity,
+		Severity:  event.SeverityCritical,
 		PID:       ev.Pid,
 		PPID:      ppid,
 		UID:       uid,

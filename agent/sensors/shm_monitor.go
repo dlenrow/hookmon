@@ -15,6 +15,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/google/uuid"
 
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -172,6 +173,12 @@ func (s *SHMMonitorSensor) readLoop() {
 
 		shmName := nullTermStr(raw.SHMName[:])
 		pattern, severity := classifySHM(shmName, shmCreatorEnv(&raw))
+		// A segment that says nothing about BPF is not reported: browsers
+		// and other programs create them constantly for their own IPC.
+		if pattern == shmPatternUnknown {
+			suppress.Add(s.Name(), suppress.NoBPFPattern)
+			continue
+		}
 
 		hookEvt := &event.HookEvent{
 			ID:        uuid.New().String(),

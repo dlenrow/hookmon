@@ -35,7 +35,8 @@ const bpftimeShmNameEnv = "BPFTIME_GLOBAL_SHM_NAME"
 //   - "bpf_related", ALERT: the name has "bpf" (or "ebpf", "libbpf") as a
 //     word of its own, e.g. "hookmon_bpf_maps" or "libbpf-ringbuf".
 //   - "unknown", INFO: anything else. Many programs use /dev/shm, and some
-//     use random names ("BtbpfW" in a Chromium segment is not BPF).
+//     use random names ("BtbpfW" in a Chromium segment is not BPF). The
+//     sensor does not report these.
 func classifySHM(name string, env []byte) (string, event.Severity) {
 	lower := strings.ToLower(name)
 	switch {

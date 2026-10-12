@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/dlenrow/hookmon/agent/registry"
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -97,6 +98,7 @@ func NewMetricsOn(addr string, port int, logger *zap.Logger) (*Metrics, error) {
 	promReg.MustRegister(
 		m.eventsTotal, m.sensorErrors, m.sensorsActive, m.bpfInsnCount,
 		m.sensorAlive, m.sensorLastBeat, m.sensorLastBeatAge, m.sensorStatus, m.busOverall,
+		suppressedCollector{},
 	)
 
 	m.mux = http.NewServeMux()
@@ -115,6 +117,26 @@ func NewMetricsOn(addr string, port int, logger *zap.Logger) (*Metrics, error) {
 	}()
 
 	return m, nil
+}
+
+// suppressedDesc describes hookmon_events_suppressed_total, read from the
+// suppress package's counts at each scrape.
+var suppressedDesc = prometheus.NewDesc(
+	"hookmon_events_suppressed_total",
+	"Events a sensor saw and dropped because they cannot be a stealth hook, by sensor and reason.",
+	[]string{"sensor", "reason"}, nil,
+)
+
+// suppressedCollector exports the suppress package's counts, so the sensors
+// count without importing Prometheus.
+type suppressedCollector struct{}
+
+func (suppressedCollector) Describe(ch chan<- *prometheus.Desc) { ch <- suppressedDesc }
+
+func (suppressedCollector) Collect(ch chan<- prometheus.Metric) {
+	for _, c := range suppress.Snapshot() {
+		ch <- prometheus.MustNewConstMetric(suppressedDesc, prometheus.CounterValue, float64(c.N), c.Sensor, c.Reason)
+	}
 }
 
 // RegisterStatusHandler adds the /status endpoint to the HTTP mux.

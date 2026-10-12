@@ -13,12 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
 // Fix plan step 4, shm_monitor and ptrace_monitor: SHM severity follows the
-// pattern, bpftime's real segment name and its rename variable are matched,
-// segments made with openat2 are seen, and ptrace register and USER-area
+// pattern (a segment with no BPF pattern is not reported at all), bpftime's
+// real segment name and its rename variable are matched, segments made
+// with openat2 are seen, and ptrace register and USER-area
 // writes are reported with the target's comm.
 
 // ptrace requests (include/uapi/linux/ptrace.h).
@@ -123,21 +125,29 @@ func TestSensor3_SHMMonitor_BpfRelatedIsAlert(t *testing.T) {
 	shmPtrCheckSHM(t, shmPtrWaitSHM(t, bus, name, pid), "bpf_related", event.SeverityAlert)
 }
 
-// TestSensor3_SHMMonitor_GenericIsInfo: any other segment is INFO.
-func TestSensor3_SHMMonitor_GenericIsInfo(t *testing.T) {
+// TestSensor3_SHMMonitor_GenericIsSuppressed: a segment whose name says
+// nothing about BPF is not reported (browsers make them constantly for
+// their own IPC); the bus counts it as suppressed.
+func TestSensor3_SHMMonitor_GenericIsSuppressed(t *testing.T) {
+	const port = "2204"
 	name := shmPtrUnique("hm_generic_")
-	bus := shmPtrStartBus(t)
+	bus := startFileBus(t, port, "shm_monitor")
+	before := suppressedCount(t, port, "shm_monitor", suppress.NoBPFPattern)
 	pid, _ := shmPtrRun(t, shmPtrBaseEnv, canaryBinDir()+"/shm_canary", "/"+name)
-	shmPtrCheckSHM(t, shmPtrWaitSHM(t, bus, name, pid), "unknown", event.SeverityInfo)
+	waitSuppressed(t, port, "shm_monitor", suppress.NoBPFPattern, before, 15*time.Second)
+	noEvent(t, bus, "/dev/shm/"+name, 2*time.Second, func(e *event.HookEvent) bool {
+		return e.EventType == event.EventSHMCreate && e.SHMDetail != nil &&
+			e.SHMDetail.SHMName == name && e.PID == uint32(pid)
+	})
 }
 
 // TestSensor3_SHMMonitor_Openat2: a segment created with openat2(), which
 // the openat() hook does not see, is detected.
 func TestSensor3_SHMMonitor_Openat2(t *testing.T) {
-	name := shmPtrUnique("hm_oat2_")
+	name := shmPtrUnique("bpftime_oat2_")
 	bus := shmPtrStartBus(t)
 	pid, _ := shmPtrRun(t, shmPtrBaseEnv, canaryBinDir()+"/shm_openat2_canary", name)
-	shmPtrCheckSHM(t, shmPtrWaitSHM(t, bus, name, pid), "unknown", event.SeverityInfo)
+	shmPtrCheckSHM(t, shmPtrWaitSHM(t, bus, name, pid), "bpftime", event.SeverityCritical)
 }
 
 // shmPtrCanaryValue returns the number on the canary's "<key>=<n>" line.

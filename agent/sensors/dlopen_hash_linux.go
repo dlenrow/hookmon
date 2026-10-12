@@ -41,6 +41,7 @@ type dlopenHashes struct {
 	mu       sync.Mutex
 	order    *list.List // front is most recently used; values are *dlopenHashEntry
 	entries  map[dlopenFileKey]*list.Element
+	ldCache  processLdCaches // for libraryRisk
 }
 
 func newDlopenHashes(procRoot string) *dlopenHashes {

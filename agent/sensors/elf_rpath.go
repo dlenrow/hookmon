@@ -256,10 +256,45 @@ func analyzeElfRpath(r io.ReaderAt, exePath string, isSetuid bool) *event.ElfRpa
 	return detail
 }
 
+// libFS is the filesystem a library directory is judged in. An RPATH entry
+// is judged in the bus's own (hostFS). The directories a process loads
+// libraries from are judged as that process sees them: a container's own
+// files, not the host's files at the same path (rootFS, Linux).
+type libFS interface {
+	// stat returns the owner, group and mode (type, permission and sticky
+	// bits) of path, following symlinks as ld.so does.
+	stat(path string) (uid, gid uint32, mode os.FileMode, ok bool)
+	// realPath returns path with every symlink resolved.
+	realPath(path string) (string, error)
+}
+
+// hostFS is the bus's own view of the filesystem.
+type hostFS struct{}
+
+func (hostFS) stat(path string) (uint32, uint32, os.FileMode, bool) { return dirOwner(path) }
+func (hostFS) realPath(path string) (string, error)                 { return filepath.EvalSymlinks(path) }
+
+// fsDirExists reports whether path is an existing directory in fs.
+func fsDirExists(fs libFS, path string) bool {
+	_, _, mode, ok := fs.stat(path)
+	return ok && mode.IsDir()
+}
+
+// fsWorldWritable reports whether path exists in fs with the other-write bit.
+func fsWorldWritable(fs libFS, path string) bool {
+	_, _, mode, ok := fs.stat(path)
+	return ok && mode.Perm()&0o002 != 0
+}
+
 // classifyEntry evaluates a single RPATH/RUNPATH path entry and assigns a risk level.
 // Dynamic string tokens ($ORIGIN, $LIB, $PLATFORM, also as ${NAME}) are
 // expanded first, as ld.so expands them.
 func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEntry {
+	return classifyEntryIn(hostFS{}, path, binaryDir, isRpath, isSetuid)
+}
+
+// classifyEntryIn is classifyEntry with the directories looked up in fs.
+func classifyEntryIn(fs libFS, path, binaryDir string, isRpath, isSetuid bool) event.RpathEntry {
 	entry := event.RpathEntry{
 		Path:    path,
 		IsRpath: isRpath,
@@ -279,7 +314,7 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	// absolute path would be.
 	if usesOrigin {
 		resolved := filepath.Clean(expanded)
-		entry.Exists = dirExists(resolved)
+		entry.Exists = fsDirExists(fs, resolved)
 		prefix := dangerousPrefix(resolved)
 		switch {
 		case isSetuid:
@@ -288,11 +323,11 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 		case prefix != "":
 			entry.Risk = event.RpathRiskCritical
 			entry.Reason = fmt.Sprintf("$ORIGIN resolves to %s, in writable/attacker-controlled directory %s", resolved, prefix)
-		case entry.Exists && isWorldWritable(resolved):
+		case entry.Exists && fsWorldWritable(fs, resolved):
 			entry.Risk = event.RpathRiskHigh
 			entry.Reason = fmt.Sprintf("$ORIGIN resolves to world-writable directory %s", resolved)
 		case entry.Exists:
-			risk, why := writableRisk(resolved)
+			risk, why := writableRiskIn(fs, resolved)
 			entry.Risk = risk
 			entry.Reason = fmt.Sprintf("$ORIGIN-relative path in non-SUID binary, resolves to %s: %s", resolved, why)
 		default:
@@ -307,7 +342,7 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	if !filepath.IsAbs(expanded) {
 		entry.Risk = event.RpathRiskCritical
 		entry.Reason = "relative path allows attacker-controlled library loading"
-		entry.Exists = dirExists(expanded)
+		entry.Exists = fsDirExists(fs, expanded)
 		entry = bumpIfDeprecated(entry)
 		return entry
 	}
@@ -317,14 +352,14 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	if prefix := dangerousPrefix(cleaned); prefix != "" {
 		entry.Risk = event.RpathRiskCritical
 		entry.Reason = fmt.Sprintf("writable/attacker-controlled directory: %s", prefix)
-		entry.Exists = dirExists(cleaned)
+		entry.Exists = fsDirExists(fs, cleaned)
 		entry = bumpIfDeprecated(entry)
 		return entry
 	}
 
 	// Check if this is a standard system library path first (before exists check).
 	if standardLibDirs[cleaned] {
-		entry.Exists = dirExists(cleaned)
+		entry.Exists = fsDirExists(fs, cleaned)
 		entry.Risk = event.RpathRiskNone
 		entry.Reason = "standard system library directory"
 		entry = bumpIfDeprecated(entry)
@@ -332,7 +367,7 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	}
 
 	// Check if directory exists.
-	entry.Exists = dirExists(cleaned)
+	entry.Exists = fsDirExists(fs, cleaned)
 
 	if !entry.Exists {
 		entry.Risk = event.RpathRiskHigh
@@ -342,7 +377,7 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	}
 
 	// Check for world-writable directory.
-	if isWorldWritable(cleaned) {
+	if fsWorldWritable(fs, cleaned) {
 		entry.Risk = event.RpathRiskHigh
 		entry.Reason = "world-writable directory"
 		entry = bumpIfDeprecated(entry)
@@ -350,7 +385,7 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 	}
 
 	// Non-standard but existing: ranked by who can write to it.
-	risk, why := writableRisk(cleaned)
+	risk, why := writableRiskIn(fs, cleaned)
 	entry.Risk = risk
 	entry.Reason = "non-standard library directory: " + why
 	entry = bumpIfDeprecated(entry)
@@ -365,12 +400,17 @@ func classifyEntry(path, binaryDir string, isRpath, isSetuid bool) event.RpathEn
 // own, so only its owner counts; the library directory itself gets no such
 // pass, since adding a file is enough there.
 func writableRisk(dir string) (event.RpathRisk, string) {
-	real, err := filepath.EvalSymlinks(dir)
+	return writableRiskIn(hostFS{}, dir)
+}
+
+// writableRiskIn is writableRisk with the directories looked up in fs.
+func writableRiskIn(fs libFS, dir string) (event.RpathRisk, string) {
+	real, err := fs.realPath(dir)
 	if err != nil {
 		return event.RpathRiskMedium, fmt.Sprintf("cannot resolve %s: %v", dir, err)
 	}
 	for d, leaf := real, true; ; d, leaf = filepath.Dir(d), false {
-		uid, gid, mode, ok := dirOwner(d)
+		uid, gid, mode, ok := fs.stat(d)
 		protected := !leaf && mode&os.ModeSticky != 0
 		switch {
 		case !ok:
@@ -529,15 +569,6 @@ func dirExists(path string) bool {
 		return false
 	}
 	return info.IsDir()
-}
-
-// isWorldWritable checks if a directory is world-writable (other-write bit set).
-func isWorldWritable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return info.Mode().Perm()&0002 != 0
 }
 
 // riskLevel returns a numeric level for comparison.
