@@ -93,7 +93,7 @@ export function DispositionBadge({ event }: { event: HookEvent }) {
     case 'first_sighting':
       return (
         <span className="badge badge-new" data-testid="disposition" data-disposition="first_sighting" style={{ marginLeft: '6px' }}>
-          first sighting
+          {event.policy_result?.quiet ? 'first sighting (quiet period)' : 'first sighting'}
         </span>
       );
     case 'denied':

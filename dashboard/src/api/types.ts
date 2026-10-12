@@ -144,6 +144,8 @@ export interface PolicyResult {
   disposition?: Disposition;
   /** The PENDING entry for the event's key, when there is one. */
   candidate_id?: string;
+  /** A first sighting during a quiet period: not sent to alert connectors. */
+  quiet?: boolean;
 }
 
 export interface HookEvent {
