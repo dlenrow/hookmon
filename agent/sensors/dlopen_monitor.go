@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -280,6 +281,10 @@ func (s *DlopenMonitorSensor) readLoop() {
 		var libHash string
 		// A path that fills the buffer may be cut short and name another file.
 		if len(libPath) < len(raw.LibraryPath)-1 {
+			if risk, _, ok := s.hashes.libraryRisk(raw.PID, libPath); ok && RiskBelow(risk, event.RpathRiskMedium) {
+				suppress.Add(s.Name(), suppress.RootOnlyDirectory)
+				continue
+			}
 			libHash = s.hashes.library(raw.PID, libPath)
 		}
 

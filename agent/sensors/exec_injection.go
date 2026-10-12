@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/google/uuid"
 
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -58,6 +59,12 @@ type execInjectionEvent struct {
 // whether it was started by execve or execveat. A sched_process_exec program
 // scans the environment the kernel copied onto the new process's stack,
 // before the process runs.
+//
+// LD_PRELOAD, LD_AUDIT and LD_DEBUG are always reported. LD_LIBRARY_PATH is
+// reported only when one of its entries ranks MEDIUM or higher as an RPATH
+// entry would (see searchPathRisk); one that names only standard library
+// directories and directories only root can write cannot lead a program to
+// a library someone else planted, and is counted as suppressed.
 type ExecInjectionSensor struct {
 	eventCh  chan *event.HookEvent
 	tp       link.Link
@@ -178,6 +185,10 @@ func (s *ExecInjectionSensor) readLoop() {
 
 		var raw execInjectionEvent
 		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &raw); err != nil {
+			continue
+		}
+		if !reportExecInjection(&raw) {
+			suppress.Add(s.Name(), suppress.SafeSearchPath)
 			continue
 		}
 
