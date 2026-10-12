@@ -46,6 +46,11 @@ host has enrolled.
 %install
 install -D -m 0755 hookmon-bus %{buildroot}%{_bindir}/hookmon-bus
 install -D -m 0755 hookmon-dlopen-probe %{buildroot}%{_bindir}/hookmon-dlopen-probe
+if [ -f hookmon-smoketest ]; then
+    install -D -m 0755 hookmon-smoketest %{buildroot}%{_libexecdir}/hookmon/hookmon-smoketest
+    install -D -m 0644 libhookmon_smoketest.so %{buildroot}%{_libexecdir}/hookmon/libhookmon_smoketest.so
+    install -D -m 0755 hookmon-smoketest-helper %{buildroot}%{_libexecdir}/hookmon/hookmon-smoketest-helper
+fi
 install -D -m 0644 hookmon-bus.service %{buildroot}%{_unitdir}/hookmon-bus.service
 install -D -m 0644 bus.yaml %{buildroot}%{_sysconfdir}/hookmon/bus.yaml
 install -d -m 0700 %{buildroot}%{_sharedstatedir}/hookmon
@@ -55,6 +60,10 @@ install -d -m 0750 %{buildroot}%{_localstatedir}/log/hookmon
 %license LICENSE
 %{_bindir}/hookmon-bus
 %{_bindir}/hookmon-dlopen-probe
+%dir %{_libexecdir}/hookmon
+%{_libexecdir}/hookmon/hookmon-smoketest
+%{_libexecdir}/hookmon/libhookmon_smoketest.so
+%{_libexecdir}/hookmon/hookmon-smoketest-helper
 %{_unitdir}/hookmon-bus.service
 %dir %{_sysconfdir}/hookmon
 %config(noreplace) %{_sysconfdir}/hookmon/bus.yaml

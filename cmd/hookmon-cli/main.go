@@ -103,6 +103,14 @@ func (c *CLI) run(args []string) error {
 		return fmt.Errorf("unknown learning command %q", sub(1))
 	case "health":
 		return c.health()
+	case "smoketest":
+		switch sub(1) {
+		case "check":
+			return c.smoketestCheck(args[2:])
+		case "cleanup":
+			return c.smoketestCleanup()
+		}
+		return fmt.Errorf("unknown smoketest command %q (check or cleanup)", sub(1))
 	}
 	fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 	return errUsage
@@ -157,6 +165,12 @@ Commands:
   learning stop --fleet | --host HOST_ID
                       End the quiet period now; PENDING entries stay
   health              Check server health
+  smoketest check --since TIME|DURATION [--host HOST ...]
+                      Print a hook-type x host table of smoketest results
+                      (new, denied, allowed, missing). Exits non-zero if any
+                      cell is missing.
+  smoketest cleanup   Delete allowlist entries whose exe path matches the
+                      smoketest (any status)
 
 Flags:
 `)

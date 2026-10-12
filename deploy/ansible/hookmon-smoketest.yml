@@ -1,0 +1,40 @@
+---
+# Run the HookMon smoketest on every bus host.
+#
+#   ansible-playbook -i inventory.ini deploy/ansible/hookmon-smoketest.yml \
+#       -e run_id=$(date +%s)
+#
+# After all hosts finish, use hookmon-cli to check the results:
+#   hookmon-cli smoketest check --since 10m
+#
+# To clean up smoketest allowlist entries afterwards:
+#   hookmon-cli smoketest cleanup
+
+- name: HookMon smoketest
+  hosts: hookmon_bus
+  become: true
+  vars:
+    smoketest_bin: /usr/libexec/hookmon/hookmon-smoketest
+    run_id: "{{ lookup('pipe', 'date +%s') }}"
+
+  tasks:
+    - name: Check smoketest binary exists
+      stat:
+        path: "{{ smoketest_bin }}"
+      register: st_bin
+
+    - name: Fail if smoketest not installed
+      fail:
+        msg: "hookmon-smoketest not found at {{ smoketest_bin }}; install the hookmon-bus package first"
+      when: not st_bin.stat.exists
+
+    - name: Run smoketest triggers
+      command: "{{ smoketest_bin }} --id {{ run_id }} run"
+      register: st_result
+
+    - name: Show result
+      debug:
+        msg: "{{ st_result.stdout_lines }}"
+
+    - name: Cleanup smoketest files
+      command: "{{ smoketest_bin }} cleanup"
