@@ -363,7 +363,8 @@ func TestStore_DatabaseFailures(t *testing.T) {
 		"GetAllowlistEntry":     t7hErr(s.GetAllowlistEntry(ctx, "x")),
 		"DecideCandidate":       t7hErr(s.DecideCandidate(ctx, "x", event.StatusApproved, "")),
 		"MarkHostUnresponsive":  t7hErr(s.MarkHostUnresponsive(ctx, "x", now)),
-		"RecordCandidate":       t7hErr(s.RecordCandidate(ctx, event.LearnedKey{EventType: event.EventBPFLoad}, "/x", "d", "h", now)),
+		"RecordCandidate":       t7hErr(s.RecordCandidate(ctx, event.LearnedKey{EventType: event.EventBPFLoad}, "/x", "d", "h", "e", now)),
+		"DecideCandidates":      t7hErr(s.DecideCandidates(ctx, []string{"x"}, event.StatusApproved, ScopeFleet)),
 		"RecordHeartbeat (raw)": t7hErr(s.RecordHeartbeat(ctx, &event.HostHeartbeat{HostID: "x", ReceivedAt: now})),
 	} {
 		if err == nil || errors.Is(err, ErrNotFound) {

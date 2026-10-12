@@ -228,7 +228,8 @@ func TestStore_TimesReadBackInUTC(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := event.LearnedKey{EventType: event.EventDlopen, SubjectKind: "library_path", Subject: "/opt/x.so"}
-	pendingID, err := s.RecordCandidate(ctx, key, "/usr/bin/app", "learned", "h-1", base.Add(2*time.Minute))
+	sighting, err := s.RecordCandidate(ctx, key, "/usr/bin/app", "learned", "h-1", "e1", base.Add(2*time.Minute))
+	pendingID := sighting.ID
 	if err != nil || pendingID == "" {
 		t.Fatalf("RecordCandidate: %q %v", pendingID, err)
 	}

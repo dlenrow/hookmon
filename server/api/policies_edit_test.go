@@ -378,3 +378,48 @@ func TestAllowlistEvent(t *testing.T) {
 		t.Errorf("entries: %d, want 2", len(st.entries))
 	}
 }
+
+// TestAllowlistEvent_DecidesPendingEntry: allowlisting an event whose key
+// has a PENDING entry (a new hook's first sighting) decides that entry, for
+// the fleet or the event's host, instead of creating a second entry. The
+// Postgres test TestAPI_RealStore_AllowlistEventDecidesPending checks what
+// the store then holds.
+func TestAllowlistEvent_DecidesPendingEntry(t *testing.T) {
+	st := newPolStore()
+	bpf := &event.HookEvent{ID: "e1", HostID: "host-a", Timestamp: time.Now().UTC(), EventType: event.EventBPFLoad,
+		Severity: event.SeverityWarn, UID: 1000, ExePath: "/usr/bin/loader", ExeHash: "sha256:" + strings.Repeat("ab", 32),
+		BPFDetail: &event.BPFDetail{ProgType: 5, ProgName: "hello", ProgHash: "a04f5eef06a7f555"}}
+	st.events = map[string]*event.HookEvent{"e1": bpf}
+	st.entries = []*event.AllowlistEntry{
+		{ID: "other", Action: event.ActionAlert, Enabled: true, Status: event.StatusPending,
+			Learned: &event.Learned{Key: event.LearnedKey{EventType: event.EventDlopen, Subject: "/opt/x.so"}, Hosts: []string{"host-a"}}},
+		{ID: "pend", Action: event.ActionAlert, Enabled: true, Status: event.StatusPending,
+			Learned: &event.Learned{Key: allowlist.KeyOf(bpf), Hosts: []string{"host-a", "host-b"}, FirstEventID: "e1"}},
+	}
+	rl := &polReloader{}
+	h := polRouter(st, rl)
+
+	for _, c := range []struct{ body, want string }{
+		{`{"scope":"host"}`, `pend APPROVED "host-a"`},
+		{`{"scope":"fleet"}`, `pend APPROVED ""`},
+	} {
+		st.decisions = nil
+		code, body := polDo(t, h, http.MethodPost, "/api/v1/events/e1/allowlist", c.body)
+		if code != http.StatusCreated {
+			t.Fatalf("%s: %d %s", c.body, code, body)
+		}
+		if got := strings.Join(st.decisions, "; "); got != c.want {
+			t.Errorf("%s: decisions %q, want %q", c.body, got, c.want)
+		}
+		var e event.AllowlistEntry
+		if err := json.Unmarshal([]byte(body), &e); err != nil || e.ID != "pend" || e.Status != event.StatusApproved {
+			t.Errorf("%s: answered %+v (%v), want the decided entry", c.body, e, err)
+		}
+	}
+	if len(st.entries) != 2 {
+		t.Errorf("entries: %d, want 2 (no second entry for the key)", len(st.entries))
+	}
+	if rl.n() != 2 {
+		t.Errorf("reloads: %d, want 2", rl.n())
+	}
+}

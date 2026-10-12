@@ -221,6 +221,60 @@ type PolicyResult struct {
 	Action         PolicyAction `json:"action"`
 	MatchedEntryID string       `json:"matched_entry_id,omitempty"`
 	Reason         string       `json:"reason"`
+	// Disposition is what the server does with the event: see Disposition.
+	Disposition Disposition `json:"disposition,omitempty"`
+	// CandidateID is the PENDING entry for the event's key, on a first
+	// sighting or a repeat.
+	CandidateID string `json:"candidate_id,omitempty"`
+	// Quiet marks a first sighting during a learning window: it is stored
+	// and shown, but not sent to alert connectors.
+	Quiet bool `json:"quiet,omitempty"`
+}
+
+// Disposition is what the server does with a hook event once the policy
+// engine has evaluated it. A hook HookMon has not seen before is stored
+// once, as a first sighting, and waits for a decision as a PENDING entry.
+// Its repeats only add to that entry's count, and once it is allowed it is
+// dropped. A denied hook is stored and alerts every time.
+type Disposition string
+
+const (
+	// DispositionFirstSighting: no decided entry matched, and this event
+	// created the PENDING entry for its key. Stored, shown and sent to the
+	// connectors.
+	DispositionFirstSighting Disposition = "first_sighting"
+	// DispositionRepeat: no decided entry matched, and a PENDING entry for
+	// the key already existed; its count, last seen time and hosts were
+	// updated. Not stored, shown or sent.
+	DispositionRepeat Disposition = "repeat"
+	// DispositionAllowed: matched an entry with action ALLOW (or is a BPF
+	// inventory summary). Not stored, shown or sent.
+	DispositionAllowed Disposition = "allowed"
+	// DispositionDenied: matched an ALERT or DENY entry, such as a rejected
+	// candidate. Stored, shown and sent every time.
+	DispositionDenied Disposition = "denied"
+	// DispositionLifecycle: AGENT_OFFLINE or AGENT_RECOVERED.
+	DispositionLifecycle Disposition = "lifecycle"
+)
+
+// Kept reports whether the server stores an event with this disposition,
+// shows it on the live feed and sends it to the connectors. An event the
+// policy engine did not evaluate (empty disposition) is kept.
+func (d Disposition) Kept() bool {
+	return d != DispositionRepeat && d != DispositionAllowed
+}
+
+// CandidateSighting is what recording an unmatched event's key found.
+type CandidateSighting struct {
+	// ID is the PENDING entry for the key, or "" when a decided entry for
+	// the key is already in force (the policy engine had not loaded it yet).
+	ID string
+	// Created is true when this event created the PENDING entry: the key's
+	// first sighting.
+	Created bool
+	// DecidedAction is the action of the decided entry in force when ID is
+	// "": the most restrictive one when there are several.
+	DecidedAction PolicyAction
 }
 
 // UIDRange defines a range of allowed UIDs.
@@ -236,12 +290,13 @@ const (
 	// StatusApproved entries are in force. Entries created through the API
 	// are approved when created, and an empty status means approved.
 	StatusApproved EntryStatus = "APPROVED"
-	// StatusPending entries are learning-mode candidates waiting for review.
-	// They never match an event.
+	// StatusPending entries are new hooks waiting for a decision: the server
+	// creates one the first time it sees an unmatched key. They never match
+	// an event.
 	StatusPending EntryStatus = "PENDING"
-	// StatusRejected entries are candidates an operator rejected. They match
-	// with action ALERT, so the event keeps alerting and learning mode does
-	// not propose it again.
+	// StatusRejected entries are new hooks an operator denied. They match
+	// with action ALERT, so the hook alerts every time it happens again and
+	// is never proposed again.
 	StatusRejected EntryStatus = "REJECTED"
 )
 
@@ -281,13 +336,13 @@ type AllowlistEntry struct {
 	// entries match events.
 	Status EntryStatus `json:"status,omitempty"`
 
-	// Learned is set on entries learning mode created. Such an entry matches
+	// Learned is set on entries the server created for a new hook. Such an entry matches
 	// exactly the events whose key equals Learned.Key, as well as any match
 	// criteria above.
 	Learned *Learned `json:"learned,omitempty"`
 }
 
-// LearnedKey is the learning-mode dedupe key: the tuple a PENDING entry
+// LearnedKey is the dedupe key of a new hook: the tuple a PENDING entry
 // stands for. Every unmatched event with the same key counts toward the
 // same entry, and approving the entry allows exactly those events.
 type LearnedKey struct {
@@ -312,7 +367,7 @@ type LearnedKey struct {
 	InContainer bool `json:"in_container"`
 }
 
-// Learned is what learning mode recorded for an allowlist entry.
+// Learned is what the server recorded about a new hook for its allowlist entry.
 type Learned struct {
 	Key LearnedKey `json:"key"`
 	// ExePath is the acting binary's path in the first event seen.
@@ -323,10 +378,14 @@ type Learned struct {
 	// Hosts are the IDs of the hosts the key was seen on. On an entry
 	// approved or rejected for one host, it is that host.
 	Hosts []string `json:"hosts"`
+	// FirstEventID is the stored first-sighting event that created the
+	// entry, the evidence to look at before deciding.
+	FirstEventID string `json:"first_event_id,omitempty"`
 }
 
-// LearningWindow is a period during which unmatched events become PENDING
-// allowlist entries, for the whole fleet (HostID empty) or for one host.
+// LearningWindow is a quiet period, for the whole fleet (HostID empty) or
+// for one host: first sightings inside it are stored and shown, but not
+// sent to alert connectors. Use it when HookMon first meets a fleet.
 type LearningWindow struct {
 	HostID    string    `json:"host_id"`
 	StartedAt time.Time `json:"started_at"`

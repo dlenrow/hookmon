@@ -179,6 +179,9 @@ func TestEvaluate_AllowlistMatchOverridesRule(t *testing.T) {
 	if result.MatchedEntryID != "allow-1" {
 		t.Errorf("expected matched entry allow-1, got %s", result.MatchedEntryID)
 	}
+	if result.Disposition != event.DispositionAllowed || result.Disposition.Kept() {
+		t.Errorf("expected disposition allowed (not kept), got %q", result.Disposition)
+	}
 	if evt.Severity != event.SeverityInfo {
 		t.Errorf("expected severity INFO, got %s", evt.Severity)
 	}
@@ -228,6 +231,9 @@ func TestEvaluate_AgentOfflineIsAlert(t *testing.T) {
 	if evt.Severity != event.SeverityAlert {
 		t.Errorf("expected ALERT severity, got %s", evt.Severity)
 	}
+	if result.Disposition != event.DispositionLifecycle || !result.Disposition.Kept() {
+		t.Errorf("expected disposition lifecycle (kept), got %q", result.Disposition)
+	}
 }
 
 func TestEvaluate_AgentRecoveredIsAlert(t *testing.T) {
@@ -254,8 +260,8 @@ func TestEvaluate_DenyEntryReturnsDeny(t *testing.T) {
 	engine := newTestEngine(entry)
 	result := engine.Evaluate(evt)
 
-	if result.Action != event.ActionDeny {
-		t.Errorf("expected DENY, got %s", result.Action)
+	if result.Action != event.ActionDeny || result.Disposition != event.DispositionDenied {
+		t.Errorf("expected DENY, denied; got %s, %s", result.Action, result.Disposition)
 	}
 }
 
@@ -275,17 +281,17 @@ func inventoryEvent(tag string) *event.HookEvent {
 	}
 }
 
-func TestEvaluate_InventoryUnknownProgramIsInfo(t *testing.T) {
-	// UID 0 and no exe hash make any other event ALERT or CRITICAL;
-	// inventory events are INFO regardless.
+func TestEvaluate_InventoryUnknownProgramIsAlertFirstSighting(t *testing.T) {
+	// A loaded program nobody approved is a new hook, at ALERT whatever
+	// its (absent) process context.
 	evt := inventoryEvent("a04f5eef06a7f555")
 	result := newTestEngine().Evaluate(evt)
-	if evt.Severity != event.SeverityInfo {
-		t.Errorf("severity: got %q, want INFO", evt.Severity)
+	if evt.Severity != event.SeverityAlert {
+		t.Errorf("severity: got %q, want ALERT", evt.Severity)
 	}
-	if result.Action != event.ActionAlert || result.MatchedEntryID != "" {
-		t.Errorf("unknown program: got action %q entry %q, want ALERT (not on allowlist) and no entry",
-			result.Action, result.MatchedEntryID)
+	if result.Action != event.ActionAlert || result.MatchedEntryID != "" || result.Disposition != event.DispositionFirstSighting {
+		t.Errorf("unknown program: got action %q entry %q disposition %q, want ALERT, no entry, first_sighting",
+			result.Action, result.MatchedEntryID, result.Disposition)
 	}
 	if evt.PolicyResult != result {
 		t.Error("PolicyResult not set on the event")
@@ -302,11 +308,31 @@ func TestEvaluate_InventoryAllowlistedProgramRecordsMatch(t *testing.T) {
 	}
 	evt := inventoryEvent("a04f5eef06a7f555")
 	result := newTestEngine(entry).Evaluate(evt)
-	if result.Action != event.ActionAllow || result.MatchedEntryID != "allow-hello" {
-		t.Errorf("got action %q entry %q, want ALLOW allow-hello", result.Action, result.MatchedEntryID)
+	if result.Action != event.ActionAllow || result.MatchedEntryID != "allow-hello" || result.Disposition != event.DispositionAllowed {
+		t.Errorf("got action %q entry %q disposition %q, want ALLOW allow-hello allowed", result.Action, result.MatchedEntryID, result.Disposition)
 	}
 	if evt.Severity != event.SeverityInfo {
 		t.Errorf("severity: got %q, want INFO", evt.Severity)
+	}
+}
+
+func TestEvaluate_InventoryDeniedProgramAlertsEveryScan(t *testing.T) {
+	entry := &event.AllowlistEntry{
+		ID:         "deny-hello",
+		EventTypes: []event.EventType{event.EventBPFInventory},
+		ProgHash:   "a04f5eef06a7f555",
+		Action:     event.ActionAlert,
+		Enabled:    true,
+		Status:     event.StatusRejected,
+	}
+	engine := newTestEngine(entry)
+	for scan := 0; scan < 2; scan++ {
+		evt := inventoryEvent("a04f5eef06a7f555")
+		result := engine.Evaluate(evt)
+		if result.Disposition != event.DispositionDenied || evt.Severity != event.SeverityAlert || result.MatchedEntryID != "deny-hello" {
+			t.Errorf("scan %d: disposition %q severity %q entry %q, want denied ALERT deny-hello",
+				scan, result.Disposition, evt.Severity, result.MatchedEntryID)
+		}
 	}
 }
 
@@ -321,7 +347,8 @@ func TestEvaluate_InventorySummaryIsInfo(t *testing.T) {
 		},
 	}
 	result := newTestEngine().Evaluate(evt)
-	if evt.Severity != event.SeverityInfo || result.Action != event.ActionAllow {
-		t.Errorf("summary: got severity %q action %q, want INFO ALLOW", evt.Severity, result.Action)
+	if evt.Severity != event.SeverityInfo || result.Action != event.ActionAllow || result.Disposition.Kept() {
+		t.Errorf("summary: got severity %q action %q disposition %q, want INFO ALLOW and not kept",
+			evt.Severity, result.Action, result.Disposition)
 	}
 }

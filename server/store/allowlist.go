@@ -47,7 +47,8 @@ const allowlistColumns = `
 	uid_range, container_image,
 	allowed_rpaths, host_id,
 	action, expires, enabled, status,
-	learned_key, learned_exe_path, occurrences, first_seen, last_seen, seen_hosts`
+	learned_key, learned_exe_path, occurrences, first_seen, last_seen, seen_hosts,
+	first_event_id`
 
 // execer is a pool or a transaction.
 type execer interface {
@@ -168,13 +169,14 @@ func insertAllowlistEntry(ctx context.Context, x execer, entry *event.AllowlistE
 		firstSeen    *time.Time
 		lastSeen     *time.Time
 		hosts        = []string{}
+		firstEventID string
 	)
 	if l := entry.Learned; l != nil {
 		candidateKey = allowlist.KeyHash(l.Key)
 		if learnedKey, err = json.Marshal(l.Key); err != nil {
 			return fmt.Errorf("marshal learned_key: %w", err)
 		}
-		exePath, occurrences = l.ExePath, l.Occurrences
+		exePath, occurrences, firstEventID = l.ExePath, l.Occurrences, l.FirstEventID
 		if !l.FirstSeen.IsZero() {
 			firstSeen = &l.FirstSeen
 		}
@@ -196,7 +198,8 @@ func insertAllowlistEntry(ctx context.Context, x execer, entry *event.AllowlistE
 			allowed_rpaths, host_id,
 			action, expires, enabled, status,
 			candidate_key, learned_key, learned_exe_path,
-			occurrences, first_seen, last_seen, seen_hosts
+			occurrences, first_seen, last_seen, seen_hosts,
+			first_event_id
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7,
@@ -206,7 +209,8 @@ func insertAllowlistEntry(ctx context.Context, x execer, entry *event.AllowlistE
 			$16, $17,
 			$18, $19, $20, $21,
 			$22, $23, $24,
-			$25, $26, $27, $28
+			$25, $26, $27, $28,
+			$29
 		)`,
 		entry.ID, entry.CreatedAt, entry.CreatedBy, entry.Description,
 		eventTypesJSON, entry.ExeHash, entry.ExePath,
@@ -217,6 +221,7 @@ func insertAllowlistEntry(ctx context.Context, x execer, entry *event.AllowlistE
 		string(entry.Action), entry.Expires, entry.Enabled, string(entry.Status),
 		candidateKey, learnedKey, exePath,
 		occurrences, firstSeen, lastSeen, hosts,
+		firstEventID,
 	)
 	if isUniqueViolation(err) {
 		return fmt.Errorf("allowlist entry %s: %w", entry.ID, ErrConflict)
@@ -239,36 +244,42 @@ func (s *Store) DeleteAllowlistEntry(ctx context.Context, id string) error {
 	return nil
 }
 
-// RecordCandidate records one unmatched event seen in learning mode, as the
-// PENDING entry for its key. The first event creates the entry; each later
-// one adds to its occurrence count, widens its first and last seen times,
-// and adds the host to its hosts. It returns the entry's ID.
+// RecordCandidate records an unmatched event's key as a new hook: the
+// PENDING entry for the key. The first event of a key creates the entry
+// and is recorded as its first event (eventID); each later one adds to its
+// occurrence count, widens its first and last seen times, and adds the host
+// to its hosts. The sighting says which happened.
 //
 // When an APPROVED or REJECTED entry for the key is already in force for
 // the fleet or for this host (the policy engine had not reloaded it yet),
-// nothing is recorded and the ID is "".
-func (s *Store) RecordCandidate(ctx context.Context, key event.LearnedKey, exePath, description, hostID string, seen time.Time) (string, error) {
+// nothing is recorded: the sighting's ID is "", and its DecidedAction is
+// that entry's action (ALERT before ALLOW when both apply).
+func (s *Store) RecordCandidate(ctx context.Context, key event.LearnedKey, exePath, description, hostID, eventID string, seen time.Time) (event.CandidateSighting, error) {
+	var sighting event.CandidateSighting
 	keyJSON, err := json.Marshal(key)
 	if err != nil {
-		return "", fmt.Errorf("marshal learned_key: %w", err)
+		return sighting, fmt.Errorf("marshal learned_key: %w", err)
 	}
 	eventTypesJSON, err := json.Marshal([]event.EventType{key.EventType})
 	if err != nil {
-		return "", fmt.Errorf("marshal event_types: %w", err)
+		return sighting, fmt.Errorf("marshal event_types: %w", err)
 	}
+	candidateKey := allowlist.KeyHash(key)
 
-	var id string
+	// xmax is 0 on a row this statement inserted, and set on one it updated.
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO allowlist (
 			id, created_at, created_by, description, event_types,
 			action, enabled, status,
 			candidate_key, learned_key, learned_exe_path,
-			occurrences, first_seen, last_seen, seen_hosts
+			occurrences, first_seen, last_seen, seen_hosts,
+			first_event_id
 		)
 		SELECT $1, NOW(), $2, $3, $4,
 			'ALERT', TRUE, 'PENDING',
 			$5, $6, $7,
-			1, $8, $8, ARRAY[$9::TEXT]
+			1, $8, $8, ARRAY[$9::TEXT],
+			$10
 		WHERE NOT EXISTS (
 			SELECT 1 FROM allowlist
 			WHERE candidate_key = $5 AND status <> 'PENDING' AND enabled
@@ -281,18 +292,61 @@ func (s *Store) RecordCandidate(ctx context.Context, key event.LearnedKey, exePa
 			last_seen   = GREATEST(allowlist.last_seen, EXCLUDED.last_seen),
 			seen_hosts  = CASE WHEN $9::TEXT = ANY(allowlist.seen_hosts) THEN allowlist.seen_hosts
 			                   ELSE array_append(allowlist.seen_hosts, $9::TEXT) END
-		RETURNING id`,
+		RETURNING id, (xmax = 0)`,
 		uuid.New().String(), LearningCreator, description, eventTypesJSON,
-		allowlist.KeyHash(key), keyJSON, exePath,
+		candidateKey, keyJSON, exePath,
 		seen, hostID,
-	).Scan(&id)
+		eventID,
+	).Scan(&sighting.ID, &sighting.Created)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return s.decidedSighting(ctx, candidateKey, hostID)
 	}
 	if err != nil {
-		return "", fmt.Errorf("record candidate: %w", err)
+		return event.CandidateSighting{}, fmt.Errorf("record candidate: %w", err)
 	}
-	return id, nil
+	return sighting, nil
+}
+
+// decidedSighting is RecordCandidate's answer when a decided entry for the
+// key is in force on hostID: the most restrictive such entry's action.
+func (s *Store) decidedSighting(ctx context.Context, candidateKey, hostID string) (event.CandidateSighting, error) {
+	var action string
+	err := s.pool.QueryRow(ctx, `
+		SELECT action FROM allowlist
+		WHERE candidate_key = $1 AND status <> 'PENDING' AND enabled
+		  AND host_id IN ('', $2::TEXT)
+		  AND (expires IS NULL OR expires > NOW())
+		ORDER BY (action = 'ALLOW'), id
+		LIMIT 1`, candidateKey, hostID).Scan(&action)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The entry went away between the two statements. Keep the event.
+		return event.CandidateSighting{DecidedAction: event.ActionAlert}, nil
+	}
+	if err != nil {
+		return event.CandidateSighting{}, fmt.Errorf("read decided entry: %w", err)
+	}
+	return event.CandidateSighting{DecidedAction: event.PolicyAction(action)}, nil
+}
+
+// Decision scopes for DecideCandidates.
+const (
+	// ScopeFleet decides an entry for every host.
+	ScopeFleet = "fleet"
+	// ScopeSeenHosts decides an entry for each host it was seen on, and no
+	// other.
+	ScopeSeenHosts = "seen_hosts"
+)
+
+// decisionAction is the action an entry takes when it is approved
+// (ALLOW) or rejected (ALERT).
+func decisionAction(decision event.EntryStatus) (event.PolicyAction, error) {
+	switch decision {
+	case event.StatusApproved:
+		return event.ActionAllow, nil
+	case event.StatusRejected:
+		return event.ActionAlert, nil
+	}
+	return "", fmt.Errorf("decision must be APPROVED or REJECTED, not %q", decision)
 }
 
 // DecideCandidate approves (decision APPROVED, action ALLOW) or rejects
@@ -304,14 +358,9 @@ func (s *Store) RecordCandidate(ctx context.Context, key event.LearnedKey, exePa
 // off the PENDING entry's hosts; the PENDING entry is deleted when no host
 // is left. It returns the entry now in force.
 func (s *Store) DecideCandidate(ctx context.Context, id string, decision event.EntryStatus, hostID string) (*event.AllowlistEntry, error) {
-	var action event.PolicyAction
-	switch decision {
-	case event.StatusApproved:
-		action = event.ActionAllow
-	case event.StatusRejected:
-		action = event.ActionAlert
-	default:
-		return nil, fmt.Errorf("decision must be APPROVED or REJECTED, not %q", decision)
+	action, err := decisionAction(decision)
+	if err != nil {
+		return nil, err
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -328,16 +377,132 @@ func (s *Store) DecideCandidate(ctx context.Context, id string, decision event.E
 		return nil, fmt.Errorf("allowlist entry %s is %s: %w", id, pending.Status, ErrNotPending)
 	}
 
-	var decided *event.AllowlistEntry
-	if hostID == "" {
+	var hosts []string
+	if hostID != "" {
+		hosts = []string{hostID}
+	}
+	decided, err := decideInTx(ctx, tx, pending, decision, action, hosts)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit decision: %w", err)
+	}
+	return decided[0], nil
+}
+
+// CandidateDecision is the outcome of DecideCandidates for one ID: the
+// entries now in force, or why the ID was not decided.
+type CandidateDecision struct {
+	ID      string
+	Entries []*event.AllowlistEntry
+	// Err wraps ErrNotFound or ErrNotPending, or says the ID was repeated
+	// or (for ScopeSeenHosts) has no hosts. Nil when the ID was decided.
+	Err error
+}
+
+// DecideCandidates approves or rejects several PENDING entries in one
+// transaction, in the order given. With ScopeFleet each entry is decided
+// for every host; with ScopeSeenHosts one entry is created for each host
+// the PENDING entry was seen on, and the PENDING entry is deleted. An ID
+// that does not exist, is not PENDING, or repeats an earlier ID gets its
+// own error, and the others still apply. A database error fails the whole
+// call, and nothing changes.
+func (s *Store) DecideCandidates(ctx context.Context, ids []string, decision event.EntryStatus, scope string) ([]CandidateDecision, error) {
+	action, err := decisionAction(decision)
+	if err != nil {
+		return nil, err
+	}
+	if scope != ScopeFleet && scope != ScopeSeenHosts {
+		return nil, fmt.Errorf("scope must be %q or %q, not %q", ScopeFleet, ScopeSeenHosts, scope)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin decisions: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	// Lock every row up front, in ID order, so two concurrent calls over
+	// the same entries cannot deadlock.
+	rows, err := tx.Query(ctx, `SELECT `+allowlistColumns+` FROM allowlist WHERE id = ANY($1) ORDER BY id FOR UPDATE`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("lock allowlist entries: %w", err)
+	}
+	found := make(map[string]*event.AllowlistEntry, len(ids))
+	for rows.Next() {
+		entry, err := scanAllowlistEntry(rows)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan allowlist row: %w", err)
+		}
+		found[entry.ID] = entry
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lock allowlist entries: %w", err)
+	}
+
+	out := make([]CandidateDecision, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		d := CandidateDecision{ID: id}
+		pending := found[id]
+		var hosts []string
+		switch {
+		case seen[id]:
+			d.Err = fmt.Errorf("allowlist entry %s is named more than once", id)
+		case pending == nil:
+			d.Err = fmt.Errorf("allowlist entry %s: %w", id, ErrNotFound)
+		case pending.Status != event.StatusPending:
+			d.Err = fmt.Errorf("allowlist entry %s is %s: %w", id, pending.Status, ErrNotPending)
+		case scope == ScopeSeenHosts:
+			if pending.Learned != nil {
+				hosts = pending.Learned.Hosts
+			}
+			if len(hosts) == 0 {
+				d.Err = fmt.Errorf("allowlist entry %s has no hosts recorded; decide it for the fleet", id)
+			}
+		}
+		seen[id] = true
+		if d.Err == nil {
+			if d.Entries, err = decideInTx(ctx, tx, pending, decision, action, hosts); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, d)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit decisions: %w", err)
+	}
+	return out, nil
+}
+
+// decideInTx decides a PENDING entry locked in tx. With hosts empty the
+// decision is for the fleet: the entry itself changes status. Otherwise one
+// entry with the same key is created for each host, the hosts are taken off
+// the PENDING entry, and the PENDING entry is deleted when no host is left.
+// It returns the entries now in force.
+func decideInTx(ctx context.Context, tx pgx.Tx, pending *event.AllowlistEntry, decision event.EntryStatus, action event.PolicyAction, hosts []string) ([]*event.AllowlistEntry, error) {
+	id := pending.ID
+	if len(hosts) == 0 {
 		if _, err := tx.Exec(ctx, `UPDATE allowlist SET status = $2, action = $3 WHERE id = $1`,
 			id, string(decision), string(action)); err != nil {
 			return nil, fmt.Errorf("decide allowlist entry %s: %w", id, err)
 		}
-		decided = pending
-		decided.Status, decided.Action = decision, action
-	} else {
-		decided = &event.AllowlistEntry{
+		pending.Status, pending.Action = decision, action
+		return []*event.AllowlistEntry{pending}, nil
+	}
+
+	decided := make([]*event.AllowlistEntry, 0, len(hosts))
+	taken := make(map[string]bool, len(hosts))
+	for _, hostID := range hosts {
+		if taken[hostID] {
+			continue
+		}
+		taken[hostID] = true
+		entry := &event.AllowlistEntry{
 			ID:          uuid.New().String(),
 			CreatedAt:   time.Now().UTC(),
 			CreatedBy:   LearningCreator,
@@ -351,31 +516,30 @@ func (s *Store) DecideCandidate(ctx context.Context, id string, decision event.E
 		if l := pending.Learned; l != nil {
 			copied := *l
 			copied.Hosts = []string{hostID}
-			decided.Learned = &copied
+			entry.Learned = &copied
 		}
-		if err := insertAllowlistEntry(ctx, tx, decided); err != nil {
+		if err := insertAllowlistEntry(ctx, tx, entry); err != nil {
 			return nil, err
 		}
-		var rest []string
-		if pending.Learned != nil {
-			for _, h := range pending.Learned.Hosts {
-				if h != hostID {
-					rest = append(rest, h)
-				}
-			}
-		}
-		if len(rest) == 0 {
-			_, err = tx.Exec(ctx, `DELETE FROM allowlist WHERE id = $1`, id)
-		} else {
-			_, err = tx.Exec(ctx, `UPDATE allowlist SET seen_hosts = $2 WHERE id = $1`, id, rest)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("update PENDING entry %s: %w", id, err)
-		}
+		decided = append(decided, entry)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit decision: %w", err)
+	var rest []string
+	if pending.Learned != nil {
+		for _, h := range pending.Learned.Hosts {
+			if !taken[h] {
+				rest = append(rest, h)
+			}
+		}
+	}
+	var err error
+	if len(rest) == 0 {
+		_, err = tx.Exec(ctx, `DELETE FROM allowlist WHERE id = $1`, id)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE allowlist SET seen_hosts = $2 WHERE id = $1`, id, rest)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update PENDING entry %s: %w", id, err)
 	}
 	return decided, nil
 }
@@ -386,7 +550,7 @@ func scanAllowlistEntry(rows pgx.Rows) (*event.AllowlistEntry, error) {
 	var entry event.AllowlistEntry
 	var action, status string
 	var eventTypesJSON, uidRangeJSON, allowedRpathsJSON, learnedKeyJSON []byte
-	var learnedExePath string
+	var learnedExePath, firstEventID string
 	var occurrences int64
 	var firstSeen, lastSeen *time.Time
 	var hosts []string
@@ -400,6 +564,7 @@ func scanAllowlistEntry(rows pgx.Rows) (*event.AllowlistEntry, error) {
 		&allowedRpathsJSON, &entry.HostID,
 		&action, &entry.Expires, &entry.Enabled, &status,
 		&learnedKeyJSON, &learnedExePath, &occurrences, &firstSeen, &lastSeen, &hosts,
+		&firstEventID,
 	)
 	if err != nil {
 		return nil, err
@@ -425,7 +590,7 @@ func scanAllowlistEntry(rows pgx.Rows) (*event.AllowlistEntry, error) {
 		}
 	}
 	if len(learnedKeyJSON) > 0 {
-		l := &event.Learned{ExePath: learnedExePath, Occurrences: occurrences, Hosts: hosts}
+		l := &event.Learned{ExePath: learnedExePath, Occurrences: occurrences, Hosts: hosts, FirstEventID: firstEventID}
 		if err := json.Unmarshal(learnedKeyJSON, &l.Key); err != nil {
 			return nil, fmt.Errorf("unmarshal learned_key: %w", err)
 		}

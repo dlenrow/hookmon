@@ -20,12 +20,12 @@ type Source interface {
 	GetLearningWindows(ctx context.Context) ([]event.LearningWindow, error)
 }
 
-// CandidateSink records what learning mode sees: one unmatched event, as a
-// PENDING allowlist entry for its key. Repeats of the key add to the
-// entry's count, last-seen time and hosts. It returns the entry's ID, or ""
-// if a decided entry for the key already exists.
+// CandidateSink records new hooks: an unmatched event's key, as the
+// PENDING allowlist entry for it. The first event of a key creates the
+// entry (and is recorded as its first event); each later one adds to its
+// count, last-seen time and hosts.
 type CandidateSink interface {
-	RecordCandidate(ctx context.Context, key event.LearnedKey, exePath, description, hostID string, seen time.Time) (string, error)
+	RecordCandidate(ctx context.Context, key event.LearnedKey, exePath, description, hostID, eventID string, seen time.Time) (event.CandidateSighting, error)
 }
 
 // candidateTimeout bounds one RecordCandidate call, so a slow database
@@ -33,8 +33,12 @@ type CandidateSink interface {
 const candidateTimeout = 5 * time.Second
 
 // Engine evaluates hook events against the loaded allowlist and built-in
-// rules, producing a PolicyResult for every event. While learning mode is
-// on for an event's host, it records every unmatched event as a candidate.
+// rules, producing a PolicyResult for every event. It records every
+// unmatched event's key as a PENDING entry, and gives each event its
+// disposition: a first sighting of a key, a repeat of one still waiting for
+// a decision, allowed, or denied. While learning mode (a quiet period) is
+// on for the event's host, first sightings are marked quiet: stored and
+// shown, but not sent to alert connectors.
 type Engine struct {
 	mu       sync.RWMutex
 	set      *allowlist.Set
@@ -63,8 +67,8 @@ func NewEngine(logger *zap.Logger) *Engine {
 // SetSource sets where Reload reads the policy from.
 func (e *Engine) SetSource(src Source) { e.source = src }
 
-// SetCandidateSink sets where learning mode records candidates. Without a
-// sink, learning mode records nothing.
+// SetCandidateSink sets where new hooks are recorded. Without a sink
+// nothing is recorded, and every unmatched event is a first sighting.
 func (e *Engine) SetCandidateSink(sink CandidateSink) { e.sink = sink }
 
 // LoadAllowlist replaces the current allowlist with the provided entries.
@@ -134,13 +138,15 @@ func (e *Engine) learningLocked(hostID string, now time.Time) bool {
 
 // Evaluate runs the event through the allowlist and built-in rules, returning
 // a PolicyResult and setting the event's Severity accordingly. The event's
-// Severity on entry is the one the bus set; see classifySeverity.
+// Severity on entry is the one the bus set; see classifySeverity. The
+// result's Disposition says whether the server keeps the event.
 func (e *Engine) Evaluate(evt *event.HookEvent) *event.PolicyResult {
 	// Agent lifecycle events always produce an ALERT.
 	if evt.EventType == event.EventAgentOffline || evt.EventType == event.EventAgentRecovered {
 		result := &event.PolicyResult{
-			Action: event.ActionAlert,
-			Reason: fmt.Sprintf("agent lifecycle event: %s", evt.EventType),
+			Action:      event.ActionAlert,
+			Reason:      fmt.Sprintf("agent lifecycle event: %s", evt.EventType),
+			Disposition: event.DispositionLifecycle,
 		}
 		evt.Severity = event.SeverityAlert
 		evt.PolicyResult = result
@@ -154,15 +160,24 @@ func (e *Engine) Evaluate(evt *event.HookEvent) *event.PolicyResult {
 	e.mu.RUnlock()
 
 	// BPF inventory events are a census the sensor bus repeats every few
-	// minutes, not an action by a process, so they are always INFO. The
-	// allowlist is still consulted: the result records whether each loaded
-	// program is known (matched entry) or not (ALERT, meaning "not on the
-	// allowlist"), so unknown programs can be found by query.
+	// minutes, not an action by a process. A loaded program on the allowlist
+	// is dropped, and so is the host summary. A program that is not on it is
+	// a new hook like any other, at ALERT: a program nobody approved,
+	// whenever it was loaded, is what the inventory is for. A denied program
+	// alerts on every scan.
 	if evt.EventType == event.EventBPFInventory {
 		result, matched := inventoryResult(set, evt, now)
-		evt.Severity = event.SeverityInfo
-		if !matched && learning {
-			e.learn(evt, result)
+		evt.Severity = event.SeverityAlert
+		switch {
+		case !matched:
+			e.sight(evt, result, learning)
+		case result.Action == event.ActionAllow:
+			result.Disposition = event.DispositionAllowed
+		default:
+			result.Disposition = event.DispositionDenied
+		}
+		if result.Disposition == event.DispositionAllowed {
+			evt.Severity = event.SeverityInfo
 		}
 		evt.PolicyResult = result
 		return result
@@ -177,6 +192,10 @@ func (e *Engine) Evaluate(evt *event.HookEvent) *event.PolicyResult {
 			Action:         entry.Action,
 			MatchedEntryID: entry.ID,
 			Reason:         fmt.Sprintf("matched allowlist entry: %s", entry.Description),
+			Disposition:    event.DispositionDenied,
+		}
+		if entry.Action == event.ActionAllow {
+			result.Disposition = event.DispositionAllowed
 		}
 		evt.PolicyResult = result
 		evt.Severity = classifySeverity(result, evt)
@@ -199,29 +218,40 @@ func (e *Engine) Evaluate(evt *event.HookEvent) *event.PolicyResult {
 		}
 	}
 	evt.Severity = classifySeverity(result, evt)
-	if learning {
-		e.learn(evt, result)
+	e.sight(evt, result, learning)
+	if result.Disposition == event.DispositionAllowed {
+		evt.Severity = event.SeverityInfo
 	}
 	evt.PolicyResult = result
-	if ruleResult != nil {
-		e.logger.Warn("event matched built-in rule",
-			zap.String("event_id", evt.ID),
-			zap.String("reason", ruleResult.Reason),
-		)
-	} else {
-		e.logger.Warn("event has no allowlist match",
+	if result.Disposition == event.DispositionFirstSighting {
+		e.logger.Info("new hook: first sighting",
 			zap.String("event_id", evt.ID),
 			zap.String("event_type", string(evt.EventType)),
 			zap.String("hostname", evt.Hostname),
+			zap.String("candidate_id", result.CandidateID),
+			zap.String("reason", result.Reason),
 		)
 	}
 	return result
 }
 
-// learn records an unmatched event as a learning-mode candidate and notes
-// the candidate in the result's reason.
-func (e *Engine) learn(evt *event.HookEvent, result *event.PolicyResult) {
+// sight records an unmatched event's key as a new hook and sets the
+// result's disposition from what the store found:
+//   - the event created the PENDING entry: a first sighting, quiet during a
+//     learning window;
+//   - a PENDING entry already existed: a repeat;
+//   - a decided entry is already in force (the engine has not reloaded it
+//     yet): allowed or denied, as that entry says.
+//
+// Without a sink, or when the store fails, the event is a first sighting:
+// HookMon keeps what it cannot place rather than drop it.
+func (e *Engine) sight(evt *event.HookEvent, result *event.PolicyResult, learning bool) {
+	firstSighting := func() {
+		result.Disposition = event.DispositionFirstSighting
+		result.Quiet = learning
+	}
 	if e.sink == nil {
+		firstSighting()
 		return
 	}
 	key := allowlist.KeyOf(evt)
@@ -231,14 +261,29 @@ func (e *Engine) learn(evt *event.HookEvent, result *event.PolicyResult) {
 	if seen.IsZero() {
 		seen = e.now()
 	}
-	id, err := e.sink.RecordCandidate(ctx, key, evt.ExePath, allowlist.Describe(key, evt.ExePath), evt.HostID, seen)
+	s, err := e.sink.RecordCandidate(ctx, key, evt.ExePath, allowlist.Describe(key, evt.ExePath), evt.HostID, evt.ID, seen)
 	if err != nil {
-		e.logger.Warn("learning mode: recording candidate failed",
+		e.logger.Warn("recording a new hook failed; keeping the event as a first sighting",
 			zap.String("event_id", evt.ID), zap.Error(err))
+		firstSighting()
 		return
 	}
-	if id != "" {
-		result.Reason += fmt.Sprintf("; learning mode: PENDING entry %s", id)
+	switch {
+	case s.ID == "" && s.DecidedAction == event.ActionAllow:
+		result.Action = event.ActionAllow
+		result.Disposition = event.DispositionAllowed
+		result.Reason += "; allowed by an entry decided since the policy was loaded"
+	case s.ID == "":
+		result.Disposition = event.DispositionDenied
+		result.Reason += "; denied by an entry decided since the policy was loaded"
+	case s.Created:
+		firstSighting()
+		result.CandidateID = s.ID
+		result.Reason += fmt.Sprintf("; first sighting: PENDING entry %s", s.ID)
+	default:
+		result.Disposition = event.DispositionRepeat
+		result.CandidateID = s.ID
+		result.Reason += fmt.Sprintf("; repeat of PENDING entry %s", s.ID)
 	}
 }
 

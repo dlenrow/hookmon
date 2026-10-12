@@ -109,6 +109,9 @@ type IngestionServer struct {
 	eventCh chan *event.HookEvent
 
 	broadcastDrops atomic.Uint64
+	// dropped counts events evaluated as a repeat or allowed, and so not
+	// stored, shown or sent.
+	dropped        atomic.Uint64
 	dropLogMu      sync.Mutex
 	dropLogAt      time.Time
 	dropsAtLastLog uint64
@@ -207,6 +210,12 @@ func (s *IngestionServer) Publish(evt *event.HookEvent) {
 // WebSocket feed's buffer was full.
 func (s *IngestionServer) BroadcastDrops() uint64 {
 	return s.broadcastDrops.Load()
+}
+
+// Dropped returns how many events were evaluated as a repeat of a PENDING
+// new hook or as allowed, and so were not stored, shown or sent.
+func (s *IngestionServer) Dropped() uint64 {
+	return s.dropped.Load()
 }
 
 // StreamEvents implements the bidirectional streaming RPC through which agents
@@ -395,6 +404,18 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 	if s.policyEngine != nil {
 		result := s.policyEngine.Evaluate(evt)
 		evt.PolicyResult = result
+	}
+
+	// A repeat of a new hook still waiting for a decision, and an allowed
+	// hook, are not stored, shown or sent: the engine has counted a repeat
+	// on its PENDING entry. Only first sightings, denied hooks and host
+	// status events go on.
+	if res := evt.PolicyResult; res != nil && !res.Disposition.Kept() {
+		s.dropped.Add(1)
+		if err := s.sendEventAck(stream, evt.ID, true); err != nil {
+			return fmt.Errorf("send ack: %w", err)
+		}
+		return nil
 	}
 
 	// Persist the event.

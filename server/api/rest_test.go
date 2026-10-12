@@ -86,6 +86,9 @@ func (t7hBrokenStore) DeleteAllowlistEntry(context.Context, string) error { retu
 func (t7hBrokenStore) DecideCandidate(context.Context, string, event.EntryStatus, string) (*event.AllowlistEntry, error) {
 	return nil, t7hDBDown
 }
+func (t7hBrokenStore) DecideCandidates(context.Context, []string, event.EntryStatus, string) ([]store.CandidateDecision, error) {
+	return nil, t7hDBDown
+}
 func (t7hBrokenStore) GetLearningWindows(context.Context) ([]event.LearningWindow, error) {
 	return nil, t7hDBDown
 }
@@ -329,6 +332,7 @@ func TestStoreFailures_Are500(t *testing.T) {
 		{http.MethodDelete, "/api/v1/policies/e1", ""},
 		{http.MethodPost, "/api/v1/policies/e1/approve", `{"scope":"fleet"}`},
 		{http.MethodPost, "/api/v1/policies/e1/reject", `{"scope":"host","host_id":"host-a"}`},
+		{http.MethodPost, "/api/v1/policies/decide", `{"ids":["e1"],"decision":"approve","scope":"fleet"}`},
 		{http.MethodGet, "/api/v1/learning", ""},
 		{http.MethodPut, "/api/v1/learning/fleet", `{"duration":"1h"}`},
 		{http.MethodPut, "/api/v1/learning/hosts/host-a", `{"duration":"1h"}`},

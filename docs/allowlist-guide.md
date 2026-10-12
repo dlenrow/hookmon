@@ -1,6 +1,8 @@
 # HookMon Allowlist Guide
 
-This guide is for the SOC operators who run HookMon's server path. It explains how the allowlist decides which events are known, how learning mode builds it, how to review and change it, and how it changes an event's severity.
+This guide is for the SOC operators who run HookMon's server path. It explains how the allowlist decides which events are known, how a hook HookMon has not seen before reaches you once as a new hook to decide on, how to review and change the allowlist, and how it changes an event's severity.
+
+The model: the first time the server sees a hook (a key, below), it stores that event and records the hook as a PENDING entry. Its repeats only add to the entry's count. You investigate it once, then decide: **allow** it (benign, for example from an update to a trusted program: it never alerts again) or **reject** it (unwanted or an attack: it alerts every time it happens again). In steady state a host should bring a new hook every few days or weeks, and an update brings a batch you can decide in one action.
 
 The allowlist lives in `hookmon-server` (PostgreSQL). It applies only to events that reach the server. The bus's own outputs (console, Loki, Prometheus) never see it. Every endpoint named here is in [api-reference.md](api-reference.md).
 
@@ -20,6 +22,7 @@ FLAGS="--server $HM --token $TOKEN --ca-file $CA"
 - [Concepts](#concepts)
 - [How Matching Works](#how-matching-works)
 - [The Dedupe Key](#the-dedupe-key)
+- [New Hooks](#new-hooks)
 - [Learning Mode](#learning-mode)
 - [Reviewing PENDING Entries](#reviewing-pending-entries)
 - [Approving and Rejecting](#approving-and-rejecting)
@@ -36,20 +39,20 @@ An **allowlist entry** (a "policy" in the API and dashboard) says what to do wit
 
 | Status | Where it comes from | Matches events? |
 |--------|---------------------|-----------------|
-| `APPROVED` | Written by hand, created from an event, or a learning-mode candidate you approved | Yes |
-| `PENDING` | Learning mode, waiting for review | Never |
-| `REJECTED` | A candidate you rejected. Its action is always ALERT | Yes, with ALERT: the event keeps alerting, and learning mode doesn't propose it again |
+| `APPROVED` | Written by hand, created from an event, or a new hook you approved | Yes |
+| `PENDING` | A new hook: the server saw its key for the first time, and it waits for your decision | Never |
+| `REJECTED` | A new hook you rejected. Its action is always ALERT | Yes, with ALERT: the event is stored and alerts every time, and the key is never proposed again |
 
 | Action | Effect on a matched event |
 |--------|---------------------------|
-| `ALLOW` | Known good. Severity INFO; alert connectors don't receive it |
+| `ALLOW` | Known good. Not stored, shown or sent anywhere |
 | `ALERT` | Treated as unmatched: the normal severity and alerts |
 | `DENY` | The same as ALERT, but outranks it. **Nothing is blocked**: HookMon has no enforcement mode |
 
 There are two kinds of entry:
 
 - **Field entries** are written by hand. They match on criteria such as `exe_path` or `prog_hash`.
-- **Learned entries** come from learning mode or from "Allowlist this event". They carry a `learned.key` and match only events with exactly that key (see [The Dedupe Key](#the-dedupe-key)). They can also have field criteria added later.
+- **Learned entries** come from new hooks (the server creates the PENDING entry) or from "Allowlist this event". They carry a `learned.key` and match only events with exactly that key (see [The Dedupe Key](#the-dedupe-key)). They can also have field criteria added later.
 
 Every change made through the API or dashboard takes effect for the next event. The server reloads the policy before it answers. For changes made directly in PostgreSQL, send the server SIGHUP.
 
@@ -125,7 +128,7 @@ In the example run, gdb's ptrace candidate was rejected for the fleet, and a han
 
 ## The Dedupe Key
 
-Learning mode groups events by a key. Every unmatched event with the same key counts toward the same PENDING entry. Approving the entry allows exactly the events with that key. "Allowlist this event" uses the same key.
+The server groups unmatched events by a key. The first unmatched event with a key is stored and creates the PENDING entry; every later one only counts toward it. Approving the entry allows exactly the events with that key. "Allowlist this event" uses the same key.
 
 | Part | Value |
 |------|-------|
@@ -153,38 +156,21 @@ What the key leaves out, and what that means:
 - **For PTRACE_INJECT, the target and the request.** Approving gdb's candidate allows gdb to attach to any process, with any of the reported requests.
 - **The user.** The same binary doing the same thing as root and as a user is one key.
 
-A learned entry matches its key exactly. A new binary version, a changed library or a new BPF program is a new key, so it alerts again.
+A learned entry matches its key exactly. A new binary version, a changed library or a new BPF program is a new key, so it is a new hook again.
 
-## Learning Mode
+## New Hooks
 
-Learning mode records what the fleet does, as PENDING entries for you to review. It never allows anything by itself.
+Every event that **no in-force entry matched** is recorded against its key, whether or not a learning window is open:
 
-### Starting and Stopping
+- **The first event with a key** is a first sighting. The server stores it, shows it in the dashboard and on the live feed, and sends it to the connectors by severity. It creates a PENDING entry: `status` PENDING, `action` ALERT, `created_by` `learning-mode`, `event_types` set to the event type, a generated description such as `learned: BPF_LOAD by /usr/bin/cilium-agent: BPF tag 1f2e3d4c5b6a7980, prog type 3`, and `learned.first_event_id` naming the stored event. `policy_result.disposition` is `first_sighting`, `policy_result.candidate_id` is the entry, and `reason` ends with `; first sighting: PENDING entry <id>`.
+- **Each later event with the same key** is a repeat. It adds to the entry's count, last-seen time and hosts, and is not stored, shown or sent. The key is fleet-wide: a new hook on 40 hosts is one PENDING entry listing 40 hosts, with one stored event.
 
-A learning window covers the fleet or one host, and always has an end time.
+Once you decide:
 
-```bash
-hookmon-cli $FLAGS learning start --fleet --for 14d                           # or 90m, 36h
-hookmon-cli $FLAGS learning start --host "$HOST_ID" --until 2026-11-01T00:00:00Z
-hookmon-cli $FLAGS learning                                                    # windows; "active": true while open
-hookmon-cli $FLAGS learning stop --fleet                                       # end now
-```
+- **Approved** (action ALLOW): its events are dropped. Not stored, shown or sent, and not counted.
+- **Rejected** (action ALERT): its events are stored and alert every time (`disposition` `denied`).
 
-- There is one window per scope. Starting again replaces its end time.
-- A host is in learning mode while the fleet window or its own window is open.
-- Windows are stored in PostgreSQL, so a restarted server keeps learning until the end time.
-- An ended window stays listed with `"active": false` until it is replaced or stopped.
-- Stopping deletes the window. PENDING entries stay.
-- The dashboard shows the windows on the Pending Approval page but can't start or stop them. Use the CLI or the API.
-
-### What Becomes PENDING
-
-While a window covers an event's host, the server records the event when **no in-force entry matched it**:
-
-- The first event with a key creates a PENDING entry: `status` PENDING, `action` ALERT, `created_by` `learning-mode`, `event_types` set to the event type, and a generated description such as `learned: BPF_LOAD by /usr/bin/cilium-agent: BPF tag 1f2e3d4c5b6a7980, prog type 3`.
-- Each later event with the same key adds to the same entry.
-
-These are never recorded:
+These are never recorded as new hooks:
 
 - Events that matched any in-force entry, including a REJECTED one or a hand-written ALERT or DENY entry.
 - AGENT_OFFLINE, AGENT_RECOVERED and the BPF inventory summary.
@@ -198,31 +184,59 @@ Each PENDING entry records:
 | `learned.first_seen`, `learned.last_seen` | The earliest and latest event time |
 | `learned.hosts` | IDs of the hosts that sent it |
 | `learned.exe_path` | The binary's path in the first event |
+| `learned.first_event_id` | The stored first-sighting event: the evidence |
 | `learned.key` | The key |
 
-Learning mode changes no severity and suppresses no alert. While it runs, unmatched events are rated and sent to connectors as usual. `policy_result.reason` ends with `; learning mode: PENDING entry <id>`.
+A BPF program found by the inventory (at startup and every five minutes) that is not on the allowlist is a new hook like any other, at severity ALERT: a loaded program nobody approved, however long ago it was loaded. A program on the allowlist is dropped.
 
-In the example run, a two-hour fleet window over two hosts produced six PENDING entries from 26 events. The Chromium shared-memory entry counted five events with two different segment names from both hosts, because the key is the pattern (`unknown`), not the name.
+## Learning Mode
+
+A learning window is a quiet period. It does not change what is recorded: first sightings inside it are stored, shown and become PENDING entries as always. It only keeps them away from alert connectors (`min_severity` ALERT or CRITICAL): they are marked `policy_result.quiet` and still go to event-feed connectors. Use one when HookMon first meets a fleet, so the first day's batch of new hooks doesn't page anyone, then review the PENDING list. It never allows anything by itself.
+
+### Starting and Stopping
+
+A learning window covers the fleet or one host, and always has an end time.
+
+```bash
+hookmon-cli $FLAGS learning start --fleet --for 14d                           # or 90m, 36h
+hookmon-cli $FLAGS learning start --host "$HOST_ID" --until 2026-11-01T00:00:00Z
+hookmon-cli $FLAGS learning                                                    # windows; "active": true while open
+hookmon-cli $FLAGS learning stop --fleet                                       # end now
+```
+
+- There is one window per scope. Starting again replaces its end time.
+- A host is in a quiet period while the fleet window or its own window is open.
+- Windows are stored in PostgreSQL, so a restarted server keeps the quiet period until the end time.
+- An ended window stays listed with `"active": false` until it is replaced or stopped.
+- Stopping deletes the window: later first sightings go to alert connectors again. PENDING entries stay.
+- The dashboard can't start or stop windows. Use the CLI or the API.
+
+Learning mode changes no severity. `policy_result.quiet` is the only difference it makes to an event.
+
+In the example run (before first sightings), a two-hour fleet window over two hosts produced six PENDING entries from 26 events. The Chromium shared-memory entry counted five events with two different segment names from both hosts, because the key is the pattern (`unknown`), not the name. Today the same run stores six events, one per entry.
 
 ## Reviewing PENDING Entries
 
 ### Dashboard
 
-The **Pending Approval** page lists every PENDING entry with:
+The **New hooks** page (it replaced Pending Approval) lists every PENDING entry, newest first by first sighting, with:
 
-- the event type, and "in a container";
-- the binary's path and hash ("no exe hash" when the bus had none);
-- the subject: the BPF tag and program type, library, `/dev/shm` pattern or file;
-- how many times it was seen, and when first and last;
-- the hosts that saw it.
+- when it was first seen, and when last;
+- the event type and what it is (the description);
+- the binary's path;
+- the hosts that saw it, and how many times;
+- a link to the first-sighting event, the evidence.
 
-Each row has a "Decide for" list (Fleet, or one of the hosts that saw it), and Approve and Reject buttons.
+Filter by first-seen time, host, event type or text, select the rows (or "select all shown"), and decide them together: **Allow — ignore in future** (for the fleet, or only the hosts where each was seen) or **Deny — alert every time**. After a software update, filter to the update's time and host, check the rows, and allow them in one action.
 
 ### CLI
 
 ```bash
 hookmon-cli $FLAGS policies pending
+hookmon-cli $FLAGS policies pending --since 2h --host web-01 --type BPF_LOAD
 ```
+
+`--since` takes an RFC 3339 time or a duration back from now (`90m`, `36h`, `7d`) and keeps entries first seen since then. `--host` takes a host ID or hostname, `--type` an event type.
 
 A one-line-per-entry summary with `jq`:
 
@@ -243,12 +257,13 @@ f26bffc4-4347-41e6-adfb-ceb82d44595e  SHM_CREATE     /opt/google/chrome/chrome  
 
 The columns are the entry ID, event type, binary, subject, occurrences and number of hosts.
 
-To see the events behind a candidate, list events of that type from one of its hosts, and compare `exe_hash` and the subject:
+To see the event behind a new hook, fetch its first sighting:
 
 ```bash
-curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
-  "$HM/api/v1/events?host_id=$HOST_ID&event_type=BPF_LOAD&limit=20"
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/events/$FIRST_EVENT_ID"
 ```
+
+`$FIRST_EVENT_ID` is the entry's `learned.first_event_id`. Repeats are not stored, so there is one event per new hook; its process context (command line, parent, user, container) is what you investigate.
 
 ### What to Check
 
@@ -261,13 +276,22 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" \
 
 | Decision | For the fleet | For one host |
 |----------|---------------|--------------|
-| Approve | The entry becomes APPROVED, action ALLOW, on every host | A new APPROVED ALLOW entry for that host (`host_id` set). The host comes off the PENDING entry's `learned.hosts`; the PENDING entry is deleted when no host is left |
-| Reject | The entry becomes REJECTED, action ALERT. Matching events keep alerting and are never proposed again | A new REJECTED entry for that host, handled the same way |
+| Approve | The entry becomes APPROVED, action ALLOW, on every host. Its events are dropped from now on | A new APPROVED ALLOW entry for that host (`host_id` set). The host comes off the PENDING entry's `learned.hosts`; the PENDING entry is deleted when no host is left |
+| Reject | The entry becomes REJECTED, action ALERT. Matching events are stored and alert every time, and are never proposed again | A new REJECTED entry for that host, handled the same way |
 
 ```bash
 hookmon-cli $FLAGS policies approve "$ENTRY_ID" --fleet
 hookmon-cli $FLAGS policies approve "$ENTRY_ID" --host "$HOST_ID"
 hookmon-cli $FLAGS policies reject "$ENTRY_ID" --fleet
+```
+
+**Many at once.** Give several IDs, or `--seen-hosts` to decide each entry for exactly the hosts it was seen on (one host-scoped entry per host; the PENDING entry goes away, and a host that sees the hook later gets a new first sighting). The CLI calls `POST /api/v1/policies/decide`, which decides them all in one transaction and reloads the policy once. An ID that is no longer PENDING fails alone, and the command then exits 1.
+
+```bash
+hookmon-cli $FLAGS policies approve "$ID1" "$ID2" "$ID3" --seen-hosts
+# every new hook first seen in the last two hours on web-01, after an update there:
+hookmon-cli $FLAGS policies pending --since 2h --host web-01 | jq -r '.[].id' \
+  | xargs hookmon-cli $FLAGS policies approve --seen-hosts
 ```
 
 ```bash
@@ -277,17 +301,20 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X POST \
 
 - Only PENDING entries can be decided. A second approve is a 409.
 - A host-scoped decision needs an enrolled host ID (404 otherwise).
-- In the dashboard, pick Fleet or a host under "Decide for", then Approve or Reject.
+- In the dashboard, select the rows on the New hooks page and choose Allow or Deny, and for Allow, the fleet or the hosts where seen.
 
-In the example run, Chromium's shared-memory candidate was approved for `web-01` only. The PENDING entry stayed, now listing only `web-02`. On the next run, `web-01`'s segment was INFO, matched by the new host entry. `web-02`'s was unmatched.
+In the example run, Chromium's shared-memory candidate was approved for `web-01` only. The PENDING entry stayed, now listing only `web-02`. On the next run, `web-01`'s segment matched the new host entry (today it is dropped). `web-02`'s was unmatched (today a repeat, counted on the PENDING entry).
 
-To undo a decision, delete the decided entry. If learning mode is on and the event happens again, it is proposed again.
+To undo a decision, delete the decided entry. The next event with the key is a first sighting again.
 
 ## Allowlisting One Event
 
 When an alert turns out to be legitimate, allowlist it from the event instead of writing an entry. In the dashboard, open the event (or its row in the Event Feed), click **Allowlist**, and choose "This host only" or "Every host (fleet)".
 
-The server creates an APPROVED ALLOW entry with the event's [key](#the-dedupe-key), as if learning mode had seen the event and you had approved it. The entry matches exactly the events with that key.
+The result matches exactly the events with the event's [key](#the-dedupe-key):
+
+- **For a first sighting**, whose key has a PENDING entry, that entry is approved, as on the New hooks page: for the fleet, the entry itself becomes APPROVED; for this host, a host-scoped entry is created and the host comes off the PENDING entry (which is deleted when no host is left). The hook leaves the New hooks list, and no second entry is made.
+- **Otherwise** (a denied event, or an event from before first sightings), a new APPROVED ALLOW entry with the key is created.
 
 ```bash
 curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X POST \
@@ -295,6 +322,7 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X POST \
 ```
 
 - `{"scope": "fleet"}` covers every host.
+- A `description` replaces the PENDING entry's, when there is one.
 - If an enabled ALLOW entry for the same key and scope already exists, the answer is 409 with that entry's `id`.
 - AGENT_OFFLINE and AGENT_RECOVERED can't be allowlisted (400).
 - There is no CLI command for this.
@@ -370,7 +398,9 @@ What can't change:
 
 You can add field criteria to a learned entry. For example, set `host_pattern` to narrow it, or `expires` to make it temporary. The key still has to match too.
 
-Disabling, expiring or deleting a REJECTED entry makes its events unmatched again. If learning mode is on, they are then proposed again.
+Disabling, expiring or deleting a REJECTED entry makes its events unmatched again: the next one is a first sighting, proposed again as a new hook.
+
+A hand-written entry (or a field added to a learned one) that starts matching a key with a PENDING entry does not remove that PENDING entry. Approve or delete it too.
 
 ## How Allowlisting Changes Severity
 
@@ -382,7 +412,7 @@ The server walks this table top to bottom and uses the first row that applies (`
 |---|-----------|----------|
 | 1 | AGENT_OFFLINE: the watchdog saw no heartbeat | CRITICAL |
 | 2 | AGENT_RECOVERED: the first heartbeat after an outage | INFO |
-| 3 | BPF_INVENTORY (the policy result records whether the program is on the allowlist) | INFO |
+| 3 | BPF_INVENTORY: a program on the allowlist INFO (and dropped); one that is not, a new hook, or a rejected one, ALERT | INFO or ALERT |
 | 4 | Matches an ALLOW entry, for the fleet or for this host | INFO |
 | 5 | The bus rated it INFO: a package manager wrote the library or linker file, or a `/dev/shm` segment has no BPF pattern | INFO |
 | 6 | bpftime-pattern shared memory | CRITICAL |
@@ -398,43 +428,41 @@ The server walks this table top to bottom and uses the first row that applies (`
 
 What this means in practice:
 
-- **ALLOW makes an event INFO**, whatever it is. Nothing else lowers a severity.
+- **ALLOW makes an event INFO**, whatever it is, and the server then drops it. Nothing else lowers a severity.
 - **The bus's INFO is never raised.** A package manager's write to a library is INFO even though it runs as root. In the example run, `dpkg` renaming `libpam.so.0` as root stayed INFO, while `cp` writing the same file as root was CRITICAL.
 - **Root raises the rest.** An unmatched event from root that rows 1 to 8 don't cover is CRITICAL. An unmatched BPF load by root is CRITICAL, not WARN.
 - **ALERT and DENY entries don't change the severity.** They only keep an event from being allowed.
-- **`severity` and `policy_result.action` are separate.** An unmatched `/dev/shm` segment with no BPF pattern is INFO with action ALERT.
+- **`severity` and `policy_result.action` are separate.** A first sighting of a `/dev/shm` segment with no BPF pattern is INFO with action ALERT.
 
-Alert connectors (`min_severity` ALERT or CRITICAL) receive events at or above that severity whose action is not ALLOW. Allowing an event therefore takes it out of the alert stream. Event-feed connectors (`min_severity` INFO or WARN) receive every event, allowed or not.
+Connectors receive only stored events: first sightings, denied hooks and host status events. Alert connectors (`min_severity` ALERT or CRITICAL) receive those at or above that severity whose action is not ALLOW, except first sightings during a learning window (quiet). Event-feed connectors (`min_severity` INFO or WARN) receive every stored event at or above theirs. Repeats of a new hook and allowed hooks reach no connector.
 
 ## Bootstrapping a New Deployment
 
-A new deployment has no allowlist, so everything alerts. Build one from what the fleet actually does.
+A new deployment has no allowlist, so on its first day every hook is new: the fleet's normal BPF programs, preloads and library loads arrive as a batch of first sightings. Decide that batch once.
 
-1. **Enroll the buses.** Check that every host is `ONLINE` with all sensors `alive`:
+1. **Start a quiet period before the buses connect**, so the first day's batch doesn't page anyone. A day or two is enough to catch daily jobs; the first sightings are recorded either way.
+
+   ```bash
+   hookmon-cli $FLAGS learning start --fleet --for 2d
+   ```
+
+2. **Enroll the buses.** Check that every host is `ONLINE` with all sensors `alive`:
 
    ```bash
    hookmon-cli $FLAGS hosts
    ```
 
-2. **Start a learning period.** 7 to 30 days covers weekly jobs, deploys and patch cycles. Make it long enough to include the things that happen rarely.
+3. **Review the New hooks page.** Allow the obvious ones for the fleet: your observability agent's BPF programs, your runtime's libraries. Allow host-specific ones for the hosts where seen. Reject what should never happen, so it alerts every time. Investigate the rest from their first-sighting events. Decided keys are never proposed again.
 
-   ```bash
-   hookmon-cli $FLAGS learning start --fleet --for 14d
-   ```
-
-   Alerts still go to connectors during learning. Warn whoever watches them.
-
-3. **Review as you go.** Approve the obvious candidates for the fleet: your observability agent's BPF programs, your runtime's libraries. Approve host-specific ones for their hosts. Reject what should never happen, so it keeps alerting. Investigate the rest. The PENDING list shrinks as you decide, and decided keys are not recorded again.
-
-4. **Let learning end, or stop it.** Anything still PENDING keeps waiting for a decision.
+4. **Let the quiet period end, or stop it.** Anything still PENDING keeps waiting for a decision; from now on each new first sighting goes to the alert connectors.
 
    ```bash
    hookmon-cli $FLAGS learning stop --fleet
    ```
 
-5. **Monitor.** Every unmatched event now alerts. Each one is a change to decide on: allowlist it from the event, or investigate it.
+5. **Monitor.** Each alert is one new hook, once: decide it (allowlist it from the event, or approve or reject it on the New hooks page). Its repeats are counted, not alerted.
 
-6. **Repeat for changes.** A new host, a package upgrade or a kernel upgrade changes hashes and tags. Run a host window over the change, review, and approve:
+6. **Updates.** A package or kernel upgrade changes hashes and tags, so its hooks arrive as a batch of first sightings around the upgrade's time. Filter the New hooks page to that time and host, check that they came from the update, and allow them together. To keep an expected upgrade from paging anyone, run a host quiet period over it:
 
    ```bash
    hookmon-cli $FLAGS learning start --host "$HOST_ID" --for 2h
@@ -476,4 +504,4 @@ In a **hand-written entry**, it is the other way round: leaving `exe_hash` empty
 - **Empty `event_types` means every type.** An entry with only `exe_path` set allows everything that binary does.
 - **Malformed globs fail silently.** The API accepts `"/usr/bin/["`, and it never matches.
 - **DENY blocks nothing.** It ranks above ALERT. Nothing in HookMon prevents an operation.
-- **Upgrades create new keys.** A new binary build has a new exe hash; a new kernel can give new BPF tags. Plan a host learning window for each upgrade.
+- **Upgrades create new keys.** A new binary build has a new exe hash; a new kernel can give new BPF tags (the same object file had different tags on kernels 5.19 and 6.17). Each upgrade's hooks arrive as a batch of first sightings; allow them together once you know the update brought them.

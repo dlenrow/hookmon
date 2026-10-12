@@ -150,6 +150,32 @@ func TestDispatcher_Routing(t *testing.T) {
 	}
 }
 
+// TestDispatcher_QuietFirstSightingIsNotAnAlert: a first sighting during a
+// learning window (quiet) goes to event-feed connectors and not to alert
+// connectors; the same event outside one goes to both.
+func TestDispatcher_QuietFirstSightingIsNotAnAlert(t *testing.T) {
+	alerts, feed := &siemFake{name: "alert"}, &siemFake{name: "feed"}
+	d := newDispatcher(&siemSeen{}, zap.NewNop())
+	d.add(alerts, Delivery{}.withDefaults(1), defaultRetry)
+	d.add(feed, Delivery{MinSeverity: event.SeverityInfo}.withDefaults(1), defaultRetry)
+	d.start()
+
+	quiet := siemEvt("quiet", event.SeverityCritical, event.ActionAlert)
+	quiet.PolicyResult.Disposition, quiet.PolicyResult.Quiet = event.DispositionFirstSighting, true
+	loud := siemEvt("loud", event.SeverityCritical, event.ActionAlert)
+	loud.PolicyResult.Disposition = event.DispositionFirstSighting
+	d.Send(quiet)
+	d.Send(loud)
+	siemClose(t, d)
+
+	if got := alerts.ids(); !siemEqual(got, []string{"loud"}) {
+		t.Errorf("alert connector got %v, want [loud]", got)
+	}
+	if got := feed.ids(); !siemEqual(got, []string{"quiet", "loud"}) {
+		t.Errorf("event-feed connector got %v, want [quiet loud]", got)
+	}
+}
+
 // TestDispatcher_SlowSinkDoesNotBlockIngestion: with a sink that never
 // returns, Send still returns at once; once the queue is full the extra
 // events are dropped and counted, and the other connector gets them all.

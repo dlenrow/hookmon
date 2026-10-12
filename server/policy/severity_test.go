@@ -38,8 +38,16 @@ func TestSeverityTable(t *testing.T) {
 	}{
 		{"2 AGENT_OFFLINE arriving on an event stream",
 			nil, ev(event.EventAgentOffline, root, "", nil), event.SeverityAlert},
-		{"3 BPF_INVENTORY",
+		{"3 BPF_INVENTORY, program not on the allowlist (a new hook)",
 			nil, ev(event.EventBPFInventory, root, event.SeverityInfo, func(e *event.HookEvent) {
+				e.ExeHash = ""
+				e.BPFDetail = &event.BPFDetail{ProgID: 7, ProgHash: "0123456789abcdef"}
+				e.BPFInventoryDetail = &event.BPFInventoryDetail{ScanID: "s"}
+			}), event.SeverityAlert},
+		{"3 BPF_INVENTORY, program on the allowlist",
+			[]*event.AllowlistEntry{{ID: "allow-prog", EventTypes: []event.EventType{event.EventBPFInventory},
+				ProgHash: "0123456789abcdef", Action: event.ActionAllow, Enabled: true}},
+			ev(event.EventBPFInventory, root, event.SeverityInfo, func(e *event.HookEvent) {
 				e.ExeHash = ""
 				e.BPFDetail = &event.BPFDetail{ProgID: 7, ProgHash: "0123456789abcdef"}
 				e.BPFInventoryDetail = &event.BPFInventoryDetail{ScanID: "s"}

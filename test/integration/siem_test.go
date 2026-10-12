@@ -151,11 +151,12 @@ func siemBPFEvent(id string) *event.HookEvent {
 	return e
 }
 
-// TestSIEM_AlertsReachSyslogAndWebhook: an unmatched BPF load from root
-// (CRITICAL) reaches the syslog connector, an alert connector, once, as an
-// RFC 5424 message with CEF, and its repeat does not. The webhook, an
-// event feed (min_severity INFO), gets every event, including the repeat
-// and an INFO event.
+// TestSIEM_AlertsReachSyslogAndWebhook: the first sighting of a BPF load
+// from root (CRITICAL) reaches the syslog connector, an alert connector, as
+// an RFC 5424 message with CEF. Its repeat is counted on the new hook's
+// PENDING entry and reaches no connector. The webhook, an event feed
+// (min_severity INFO), gets every stored event: the canary and an INFO
+// first sighting.
 func TestSIEM_AlertsReachSyslogAndWebhook(t *testing.T) {
 	dsn := enrPGDSN(t)
 	pki := enrpki.New(t)
@@ -184,8 +185,10 @@ func TestSIEM_AlertsReachSyslogAndWebhook(t *testing.T) {
 		}
 	}
 
-	enrWaitFor(t, 15*time.Second, "all three events at the webhook", func() bool {
-		return len(hookRx.byID("siem-canary")) == 1 && len(hookRx.byID("siem-repeat")) == 1 && len(hookRx.byID("siem-info")) == 1
+	// The repeat of the canary's program is counted on its PENDING entry
+	// and dropped: it reaches no connector, not even the full event feed.
+	enrWaitFor(t, 15*time.Second, "the canary and the INFO event at the webhook", func() bool {
+		return len(hookRx.byID("siem-canary")) == 1 && len(hookRx.byID("siem-info")) == 1
 	})
 	enrWaitFor(t, 15*time.Second, "the canary at the syslog receiver", func() bool {
 		return len(syslogRx.matching("externalId=siem-canary")) == 1
@@ -216,6 +219,9 @@ func TestSIEM_AlertsReachSyslogAndWebhook(t *testing.T) {
 	}
 	if n := len(syslogRx.matching("externalId=siem-repeat")); n != 0 {
 		t.Errorf("the repeat reached the alert connector %d times", n)
+	}
+	if n := len(hookRx.byID("siem-repeat")); n != 0 {
+		t.Errorf("the repeat reached the event-feed connector %d times", n)
 	}
 	if n := len(syslogRx.matching("externalId=siem-info")); n != 0 {
 		t.Errorf("the INFO event reached the alert connector")
