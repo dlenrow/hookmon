@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import type { Severity, HookEvent } from './api/types';
-import { getEvents, connectWebSocket } from './api/client';
+import { getEvents, getPolicies, connectWebSocket } from './api/client';
 import type { WebSocketState } from './api/client';
 import { EventFeed } from './pages/EventFeed';
 import { PolicyManager } from './pages/PolicyManager';
-import { PendingApproval } from './pages/PendingApproval';
+import { NewHooks } from './pages/NewHooks';
 import { HostInventory } from './pages/HostInventory';
 import { Investigation } from './pages/Investigation';
 import { Settings } from './pages/Settings';
@@ -34,6 +34,30 @@ export function App() {
   const [resync, setResync] = useState(0);
   const [liveEvents, setLiveEvents] = useState<HookEvent[]>([]);
   const wsConnected = wsState === 'live';
+  // New hooks waiting for a decision (PENDING entries), for the navigation.
+  const [newHooks, setNewHooks] = useState<number | null>(null);
+  // Live first sightings received so far. The New hooks page compares it
+  // with the value when its list loaded, to announce hooks that arrived.
+  const [firstSightings, setFirstSightings] = useState(0);
+  const countTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const refreshNewHooks = useCallback(async () => {
+    try {
+      const pending = await getPolicies('PENDING');
+      setNewHooks((pending || []).length);
+    } catch {
+      // API might not be available yet
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshNewHooks();
+    const t = setInterval(refreshNewHooks, 60_000);
+    return () => {
+      clearInterval(t);
+      if (countTimer.current) clearTimeout(countTimer.current);
+    };
+  }, [refreshNewHooks]);
 
   // Fetch initial severity counts from recent events
   useEffect(() => {
@@ -63,11 +87,17 @@ export function App() {
   // Set up WebSocket for live events and severity count updates
   const handleWsEvent = useCallback((event: HookEvent) => {
     setLiveEvents((prev) => [event, ...prev].slice(0, 1000));
+    if (event.policy_result?.disposition === 'first_sighting') {
+      setFirstSightings((n) => n + 1);
+      // A rollout can bring many at once: count them once it settles.
+      if (countTimer.current) clearTimeout(countTimer.current);
+      countTimer.current = setTimeout(refreshNewHooks, 2_000);
+    }
     setSeverityCounts((prev) => ({
       ...prev,
       [event.severity]: (prev[event.severity as Severity] || 0) + 1,
     }));
-  }, []);
+  }, [refreshNewHooks]);
 
   // resync changes each time the live feed starts, and once more if it
   // cannot start at first (no token, or the first connection failed). Pages
@@ -98,6 +128,13 @@ export function App() {
         </div>
 
         <nav className="sidebar-nav">
+          <NavLink to="/new-hooks" className={({ isActive }) => isActive ? 'active' : ''}>
+            <span className="nav-icon">N</span>
+            New hooks
+            {newHooks !== null && newHooks > 0 && (
+              <span className="nav-count" data-testid="new-hooks-count">{newHooks}</span>
+            )}
+          </NavLink>
           <NavLink to="/events" className={({ isActive }) => isActive ? 'active' : ''}>
             <span className="nav-icon">E</span>
             Events
@@ -109,10 +146,6 @@ export function App() {
           <NavLink to="/policies" className={({ isActive }) => isActive ? 'active' : ''}>
             <span className="nav-icon">P</span>
             Policies
-          </NavLink>
-          <NavLink to="/pending" className={({ isActive }) => isActive ? 'active' : ''}>
-            <span className="nav-icon">A</span>
-            Pending Approval
           </NavLink>
           <NavLink to="/settings" className={({ isActive }) => isActive ? 'active' : ''}>
             <span className="nav-icon">S</span>
@@ -158,7 +191,11 @@ export function App() {
       {/* Main content */}
       <main className="main-content">
         <Routes>
-          <Route path="/" element={<Navigate to="/events" replace />} />
+          <Route path="/" element={<Navigate to="/new-hooks" replace />} />
+          <Route
+            path="/new-hooks"
+            element={<NewHooks onChanged={refreshNewHooks} arrivals={firstSightings} />}
+          />
           <Route
             path="/events"
             element={<EventFeed liveEvents={liveEvents} wsConnected={wsConnected} resync={resync} />}
@@ -166,7 +203,7 @@ export function App() {
           <Route path="/events/:id" element={<Investigation />} />
           <Route path="/hosts" element={<HostInventory />} />
           <Route path="/policies" element={<PolicyManager />} />
-          <Route path="/pending" element={<PendingApproval />} />
+          <Route path="/pending" element={<Navigate to="/new-hooks" replace />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
