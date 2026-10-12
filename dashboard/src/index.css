@@ -849,3 +849,91 @@ body {
 .ws-status.disconnected {
   color: var(--status-offline);
 }
+
+/* New hooks */
+.nav-count {
+  margin-left: auto;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background-color: var(--severity-alert);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.badge-new {
+  background-color: var(--severity-alert-bg);
+  color: var(--severity-alert);
+}
+
+.bulk-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.bulk-bar .form-select {
+  width: auto;
+}
+
+.filter-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.batch-row td {
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.data-table tr.row-selected td {
+  background-color: rgba(59, 130, 246, 0.08);
+}
+
+.data-table tr.row-focus td {
+  box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent);
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-accent);
+  cursor: pointer;
+  font-size: inherit;
+  text-align: left;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.notice-card {
+  margin-bottom: 16px;
+  border-color: var(--severity-alert);
+}
+
+.notice-card .card-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}

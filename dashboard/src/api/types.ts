@@ -123,10 +123,27 @@ export interface ElfRpathDetail {
   is_setuid: boolean;
 }
 
+/**
+ * What the server did with a hook event (the first-sighting model):
+ * - first_sighting: no decided entry matched and this event created the
+ *   PENDING entry for its key. Stored, shown, sent to connectors.
+ * - repeat: a PENDING entry for the key already existed. Counted on it only.
+ * - allowed: matched an ALLOW entry. Dropped.
+ * - denied: matched an ALERT or DENY entry (a rejected hook). Stored and
+ *   alerted every time.
+ * - lifecycle: AGENT_OFFLINE or AGENT_RECOVERED.
+ * Only first_sighting, denied and lifecycle events are stored, so the API
+ * and the live feed never carry repeat or allowed.
+ */
+export type Disposition = 'first_sighting' | 'repeat' | 'allowed' | 'denied' | 'lifecycle';
+
 export interface PolicyResult {
   action: PolicyAction;
   matched_entry_id?: string;
   reason: string;
+  disposition?: Disposition;
+  /** The PENDING entry for the event's key, when there is one. */
+  candidate_id?: string;
 }
 
 export interface HookEvent {
@@ -181,6 +198,8 @@ export interface Learned {
   first_seen: string;
   last_seen: string;
   hosts: string[];
+  /** The stored first-sighting event: the evidence for a new hook. */
+  first_event_id?: string;
 }
 
 export interface AllowlistEntry {
@@ -252,6 +271,27 @@ export interface LearningWindow {
 export interface LearningState {
   now: string;
   windows: LearningWindow[];
+}
+
+/** POST /api/v1/policies/decide: one decision for 1 to 1000 PENDING entries. */
+export type BulkDecision = 'approve' | 'reject';
+
+/**
+ * fleet: each entry applies to every host. seen_hosts: one entry per host
+ * the hook was seen on, and no other host.
+ */
+export type BulkScope = 'fleet' | 'seen_hosts';
+
+export interface DecideResult {
+  id: string;
+  ok: boolean;
+  /** The entries now in force for this hook (one per host for seen_hosts). */
+  entries?: AllowlistEntry[];
+  error?: string;
+}
+
+export interface DecideResponse {
+  results: DecideResult[];
 }
 
 /** A decision on a PENDING entry, or the scope of an entry made from an event. */

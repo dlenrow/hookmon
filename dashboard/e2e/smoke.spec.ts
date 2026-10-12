@@ -243,17 +243,27 @@ test('every page renders the server data', async () => {
     }
   }
 
-  // Pending approval: every PENDING candidate.
+  // New hooks: every PENDING entry, with the bulk controls. Nothing is
+  // decided here: the decisions are covered against a mock (newhooks.spec.ts).
   const pending = await apiGet<Entry[]>('/api/v1/policies?status=PENDING');
-  expect(pending.length).toBeGreaterThan(0);
-  await nav(page, /Pending Approval/);
-  await expect(page.getByTestId('pending-row')).toHaveCount(pending.length);
-  const p0 = page.locator(`[data-testid=pending-row][data-entry-id="${pending[0].id}"]`);
-  if (pending[0].learned?.exe_path) {
-    await expect(p0).toContainText(pending[0].learned.exe_path);
+  await nav(page, /New hooks/);
+  if (pending.length === 0) {
+    await expect(page.getByTestId('new-hooks-empty')).toBeVisible();
+    console.log('New hooks: none');
+  } else {
+    await expect(page.getByTestId('hook-row')).toHaveCount(pending.length);
+    // The count was read when the app loaded; a live bus can add hooks since.
+    await expect(page.getByTestId('new-hooks-count')).toHaveText(/^\d+$/);
+    const p0 = page.locator(`[data-testid=hook-row][data-entry-id="${pending[0].id}"]`);
+    if (pending[0].learned?.exe_path) {
+      await expect(p0).toContainText(pending[0].learned.exe_path);
+    }
+    await p0.getByTestId('hook-select').check();
+    await expect(page.getByTestId('selected-count')).toHaveText('1 selected');
+    await expect(page.getByRole('button', { name: 'Allow — ignore in future' })).toBeEnabled();
+    await p0.getByTestId('hook-select').uncheck();
+    console.log(`New hooks: ${pending.length} rows; first ${pending[0].description}`);
   }
-  await expect(p0.getByRole('button', { name: 'Approve' })).toBeEnabled();
-  console.log(`Pending: ${pending.length} rows; first ${pending[0].description}`);
 
   // Settings: the enrollment command with the server's real ports, and
   // the connectors' counts.

@@ -84,6 +84,29 @@ export function eventSummary(event: HookEvent): string {
   }
 }
 
+/**
+ * What the server did with the event: the first sighting of a new hook
+ * (decided on the New hooks page) or an occurrence of a denied one.
+ */
+export function DispositionBadge({ event }: { event: HookEvent }) {
+  switch (event.policy_result?.disposition) {
+    case 'first_sighting':
+      return (
+        <span className="badge badge-new" data-testid="disposition" data-disposition="first_sighting" style={{ marginLeft: '6px' }}>
+          first sighting
+        </span>
+      );
+    case 'denied':
+      return (
+        <span className="badge badge-deny" data-testid="disposition" data-disposition="denied" style={{ marginLeft: '6px' }}>
+          denied
+        </span>
+      );
+    default:
+      return null;
+  }
+}
+
 function processLabel(event: HookEvent): string {
   if (event.event_type === 'BPF_INVENTORY' || !event.pid) return '-';
   return `${event.comm} (PID ${event.pid})`;
@@ -125,12 +148,13 @@ export function EventCard({ event }: EventCardProps) {
           {processLabel(event)}
         </span>
       </td>
-      <td>
+      <td style={{ whiteSpace: 'nowrap' }}>
         {event.policy_result && (
           <span className={`badge badge-${event.policy_result.action.toLowerCase()}`}>
             {event.policy_result.action}
           </span>
         )}
+        <DispositionBadge event={event} />
       </td>
       <td onClick={(e) => e.stopPropagation()}>
         {event.policy_result?.action !== 'ALLOW' && <AllowlistEventButton event={event} compact />}
