@@ -24,8 +24,7 @@ func TestUpdateAllowlistEntry(t *testing.T) {
 	if err := s.CreateAllowlistEntry(ctx, plain); err != nil {
 		t.Fatal(err)
 	}
-	k := event.LearnedKey{EventType: event.EventDlopen, ExeHash: "sha256:" + strings.Repeat("ab", 32),
-		SubjectKind: allowlist.SubjectLibraryPath, Subject: "/opt/x.so"}
+	k := event.LearnedKey{SubjectKind: allowlist.SubjectDlopen, Subject: "/opt/x.so"}
 	sighting, err := s.RecordCandidate(ctx, k, "/usr/bin/app", "learned", "host-a", "", created)
 	if err != nil {
 		t.Fatal(err)

@@ -26,13 +26,10 @@ type allowlistEventRequest struct {
 }
 
 // EntryForEvent returns an APPROVED ALLOW entry that matches exactly the
-// events with evt's learning-mode key (allowlist.KeyOf: event type, exe
-// hash, subject such as the BPF tag or library hash, and container
-// context), for the fleet (hostID "") or one host. It is the entry learning
-// mode would have proposed for the event, approved. The key is the only
-// criterion, as for learned entries: the field criteria cannot express some
-// subjects (a shared-memory pattern, a linker config file), and an empty
-// exe hash would match any binary.
+// events with evt's learning-mode key (allowlist.KeyOf: what was loaded or
+// changed, such as the BPF tag or library hash), for the fleet (hostID "")
+// or one host. It is the entry learning mode would have proposed for the
+// event, approved.
 func EntryForEvent(evt *event.HookEvent, hostID, description string, now time.Time) *event.AllowlistEntry {
 	k := allowlist.KeyOf(evt)
 	if description == "" {
@@ -43,7 +40,7 @@ func EntryForEvent(evt *event.HookEvent, hostID, description string, now time.Ti
 		CreatedAt:   now,
 		CreatedBy:   "api",
 		Description: description,
-		EventTypes:  []event.EventType{evt.EventType},
+		EventTypes:  allowlist.EventTypesFor(k),
 		HostID:      hostID,
 		Action:      event.ActionAllow,
 		Enabled:     true,

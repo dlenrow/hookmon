@@ -90,9 +90,23 @@ func TestMatches_LearnedKeyIsExact(t *testing.T) {
 	if !Matches(entry, evt) {
 		t.Fatal("learned entry should match the event it was learned from")
 	}
+	// ExeHash and container are context, not part of the key, so they
+	// must NOT prevent a match.
 	for name, mod := range map[string]func(*event.HookEvent){
-		"a hashed writer":    func(e *event.HookEvent) { e.ExeHash = "sha256:" + strings.Repeat("1", 64) },
-		"in a container":     func(e *event.HookEvent) { e.ContainerID = "c" },
+		"a hashed writer": func(e *event.HookEvent) { e.ExeHash = "sha256:" + strings.Repeat("1", 64) },
+		"in a container":  func(e *event.HookEvent) { e.ContainerID = "c" },
+	} {
+		other := *evt
+		d := *evt.LibIntegrityDetail
+		other.LibIntegrityDetail = &d
+		mod(&other)
+		if !Matches(entry, &other) {
+			t.Errorf("learned entry should still match %s (not part of the key)", name)
+		}
+	}
+	// What was loaded IS part of the key: different library, different
+	// mechanism (event type).
+	for name, mod := range map[string]func(*event.HookEvent){
 		"another library":    func(e *event.HookEvent) { e.LibIntegrityDetail.LibraryPath = "/usr/lib/libc.so.6" },
 		"another event type": func(e *event.HookEvent) { e.EventType = event.EventLinkerConfig },
 	} {

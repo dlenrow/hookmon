@@ -10,6 +10,7 @@ import (
 var (
 	polExeHash = "sha256:" + strings.Repeat("ab", 32)
 	polLibHash = "sha256:" + strings.Repeat("cd", 32)
+	polNewHash = "sha256:" + strings.Repeat("ef", 32)
 )
 
 // TestKeyOf_PerEventType: the key's subject for each event type.
@@ -26,77 +27,121 @@ func TestKeyOf_PerEventType(t *testing.T) {
 			e := base(event.EventBPFLoad)
 			e.BPFDetail = &event.BPFDetail{ProgType: 5, ProgHash: "A04F5EEF06A7F555", ProgName: "hello"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventBPFLoad, ExeHash: polExeHash, SubjectKind: SubjectBPFTag, Subject: "a04f5eef06a7f555", ProgType: 5}},
+		}(), event.LearnedKey{SubjectKind: SubjectBPFTag, Subject: "a04f5eef06a7f555", ProgType: 5}},
+		{"BPF attach shares key with load", func() *event.HookEvent {
+			e := base(event.EventBPFAttach)
+			e.BPFDetail = &event.BPFDetail{ProgType: 5, ProgHash: "A04F5EEF06A7F555", ProgName: "hello"}
+			return e
+		}(), event.LearnedKey{SubjectKind: SubjectBPFTag, Subject: "a04f5eef06a7f555", ProgType: 5}},
 		{"BPF attach without a tag: name stands in", func() *event.HookEvent {
 			e := base(event.EventBPFAttach)
 			e.BPFDetail = &event.BPFDetail{ProgType: 5, ProgName: "hello"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventBPFAttach, ExeHash: polExeHash, SubjectKind: SubjectBPFName, Subject: "hello", ProgType: 5}},
-		{"BPF inventory: no process", &event.HookEvent{EventType: event.EventBPFInventory,
+		}(), event.LearnedKey{SubjectKind: SubjectBPFName, Subject: "hello", ProgType: 5}},
+		{"BPF inventory: no process, same key as load", &event.HookEvent{EventType: event.EventBPFInventory,
 			BPFDetail: &event.BPFDetail{ProgType: 8, ProgHash: "0011223344556677"}},
-			event.LearnedKey{EventType: event.EventBPFInventory, SubjectKind: SubjectBPFTag, Subject: "0011223344556677", ProgType: 8}},
-		{"exec injection: library hash, in canonical form", func() *event.HookEvent {
+			event.LearnedKey{SubjectKind: SubjectBPFTag, Subject: "0011223344556677", ProgType: 8}},
+		{"LD_PRELOAD: library hash", func() *event.HookEvent {
 			e := base(event.EventExecInjection)
 			e.ExecInjectionDetail = &event.ExecInjectionDetail{LibraryPath: "/tmp/x.so", LibraryHash: strings.ToUpper(polLibHash[7:]), EnvVar: "LD_PRELOAD"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventExecInjection, ExeHash: polExeHash, SubjectKind: SubjectLibraryHash, Subject: polLibHash}},
-		{"exec injection: path when there is no hash", func() *event.HookEvent {
+		}(), event.LearnedKey{SubjectKind: SubjectLDPreload, Subject: polLibHash}},
+		{"LD_PRELOAD: path when there is no hash", func() *event.HookEvent {
 			e := base(event.EventExecInjection)
 			e.ExecInjectionDetail = &event.ExecInjectionDetail{LibraryPath: "libx.so", EnvVar: "LD_PRELOAD"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventExecInjection, ExeHash: polExeHash, SubjectKind: SubjectLibraryPath, Subject: "libx.so"}},
-		{"exec injection: scan truncated has no subject", func() *event.HookEvent {
+		}(), event.LearnedKey{SubjectKind: SubjectLDPreload, Subject: "libx.so"}},
+		{"LD_AUDIT: library hash", func() *event.HookEvent {
+			e := base(event.EventExecInjection)
+			e.ExecInjectionDetail = &event.ExecInjectionDetail{LibraryPath: "/tmp/x.so", LibraryHash: polLibHash, EnvVar: "LD_AUDIT"}
+			return e
+		}(), event.LearnedKey{SubjectKind: SubjectLDAudit, Subject: polLibHash}},
+		{"LD_LIBRARY_PATH: directory list", func() *event.HookEvent {
+			e := base(event.EventExecInjection)
+			e.ExecInjectionDetail = &event.ExecInjectionDetail{LibraryPath: "/opt/lib:/usr/local/lib", EnvVar: "LD_LIBRARY_PATH"}
+			return e
+		}(), event.LearnedKey{SubjectKind: SubjectLDLibraryPath, Subject: "/opt/lib:/usr/local/lib"}},
+		{"LD_DEBUG: variable name only", func() *event.HookEvent {
+			e := base(event.EventExecInjection)
+			e.ExecInjectionDetail = &event.ExecInjectionDetail{LibraryPath: "all", EnvVar: "LD_DEBUG"}
+			return e
+		}(), event.LearnedKey{SubjectKind: SubjectLDDebug}},
+		{"exec injection: scan truncated", func() *event.HookEvent {
 			e := base(event.EventExecInjection)
 			e.ExecInjectionDetail = &event.ExecInjectionDetail{ScanTruncated: true}
 			return e
-		}(), event.LearnedKey{EventType: event.EventExecInjection, ExeHash: polExeHash}},
+		}(), event.LearnedKey{SubjectKind: SubjectScanTruncated}},
+		{"exec injection: no EnvVar defaults to LD_PRELOAD", func() *event.HookEvent {
+			e := base(event.EventExecInjection)
+			e.ExecInjectionDetail = &event.ExecInjectionDetail{LibraryPath: "/tmp/x.so", LibraryHash: polLibHash}
+			return e
+		}(), event.LearnedKey{SubjectKind: SubjectLDPreload, Subject: polLibHash}},
 		{"dlopen: library hash", func() *event.HookEvent {
 			e := base(event.EventDlopen)
 			e.DlopenDetail = &event.DlopenDetail{LibraryPath: "/opt/p.so", LibraryHash: polLibHash}
 			return e
-		}(), event.LearnedKey{EventType: event.EventDlopen, ExeHash: polExeHash, SubjectKind: SubjectLibraryHash, Subject: polLibHash}},
+		}(), event.LearnedKey{SubjectKind: SubjectDlopen, Subject: polLibHash}},
 		{"dlopen: path", func() *event.HookEvent {
 			e := base(event.EventDlopen)
 			e.DlopenDetail = &event.DlopenDetail{LibraryPath: "/opt/p.so"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventDlopen, ExeHash: polExeHash, SubjectKind: SubjectLibraryPath, Subject: "/opt/p.so"}},
-		{"lib integrity: library path, not its new hash", func() *event.HookEvent {
+		}(), event.LearnedKey{SubjectKind: SubjectDlopen, Subject: "/opt/p.so"}},
+		{"lib integrity: path + new hash", func() *event.HookEvent {
 			e := base(event.EventLibIntegrity)
-			e.LibIntegrityDetail = &event.LibIntegrityDetail{LibraryPath: "/usr/lib/libz.so.1", NewHash: polLibHash}
+			e.LibIntegrityDetail = &event.LibIntegrityDetail{LibraryPath: "/usr/lib/libz.so.1", NewHash: polNewHash}
 			return e
-		}(), event.LearnedKey{EventType: event.EventLibIntegrity, ExeHash: polExeHash, SubjectKind: SubjectLibraryPath, Subject: "/usr/lib/libz.so.1"}},
-		{"linker config: file path", func() *event.HookEvent {
+		}(), event.LearnedKey{SubjectKind: SubjectLibReplace, Subject: "/usr/lib/libz.so.1", ContentHash: polNewHash}},
+		{"linker config: path + new hash", func() *event.HookEvent {
 			e := base(event.EventLinkerConfig)
-			e.LinkerConfigDetail = &event.LinkerConfigDetail{FilePath: "/etc/ld.so.cache"}
+			e.LinkerConfigDetail = &event.LinkerConfigDetail{FilePath: "/etc/ld.so.cache", NewHash: polNewHash}
 			return e
-		}(), event.LearnedKey{EventType: event.EventLinkerConfig, ExeHash: polExeHash, SubjectKind: SubjectFilePath, Subject: "/etc/ld.so.cache"}},
+		}(), event.LearnedKey{SubjectKind: SubjectLinkerConfig, Subject: "/etc/ld.so.cache", ContentHash: polNewHash}},
 		{"shm: the bus's pattern, not the random name", func() *event.HookEvent {
 			e := base(event.EventSHMCreate)
 			e.SHMDetail = &event.SHMDetail{SHMName: ".org.chromium.Chromium.F04up4", Pattern: "unknown"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventSHMCreate, ExeHash: polExeHash, SubjectKind: SubjectSHMPattern, Subject: "unknown"}},
+		}(), event.LearnedKey{SubjectKind: SubjectSHMPattern, Subject: "unknown"}},
 		{"shm: segment name when there is no pattern", func() *event.HookEvent {
 			e := base(event.EventSHMCreate)
 			e.SHMDetail = &event.SHMDetail{SHMName: "/dev/shm/seg"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventSHMCreate, ExeHash: polExeHash, SubjectKind: SubjectSHMName, Subject: "/dev/shm/seg"}},
-		{"ptrace: no subject", func() *event.HookEvent {
+		}(), event.LearnedKey{SubjectKind: SubjectSHMName, Subject: "/dev/shm/seg"}},
+		{"ptrace: tracer's exe hash", func() *event.HookEvent {
 			e := base(event.EventPtraceInject)
 			e.PtraceDetail = &event.PtraceDetail{TargetPID: 99, TargetComm: "sshd"}
 			return e
-		}(), event.LearnedKey{EventType: event.EventPtraceInject, ExeHash: polExeHash}},
-		{"ELF RPATH: no subject", func() *event.HookEvent {
+		}(), event.LearnedKey{SubjectKind: SubjectPtrace, Subject: polExeHash}},
+		{"ELF RPATH: binary's exe hash", func() *event.HookEvent {
 			e := base(event.EventElfRpath)
 			e.ElfRpathDetail = &event.ElfRpathDetail{HighestRisk: event.RpathRiskMedium}
 			return e
-		}(), event.LearnedKey{EventType: event.EventElfRpath, ExeHash: polExeHash}},
-		{"bare-hex exe hash is canonicalized", &event.HookEvent{EventType: event.EventPtraceInject, ExeHash: strings.ToUpper(polExeHash[7:])},
-			event.LearnedKey{EventType: event.EventPtraceInject, ExeHash: polExeHash}},
+		}(), event.LearnedKey{SubjectKind: SubjectRpath, Subject: polExeHash}},
 	}
 	for _, c := range cases {
 		if got := KeyOf(c.evt); got != c.want {
 			t.Errorf("%s:\n got %+v\nwant %+v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestKeyOf_BPFUnified: load, attach and inventory for the same program
+// produce the same key, regardless of who loaded it.
+func TestKeyOf_BPFUnified(t *testing.T) {
+	tag := "a04f5eef06a7f555"
+	pt := uint32(5)
+	load := &event.HookEvent{EventType: event.EventBPFLoad, ExeHash: polExeHash,
+		BPFDetail: &event.BPFDetail{ProgType: pt, ProgHash: tag}}
+	attach := &event.HookEvent{EventType: event.EventBPFAttach, ExeHash: "sha256:" + strings.Repeat("99", 32),
+		BPFDetail: &event.BPFDetail{ProgType: pt, ProgHash: tag}}
+	inv := &event.HookEvent{EventType: event.EventBPFInventory,
+		BPFDetail: &event.BPFDetail{ProgType: pt, ProgHash: tag}}
+
+	kLoad, kAttach, kInv := KeyOf(load), KeyOf(attach), KeyOf(inv)
+	if kLoad != kAttach {
+		t.Errorf("load and attach have different keys:\n load:   %+v\n attach: %+v", kLoad, kAttach)
+	}
+	if kLoad != kInv {
+		t.Errorf("load and inventory have different keys:\n load: %+v\n inv:  %+v", kLoad, kInv)
 	}
 }
 
@@ -114,36 +159,28 @@ func TestKeyOf_Dedupe(t *testing.T) {
 		}
 		return e
 	}
+	ref := KeyOf(dl(nil))
+
 	same := map[string]func(*event.HookEvent){
 		"other host":                  func(e *event.HookEvent) { e.HostID, e.Hostname = "host-b", "b" },
 		"other PID, UID, comm":        func(e *event.HookEvent) { e.PID, e.UID, e.Comm = 11, 0, "other" },
 		"other exe path, same binary": func(e *event.HookEvent) { e.ExePath = "/opt/copy/app" },
+		"different exe hash":          func(e *event.HookEvent) { e.ExeHash = "sha256:" + strings.Repeat("ef", 32) },
+		"no exe hash":                 func(e *event.HookEvent) { e.ExeHash = "" },
 		"same library at another path (hash keyed)": func(e *event.HookEvent) {
 			e.DlopenDetail.LibraryPath = "/usr/lib/p.so"
 		},
-		"another container of any image": func(e *event.HookEvent) { e.ContainerID = "c2" },
+		"in a container":    func(e *event.HookEvent) { e.ContainerID = "c1" },
+		"another container": func(e *event.HookEvent) { e.ContainerID = "c2" },
 	}
-	ref := KeyOf(dl(nil))
-	inC1 := KeyOf(dl(func(e *event.HookEvent) { e.ContainerID = "c1" }))
 	for name, mod := range same {
-		got := KeyOf(dl(mod))
-		want := ref
-		if name == "another container of any image" {
-			want = inC1
-		}
-		if got != want {
-			t.Errorf("%s: key changed: %+v vs %+v", name, got, want)
+		if got := KeyOf(dl(mod)); got != ref {
+			t.Errorf("%s: key changed: %+v vs %+v", name, got, ref)
 		}
 	}
+
 	differ := map[string]func(*event.HookEvent){
-		"event type": func(e *event.HookEvent) {
-			e.EventType = event.EventExecInjection
-			e.ExecInjectionDetail = &event.ExecInjectionDetail{LibraryHash: polLibHash}
-		},
-		"exe hash":       func(e *event.HookEvent) { e.ExeHash = "sha256:" + strings.Repeat("ef", 32) },
-		"no exe hash":    func(e *event.HookEvent) { e.ExeHash = "" },
-		"library hash":   func(e *event.HookEvent) { e.DlopenDetail.LibraryHash = "sha256:" + strings.Repeat("01", 32) },
-		"in a container": func(e *event.HookEvent) { e.ContainerID = "c1" },
+		"library hash": func(e *event.HookEvent) { e.DlopenDetail.LibraryHash = "sha256:" + strings.Repeat("01", 32) },
 	}
 	for name, mod := range differ {
 		if KeyOf(dl(mod)) == ref {
@@ -152,13 +189,13 @@ func TestKeyOf_Dedupe(t *testing.T) {
 	}
 
 	// SHM: Chromium's randomly named segments share a key; a bpftime segment
-	// from the same binary does not.
+	// does not.
 	shm := func(name, pattern string) event.LearnedKey {
 		return KeyOf(&event.HookEvent{EventType: event.EventSHMCreate, ExeHash: polExeHash,
 			SHMDetail: &event.SHMDetail{SHMName: name, Pattern: pattern}})
 	}
 	if shm(".org.chromium.Chromium.F04up4", "unknown") != shm(".org.chromium.Chromium.x9Qz1a", "unknown") {
-		t.Error("two generic segments from one binary have different keys")
+		t.Error("two generic segments have different keys")
 	}
 	if shm("bpftime_maps_shm", "bpftime") == shm(".org.chromium.Chromium.F04up4", "unknown") {
 		t.Error("a bpftime segment shares a key with a generic one")
@@ -172,24 +209,41 @@ func TestKeyOf_Dedupe(t *testing.T) {
 	if KeyOf(bpf(1)) == KeyOf(bpf(5)) {
 		t.Error("program type is not part of the BPF key")
 	}
+
+	// LD_PRELOAD and dlopen for the same library are different keys.
+	preload := &event.HookEvent{EventType: event.EventExecInjection, ExeHash: polExeHash,
+		ExecInjectionDetail: &event.ExecInjectionDetail{LibraryHash: polLibHash, EnvVar: "LD_PRELOAD"}}
+	dlopenEvt := &event.HookEvent{EventType: event.EventDlopen, ExeHash: polExeHash,
+		DlopenDetail: &event.DlopenDetail{LibraryHash: polLibHash}}
+	if KeyOf(preload) == KeyOf(dlopenEvt) {
+		t.Error("LD_PRELOAD and dlopen for the same library share a key")
+	}
+
+	// LD_PRELOAD and LD_AUDIT for the same library are different keys.
+	audit := &event.HookEvent{EventType: event.EventExecInjection, ExeHash: polExeHash,
+		ExecInjectionDetail: &event.ExecInjectionDetail{LibraryHash: polLibHash, EnvVar: "LD_AUDIT"}}
+	if KeyOf(preload) == KeyOf(audit) {
+		t.Error("LD_PRELOAD and LD_AUDIT for the same library share a key")
+	}
 }
 
 func TestKeyHash(t *testing.T) {
-	k := event.LearnedKey{EventType: event.EventDlopen, ExeHash: polExeHash, SubjectKind: SubjectLibraryPath, Subject: "/opt/p.so"}
+	k := event.LearnedKey{SubjectKind: SubjectDlopen, Subject: "/opt/p.so"}
 	h := KeyHash(k)
 	if len(h) != 64 || !isHex(h) || h != KeyHash(k) {
 		t.Fatalf("KeyHash %q: want 64 stable hex digits", h)
 	}
 	seen := map[string]event.LearnedKey{h: k}
 	for _, other := range []event.LearnedKey{
-		{EventType: event.EventDlopen, ExeHash: polExeHash, SubjectKind: SubjectLibraryPath, Subject: "/opt/p.so", InContainer: true},
-		{EventType: event.EventDlopen, ExeHash: polExeHash, SubjectKind: SubjectLibraryPath, Subject: "/opt/p.so", ProgType: 1},
-		{EventType: event.EventDlopen, ExeHash: polExeHash, SubjectKind: SubjectLibraryHash, Subject: "/opt/p.so"},
+		{SubjectKind: SubjectDlopen, Subject: "/opt/p.so", ProgType: 1},
+		{SubjectKind: SubjectLDPreload, Subject: "/opt/p.so"},
+		{SubjectKind: SubjectLibReplace, Subject: "/opt/p.so", ContentHash: polNewHash},
+		{SubjectKind: SubjectLibReplace, Subject: "/opt/p.so"},
 		// Field boundaries matter: "ab"+"c" is not "a"+"bc".
-		{EventType: "ab", ExeHash: "c"},
-		{EventType: "a", ExeHash: "bc"},
+		{SubjectKind: "ab", Subject: "c"},
+		{SubjectKind: "a", Subject: "bc"},
 		// A long path still gives a 64-digit ID.
-		{EventType: event.EventDlopen, Subject: strings.Repeat("/x", 4000)},
+		{SubjectKind: SubjectDlopen, Subject: strings.Repeat("/x", 4000)},
 	} {
 		oh := KeyHash(other)
 		if prev, dup := seen[oh]; dup {
@@ -203,14 +257,48 @@ func TestKeyHash(t *testing.T) {
 }
 
 func TestDescribe(t *testing.T) {
-	k := event.LearnedKey{EventType: event.EventBPFLoad, ExeHash: polExeHash, SubjectKind: SubjectBPFTag, Subject: "a04f5eef06a7f555", ProgType: 5, InContainer: true}
+	k := event.LearnedKey{SubjectKind: SubjectBPFTag, Subject: "a04f5eef06a7f555", ProgType: 5}
 	got := Describe(k, "/usr/bin/loader")
-	want := "learned: BPF_LOAD by /usr/bin/loader in a container: BPF tag a04f5eef06a7f555, prog type 5"
+	want := "learned: BPF tag a04f5eef06a7f555, prog type 5 [/usr/bin/loader]"
 	if got != want {
 		t.Errorf("Describe:\n got %q\nwant %q", got, want)
 	}
-	got = Describe(event.LearnedKey{EventType: event.EventSHMCreate, SubjectKind: SubjectSHMName, Subject: "/dev/shm/x"}, "")
-	if got != "learned: SHM_CREATE: shm name /dev/shm/x" {
+	got = Describe(event.LearnedKey{SubjectKind: SubjectSHMName, Subject: "/dev/shm/x"}, "")
+	if got != "learned: shm name /dev/shm/x" {
 		t.Errorf("Describe shm: %q", got)
+	}
+}
+
+func TestEventTypesFor(t *testing.T) {
+	cases := []struct {
+		kind string
+		want []event.EventType
+	}{
+		{SubjectBPFTag, []event.EventType{event.EventBPFLoad, event.EventBPFAttach, event.EventBPFInventory}},
+		{SubjectBPFName, []event.EventType{event.EventBPFLoad, event.EventBPFAttach, event.EventBPFInventory}},
+		{SubjectLDPreload, []event.EventType{event.EventExecInjection}},
+		{SubjectLDAudit, []event.EventType{event.EventExecInjection}},
+		{SubjectLDLibraryPath, []event.EventType{event.EventExecInjection}},
+		{SubjectLDDebug, []event.EventType{event.EventExecInjection}},
+		{SubjectScanTruncated, []event.EventType{event.EventExecInjection}},
+		{SubjectDlopen, []event.EventType{event.EventDlopen}},
+		{SubjectLibReplace, []event.EventType{event.EventLibIntegrity}},
+		{SubjectLinkerConfig, []event.EventType{event.EventLinkerConfig}},
+		{SubjectSHMPattern, []event.EventType{event.EventSHMCreate}},
+		{SubjectSHMName, []event.EventType{event.EventSHMCreate}},
+		{SubjectRpath, []event.EventType{event.EventElfRpath}},
+		{SubjectPtrace, []event.EventType{event.EventPtraceInject}},
+	}
+	for _, c := range cases {
+		got := EventTypesFor(event.LearnedKey{SubjectKind: c.kind})
+		if len(got) != len(c.want) {
+			t.Errorf("EventTypesFor(%s): %v, want %v", c.kind, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("EventTypesFor(%s)[%d]: %s, want %s", c.kind, i, got[i], c.want[i])
+			}
+		}
 	}
 }

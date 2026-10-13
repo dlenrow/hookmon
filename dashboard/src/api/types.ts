@@ -183,14 +183,12 @@ export interface UIDRange {
   max: number;
 }
 
-/** The learning-mode dedupe key: what a learned entry matches exactly. */
+/** The learning-mode dedupe key: what was loaded or changed. */
 export interface LearnedKey {
-  event_type: EventType;
-  exe_hash: string;
   subject_kind?: string;
   subject?: string;
+  content_hash?: string;
   prog_type?: number;
-  in_container: boolean;
 }
 
 export interface Learned {

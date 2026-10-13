@@ -24,14 +24,12 @@ var smoketestTypes = []string{
 const smoketestMarker = "hookmon-smoketest"
 
 type smoketestEntry struct {
-	ID      string `json:"id"`
-	Status  string `json:"status"`
-	Action  string `json:"action"`
-	Enabled bool   `json:"enabled"`
-	Learned *struct {
-		Key struct {
-			EventType string `json:"event_type"`
-		} `json:"key"`
+	ID         string   `json:"id"`
+	Status     string   `json:"status"`
+	Action     string   `json:"action"`
+	Enabled    bool     `json:"enabled"`
+	EventTypes []string `json:"event_types"`
+	Learned    *struct {
 		FirstSeen time.Time `json:"first_seen"`
 		Hosts     []string  `json:"hosts"`
 		ExePath   string    `json:"exe_path"`
@@ -44,6 +42,22 @@ func (e *smoketestEntry) isSmoketest() bool {
 		return true
 	}
 	return strings.Contains(e.ExePath, smoketestMarker)
+}
+
+// smoketestTypes returns the smoketest grid event types this entry covers.
+// BPF entries cover BPF_LOAD/BPF_ATTACH/BPF_INVENTORY but the grid only
+// shows BPF_LOAD, so we map to the first match in the smoketest list.
+func (e *smoketestEntry) smoketestTypes() []string {
+	var types []string
+	for _, st := range smoketestTypes {
+		for _, et := range e.EventTypes {
+			if et == st {
+				types = append(types, st)
+				break
+			}
+		}
+	}
+	return types
 }
 
 func (c *CLI) smoketestCheck(args []string) error {
@@ -102,7 +116,6 @@ func (c *CLI) smoketestCheck(args []string) error {
 		if e.Learned.FirstSeen.Before(from) {
 			continue
 		}
-		et := e.Learned.Key.EventType
 		for _, h := range e.Learned.Hosts {
 			if len(hostIDs) > 0 && !allHosts[h] {
 				continue
@@ -111,7 +124,9 @@ func (c *CLI) smoketestCheck(args []string) error {
 			if grid[h] == nil {
 				grid[h] = map[string]cell{}
 			}
-			grid[h][et] = cell{status: "new"}
+			for _, et := range e.smoketestTypes() {
+				grid[h][et] = cell{status: "new"}
+			}
 		}
 	}
 
@@ -119,7 +134,6 @@ func (c *CLI) smoketestCheck(args []string) error {
 		if !e.isSmoketest() || e.Learned == nil {
 			continue
 		}
-		et := e.Learned.Key.EventType
 		st := "allowed"
 		if e.Action == "ALERT" || e.Action == "DENY" || e.Status == "REJECTED" {
 			st = "denied"
@@ -132,8 +146,10 @@ func (c *CLI) smoketestCheck(args []string) error {
 			if grid[h] == nil {
 				grid[h] = map[string]cell{}
 			}
-			if _, exists := grid[h][et]; !exists {
-				grid[h][et] = cell{status: st}
+			for _, et := range e.smoketestTypes() {
+				if _, exists := grid[h][et]; !exists {
+					grid[h][et] = cell{status: st}
+				}
 			}
 		}
 	}

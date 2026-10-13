@@ -19,7 +19,7 @@ import (
 // dashSeed puts an approved, a rejected and a pending entry in st.
 func dashSeed(st *polStore) {
 	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	learned := &event.Learned{Key: event.LearnedKey{EventType: event.EventDlopen, SubjectKind: allowlist.SubjectLibraryPath, Subject: "/opt/x.so"}, Occurrences: 3, Hosts: []string{"host-a"}}
+	learned := &event.Learned{Key: event.LearnedKey{SubjectKind: allowlist.SubjectDlopen, Subject: "/opt/x.so"}, Occurrences: 3, Hosts: []string{"host-a"}}
 	st.entries = []*event.AllowlistEntry{
 		{ID: "ok", CreatedAt: created, CreatedBy: "alice", Description: "cilium", EventTypes: []event.EventType{event.EventBPFLoad},
 			ExePath: "/usr/bin/cilium*", Action: event.ActionAllow, Enabled: true, Status: event.StatusApproved},
@@ -319,7 +319,7 @@ func TestAllowlistEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if e.HostID != "host-a" || e.Action != event.ActionAllow || e.Status != event.StatusApproved || !e.Enabled ||
-		e.Learned == nil || e.Learned.Key != allowlist.KeyOf(bpf) || len(e.EventTypes) != 1 || e.EventTypes[0] != event.EventBPFLoad ||
+		e.Learned == nil || e.Learned.Key != allowlist.KeyOf(bpf) || len(e.EventTypes) != 3 ||
 		!strings.Contains(e.Description, "from event e1") || !strings.Contains(e.Description, "a04f5eef06a7f555") {
 		t.Errorf("entry: %+v", e)
 	}
@@ -392,7 +392,7 @@ func TestAllowlistEvent_DecidesPendingEntry(t *testing.T) {
 	st.events = map[string]*event.HookEvent{"e1": bpf}
 	st.entries = []*event.AllowlistEntry{
 		{ID: "other", Action: event.ActionAlert, Enabled: true, Status: event.StatusPending,
-			Learned: &event.Learned{Key: event.LearnedKey{EventType: event.EventDlopen, Subject: "/opt/x.so"}, Hosts: []string{"host-a"}}},
+			Learned: &event.Learned{Key: event.LearnedKey{SubjectKind: allowlist.SubjectDlopen, Subject: "/opt/x.so"}, Hosts: []string{"host-a"}}},
 		{ID: "pend", Action: event.ActionAlert, Enabled: true, Status: event.StatusPending,
 			Learned: &event.Learned{Key: allowlist.KeyOf(bpf), Hosts: []string{"host-a", "host-b"}, FirstEventID: "e1"}},
 	}

@@ -260,7 +260,7 @@ func (s *Store) RecordCandidate(ctx context.Context, key event.LearnedKey, exePa
 	if err != nil {
 		return sighting, fmt.Errorf("marshal learned_key: %w", err)
 	}
-	eventTypesJSON, err := json.Marshal([]event.EventType{key.EventType})
+	eventTypesJSON, err := json.Marshal(allowlist.EventTypesFor(key))
 	if err != nil {
 		return sighting, fmt.Errorf("marshal event_types: %w", err)
 	}

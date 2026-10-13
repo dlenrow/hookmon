@@ -140,8 +140,7 @@ func polUTC(e *event.AllowlistEntry) *event.AllowlistEntry {
 }
 
 func polKey(lib string) event.LearnedKey {
-	return event.LearnedKey{EventType: event.EventDlopen, ExeHash: "sha256:" + strings.Repeat("ab", 32),
-		SubjectKind: allowlist.SubjectLibraryPath, Subject: lib}
+	return event.LearnedKey{SubjectKind: allowlist.SubjectDlopen, Subject: lib}
 }
 
 func polPending(t *testing.T, s *Store) map[string]*event.AllowlistEntry {

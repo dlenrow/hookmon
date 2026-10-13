@@ -345,26 +345,31 @@ type AllowlistEntry struct {
 // LearnedKey is the dedupe key of a new hook: the tuple a PENDING entry
 // stands for. Every unmatched event with the same key counts toward the
 // same entry, and approving the entry allows exactly those events.
+//
+// The key identifies WHAT was loaded or changed, not who loaded it:
+// the acting binary, the host, the user and the container are context
+// on the event, not part of the key. BPF load, attach and inventory
+// events share one key when they name the same program.
 type LearnedKey struct {
-	EventType EventType `json:"event_type"`
-	// ExeHash is the acting binary's "sha256:<hex>", or "" when the bus could
-	// not hash it (BPF_INVENTORY events have no process).
-	ExeHash string `json:"exe_hash"`
-	// SubjectKind names what Subject holds: "bpf_tag", "bpf_name" (only when
-	// the kernel gave no tag), "library_hash", "library_path", "shm_pattern"
-	// ("shm_name" only when the bus gave no pattern), "file_path", or "" for
-	// event types with no subject (PTRACE_INJECT and ELF_RPATH, where the
-	// exe hash identifies the binary).
+	// SubjectKind names the mechanism and what Subject holds:
+	//   "bpf_tag", "bpf_name"           — BPF program (all BPF event types)
+	//   "ld_preload", "ld_audit"         — library injection via env var
+	//   "ld_library_path", "ld_debug"    — path/debug injection via env var
+	//   "scan_truncated"                 — incomplete environment scan
+	//   "dlopen"                         — runtime dlopen() call
+	//   "lib_replace"                    — shared library file replaced on disk
+	//   "linker_config"                  — ld.so config file changed
+	//   "shm_pattern", "shm_name"        — shared memory segment
+	//   "rpath"                          — binary with risky RPATH (Subject = exe hash)
+	//   "ptrace"                         — ptrace injection (Subject = tracer exe hash)
 	SubjectKind string `json:"subject_kind,omitempty"`
 	Subject     string `json:"subject,omitempty"`
+	// ContentHash is the new content's "sha256:<hex>" for lib_replace and
+	// linker_config events, so that each distinct replacement is its own key.
+	ContentHash string `json:"content_hash,omitempty"`
 	// ProgType is the BPF program type, part of the key for BPF events
 	// because identical instructions of different types share a tag.
 	ProgType uint32 `json:"prog_type,omitempty"`
-	// InContainer stands in for the container image, which the bus does not
-	// report: true when the process ran in a container (the event had a
-	// container ID). The exe hash, taken inside the container, identifies
-	// the binary itself.
-	InContainer bool `json:"in_container"`
 }
 
 // Learned is what the server recorded about a new hook for its allowlist entry.

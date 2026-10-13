@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	hcrypto "github.com/dlenrow/hookmon/pkg/crypto"
+	"github.com/dlenrow/hookmon/pkg/allowlist"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -363,7 +364,7 @@ func TestStore_DatabaseFailures(t *testing.T) {
 		"GetAllowlistEntry":     t7hErr(s.GetAllowlistEntry(ctx, "x")),
 		"DecideCandidate":       t7hErr(s.DecideCandidate(ctx, "x", event.StatusApproved, "")),
 		"MarkHostUnresponsive":  t7hErr(s.MarkHostUnresponsive(ctx, "x", now)),
-		"RecordCandidate":       t7hErr(s.RecordCandidate(ctx, event.LearnedKey{EventType: event.EventBPFLoad}, "/x", "d", "h", "e", now)),
+		"RecordCandidate":       t7hErr(s.RecordCandidate(ctx, event.LearnedKey{SubjectKind: allowlist.SubjectBPFTag}, "/x", "d", "h", "e", now)),
 		"DecideCandidates":      t7hErr(s.DecideCandidates(ctx, []string{"x"}, event.StatusApproved, ScopeFleet)),
 		"RecordHeartbeat (raw)": t7hErr(s.RecordHeartbeat(ctx, &event.HostHeartbeat{HostID: "x", ReceivedAt: now})),
 	} {

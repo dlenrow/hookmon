@@ -28,23 +28,37 @@ export function subjectLabel(entry: AllowlistEntry): string {
       return `BPF tag ${k.subject} (${bpfProgTypeName(k.prog_type ?? 0)})`;
     case 'bpf_name':
       return `BPF program "${k.subject}", no tag (${bpfProgTypeName(k.prog_type ?? 0)})`;
-    case 'library_hash':
-      return `library ${truncateHash(k.subject || '')}`;
-    case 'library_path':
-      return `library ${k.subject}`;
+    case 'ld_preload':
+      return `LD_PRELOAD ${truncateHash(k.subject || '')}`;
+    case 'ld_audit':
+      return `LD_AUDIT ${truncateHash(k.subject || '')}`;
+    case 'ld_library_path':
+      return `LD_LIBRARY_PATH ${k.subject}`;
+    case 'ld_debug':
+      return 'LD_DEBUG';
+    case 'scan_truncated':
+      return 'truncated env scan';
+    case 'dlopen':
+      return `dlopen ${truncateHash(k.subject || '')}`;
+    case 'lib_replace':
+      return `library ${k.subject}${k.content_hash ? ` (${truncateHash(k.content_hash)})` : ''}`;
+    case 'linker_config':
+      return `linker config ${k.subject}${k.content_hash ? ` (${truncateHash(k.content_hash)})` : ''}`;
     case 'shm_pattern':
       return `/dev/shm pattern ${k.subject}`;
     case 'shm_name':
       return `/dev/shm/${k.subject}`;
-    case 'file_path':
-      return k.subject || '-';
+    case 'rpath':
+      return `RPATH in ${truncateHash(k.subject || '')}`;
+    case 'ptrace':
+      return `ptrace from ${truncateHash(k.subject || '')}`;
     default:
-      return 'the binary itself';
+      return k.subject || '-';
   }
 }
 
 function eventTypeOf(entry: AllowlistEntry): string {
-  return entry.learned?.key.event_type || entry.event_types?.[0] || '-';
+  return entry.event_types?.[0] || '-';
 }
 
 function firstSeenMs(entry: AllowlistEntry): number {
@@ -205,7 +219,7 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
           const hay = [
             entry.description,
             l?.exe_path,
-            l?.key.exe_hash,
+            l?.key.subject,
             subjectLabel(entry),
             eventTypeOf(entry),
             ...(l?.hosts || []).map(hostName),
@@ -577,7 +591,6 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
                           ),
                           ...g.rows.map((entry) => {
                             const l = entry.learned;
-                            const k = l?.key;
                             const type = eventTypeOf(entry);
                             const rowHosts = l?.hosts || [];
                             const isFocus = entry.id === focus;
@@ -613,11 +626,6 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
                                 </td>
                                 <td>
                                   <span className={`badge ${EVENT_TYPE_CLASS[type as EventType] || 'badge-type'}`}>{type}</span>
-                                  {k?.in_container && (
-                                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                                      in a container
-                                    </div>
-                                  )}
                                 </td>
                                 <td style={{ maxWidth: '320px', overflowWrap: 'anywhere' }} title={entry.description}>
                                   <span className="mono" style={{ fontSize: '12px' }}>
@@ -626,9 +634,6 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
                                 </td>
                                 <td style={{ maxWidth: '280px', overflowWrap: 'anywhere' }}>
                                   <div className="mono" style={{ fontSize: '12px' }}>{l?.exe_path || '-'}</div>
-                                  <div className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }} title={k?.exe_hash}>
-                                    {k?.exe_hash ? truncateHash(k.exe_hash) : 'no exe hash'}
-                                  </div>
                                 </td>
                                 <td style={{ fontSize: '12px' }}>
                                   {rowHosts.slice(0, 3).map((h) => (

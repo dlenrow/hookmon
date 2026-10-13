@@ -266,7 +266,7 @@ func TestDispositions_WhatIsRecorded(t *testing.T) {
 	if sink.count() != 1 || first.Severity != event.SeverityAlert || res.Action != event.ActionAlert || res.Disposition != event.DispositionFirstSighting {
 		t.Fatalf("inventory program: %d recorded, severity %s, action %s, disposition %s", sink.count(), first.Severity, res.Action, res.Disposition)
 	}
-	want := event.LearnedKey{EventType: event.EventBPFInventory, SubjectKind: "bpf_tag",
+	want := event.LearnedKey{SubjectKind: "bpf_tag",
 		Subject: "aabbccddeeff0011", ProgType: 8}
 	if got := sink.calls[0].key; got != want {
 		t.Errorf("inventory key %+v, want %+v", got, want)
