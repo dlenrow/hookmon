@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import type { HookEvent } from '../api/types';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import type { Disposition, HookEvent } from '../api/types';
 import { getEvent, getEvents } from '../api/client';
 import { SeverityBadge } from '../components/SeverityBadge';
 import { TimelineView } from '../components/TimelineView';
@@ -13,6 +13,14 @@ import {
   ptraceRequestDescription,
   shmPatternDescription,
 } from '../utils';
+
+const DISPOSITION_TEXT: Record<Disposition, string> = {
+  first_sighting: 'First sighting of a new hook: no allowlist entry matched, and it is waiting for a decision.',
+  repeat: 'Repeat of a new hook that is waiting for a decision.',
+  allowed: 'Allowed by an allowlist entry.',
+  denied: 'A denied hook happened again: it alerts every time.',
+  lifecycle: 'Host status event.',
+};
 
 export function Investigation() {
   const { id } = useParams<{ id: string }>();
@@ -630,6 +638,23 @@ export function Investigation() {
                         {event.policy_result.action}
                       </span>
                     </span>
+
+                    {event.policy_result.disposition && (
+                      <>
+                        <span className="detail-label">Disposition</span>
+                        <span className="detail-value" data-testid="disposition-detail">
+                          {DISPOSITION_TEXT[event.policy_result.disposition] || event.policy_result.disposition}
+                          {event.policy_result.disposition === 'first_sighting' && event.policy_result.candidate_id && (
+                            <>
+                              {' '}
+                              <Link to={`/new-hooks?focus=${encodeURIComponent(event.policy_result.candidate_id)}`}>
+                                Decide it on New hooks
+                              </Link>
+                            </>
+                          )}
+                        </span>
+                      </>
+                    )}
 
                     {event.policy_result.matched_entry_id && (
                       <>

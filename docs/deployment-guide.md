@@ -293,15 +293,10 @@ If the collector stops, `HookMonCollectorSilent` fires after about two minutes (
 
 ## Step 5: View the Dashboard
 
-Open `http://<stack-host>:3000/d/hookmon-main/hookmon` in your browser.
+Grafana has two dashboards:
 
-The dashboard refreshes every 5 seconds and shows:
-- Fleet health, per-host status and a 24-hour sensor health grid
-- Sensor and event counters
-- The event timeline from Loki
-- Events by type and severity
-- Recent BPF loads, with the kernel program tag
-- Exec injection detections
+- **Fleet Health** (`http://<stack-host>:3000/d/hookmon-fleet-health`): the SOC watches this. Fleet health banner, per-host status, 24-hour sensor health grid, active sensor and error counts. Refreshes every 5 seconds.
+- **Forensics** (`http://<stack-host>:3000/d/hookmon-forensics`): for investigation. Event rate, events by type and severity, the event timeline from Loki, recent BPF loads and exec injection detections. Refreshes every 30 seconds.
 
 ## Verification
 

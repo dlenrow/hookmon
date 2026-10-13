@@ -123,10 +123,29 @@ export interface ElfRpathDetail {
   is_setuid: boolean;
 }
 
+/**
+ * What the server did with a hook event (the first-sighting model):
+ * - first_sighting: no decided entry matched and this event created the
+ *   PENDING entry for its key. Stored, shown, sent to connectors.
+ * - repeat: a PENDING entry for the key already existed. Counted on it only.
+ * - allowed: matched an ALLOW entry. Dropped.
+ * - denied: matched an ALERT or DENY entry (a rejected hook). Stored and
+ *   alerted every time.
+ * - lifecycle: AGENT_OFFLINE or AGENT_RECOVERED.
+ * Only first_sighting, denied and lifecycle events are stored, so the API
+ * and the live feed never carry repeat or allowed.
+ */
+export type Disposition = 'first_sighting' | 'repeat' | 'allowed' | 'denied' | 'lifecycle';
+
 export interface PolicyResult {
   action: PolicyAction;
   matched_entry_id?: string;
   reason: string;
+  disposition?: Disposition;
+  /** The PENDING entry for the event's key, when there is one. */
+  candidate_id?: string;
+  /** A first sighting during a quiet period: not sent to alert connectors. */
+  quiet?: boolean;
 }
 
 export interface HookEvent {
@@ -164,14 +183,12 @@ export interface UIDRange {
   max: number;
 }
 
-/** The learning-mode dedupe key: what a learned entry matches exactly. */
+/** The learning-mode dedupe key: what was loaded or changed. */
 export interface LearnedKey {
-  event_type: EventType;
-  exe_hash: string;
   subject_kind?: string;
   subject?: string;
+  content_hash?: string;
   prog_type?: number;
-  in_container: boolean;
 }
 
 export interface Learned {
@@ -181,6 +198,8 @@ export interface Learned {
   first_seen: string;
   last_seen: string;
   hosts: string[];
+  /** The stored first-sighting event: the evidence for a new hook. */
+  first_event_id?: string;
 }
 
 export interface AllowlistEntry {
@@ -254,6 +273,27 @@ export interface LearningState {
   windows: LearningWindow[];
 }
 
+/** POST /api/v1/policies/decide: one decision for 1 to 1000 PENDING entries. */
+export type BulkDecision = 'approve' | 'reject';
+
+/**
+ * fleet: each entry applies to every host. seen_hosts: one entry per host
+ * the hook was seen on, and no other host.
+ */
+export type BulkScope = 'fleet' | 'seen_hosts';
+
+export interface DecideResult {
+  id: string;
+  ok: boolean;
+  /** The entries now in force for this hook (one per host for seen_hosts). */
+  entries?: AllowlistEntry[];
+  error?: string;
+}
+
+export interface DecideResponse {
+  results: DecideResult[];
+}
+
 /** A decision on a PENDING entry, or the scope of an entry made from an event. */
 export type Scope = { scope: 'fleet' } | { scope: 'host'; host_id: string };
 
@@ -271,6 +311,15 @@ export interface ConnectorStatus {
   dropped: number;
   failed: number;
   queued: number;
+}
+
+/** GET /api/v1/kernel-upgrades: kernel changes with correlated BPF entries. */
+export interface KernelUpgrade {
+  prev_kernel: string;
+  new_kernel: string;
+  hosts: string[];
+  matched_ids: string[];
+  unmatched_ids: string[];
 }
 
 /** GET /api/v1/settings. It holds no secrets. */

@@ -27,6 +27,7 @@ type polStore struct {
 	hosts     map[string]*event.Host
 	queried   [][]event.EntryStatus
 	decisions []string
+	bulk      []string
 	decideErr error
 	events    map[string]*event.HookEvent
 	updates   int
@@ -81,6 +82,9 @@ func (s *polStore) UpdateAllowlistEntry(_ context.Context, e *event.AllowlistEnt
 	return fmt.Errorf("allowlist entry %s: %w", e.ID, store.ErrNotFound)
 }
 func (s *polStore) GetHosts(context.Context) ([]*event.Host, error) { return nil, nil }
+func (s *polStore) KernelUpgrades(context.Context) ([]event.KernelUpgrade, error) {
+	return nil, nil
+}
 func (s *polStore) GetHost(_ context.Context, id string) (*event.Host, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,6 +151,39 @@ func (s *polStore) DecideCandidate(_ context.Context, id string, decision event.
 		return nil, s.decideErr
 	}
 	return &event.AllowlistEntry{ID: id, Status: decision, HostID: hostID}, nil
+}
+
+// DecideCandidates decides the PENDING entries among s.entries, as the
+// store does for the fleet: unknown IDs and decided entries fail alone.
+func (s *polStore) DecideCandidates(_ context.Context, ids []string, decision event.EntryStatus, scope string) ([]store.CandidateDecision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bulk = append(s.bulk, fmt.Sprintf("%v %s %s", ids, decision, scope))
+	if s.decideErr != nil {
+		return nil, s.decideErr
+	}
+	out := make([]store.CandidateDecision, 0, len(ids))
+	for _, id := range ids {
+		d := store.CandidateDecision{ID: id}
+		var found *event.AllowlistEntry
+		for _, e := range s.entries {
+			if e.ID == id {
+				found = e
+			}
+		}
+		switch {
+		case found == nil:
+			d.Err = fmt.Errorf("allowlist entry %s: %w", id, store.ErrNotFound)
+		case found.Status != event.StatusPending:
+			d.Err = fmt.Errorf("allowlist entry %s is %s: %w", id, found.Status, store.ErrNotPending)
+		default:
+			found.Status = decision
+			c := *found
+			d.Entries = []*event.AllowlistEntry{&c}
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 func (s *polStore) GetLearningWindows(context.Context) ([]event.LearningWindow, error) {

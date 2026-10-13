@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,8 +140,7 @@ func polUTC(e *event.AllowlistEntry) *event.AllowlistEntry {
 }
 
 func polKey(lib string) event.LearnedKey {
-	return event.LearnedKey{EventType: event.EventDlopen, ExeHash: "sha256:" + strings.Repeat("ab", 32),
-		SubjectKind: allowlist.SubjectLibraryPath, Subject: lib}
+	return event.LearnedKey{SubjectKind: allowlist.SubjectDlopen, Subject: lib}
 }
 
 func polPending(t *testing.T, s *Store) map[string]*event.AllowlistEntry {
@@ -162,35 +162,44 @@ func polHosts(e *event.AllowlistEntry) string {
 	return strings.Join(h, ",")
 }
 
-// TestPending_Lifecycle records candidates the way learning mode does and
+// TestPending_Lifecycle records new hooks as the policy engine does and
 // takes one key through per-host approval, per-host rejection and fleet
-// approval, checking counts, hosts and times at each step.
+// approval, checking counts, hosts, times and the first event at each step.
 func TestPending_Lifecycle(t *testing.T) {
 	s, _ := polMigrated(t)
 	ctx := context.Background()
 	t0 := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	kA, kB := polKey("/opt/a.so"), polKey("/opt/b.so")
-	rec := func(k event.LearnedKey, host string, at time.Time) string {
+	recS := func(k event.LearnedKey, host, eventID string, at time.Time) event.CandidateSighting {
 		t.Helper()
-		id, err := s.RecordCandidate(ctx, k, "/usr/bin/app", allowlist.Describe(k, "/usr/bin/app"), host, at)
+		sg, err := s.RecordCandidate(ctx, k, "/usr/bin/app", allowlist.Describe(k, "/usr/bin/app"), host, eventID, at)
 		if err != nil {
 			t.Fatalf("RecordCandidate: %v", err)
 		}
-		return id
+		return sg
+	}
+	rec := func(k event.LearnedKey, host string, at time.Time) string {
+		t.Helper()
+		return recS(k, host, "", at).ID
 	}
 
-	id1 := rec(kA, "host-a", t0.Add(time.Minute))
-	id2 := rec(kA, "host-b", t0.Add(3*time.Minute))
-	id3 := rec(kA, "host-a", t0) // arrives late, with an earlier timestamp
-	idB := rec(kB, "host-a", t0)
-	if id1 == "" || id1 != id2 || id1 != id3 || idB == "" || idB == id1 {
-		t.Fatalf("ids: %q %q %q %q; want one entry per key", id1, id2, id3, idB)
+	s1 := recS(kA, "host-a", "ev-1", t0.Add(time.Minute))
+	s2 := recS(kA, "host-b", "ev-2", t0.Add(3*time.Minute))
+	s3 := recS(kA, "host-a", "ev-3", t0) // arrives late, with an earlier timestamp
+	sB := recS(kB, "host-a", "ev-b", t0)
+	id1, idB := s1.ID, sB.ID
+	if id1 == "" || id1 != s2.ID || id1 != s3.ID || idB == "" || idB == id1 {
+		t.Fatalf("ids: %q %q %q %q; want one entry per key", id1, s2.ID, s3.ID, idB)
+	}
+	if !s1.Created || s2.Created || s3.Created || !sB.Created {
+		t.Fatalf("created: %v %v %v %v; want only each key's first event", s1.Created, s2.Created, s3.Created, sB.Created)
 	}
 	p := polPending(t, s)
 	a := p["/opt/a.so"]
 	if len(p) != 2 || a.Status != event.StatusPending || a.Action != event.ActionAlert || !a.Enabled ||
 		a.Learned.Occurrences != 3 || !a.Learned.FirstSeen.Equal(t0) || !a.Learned.LastSeen.Equal(t0.Add(3*time.Minute)) ||
 		polHosts(a) != "host-a,host-b" || a.Learned.Key != kA || a.Learned.ExePath != "/usr/bin/app" ||
+		a.Learned.FirstEventID != "ev-1" ||
 		a.CreatedBy != LearningCreator || !reflect.DeepEqual(a.EventTypes, []event.EventType{event.EventDlopen}) {
 		t.Fatalf("PENDING entry for a.so: %+v learned %+v", a, a.Learned)
 	}
@@ -204,15 +213,16 @@ func TestPending_Lifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if hA.ID == id1 || hA.HostID != "host-a" || hA.Status != event.StatusApproved || hA.Action != event.ActionAllow ||
-		hA.Learned == nil || hA.Learned.Key != kA || polHosts(hA) != "host-a" {
+		hA.Learned == nil || hA.Learned.Key != kA || polHosts(hA) != "host-a" || hA.Learned.FirstEventID != "ev-1" {
 		t.Fatalf("host approval: %+v", hA)
 	}
 	if a = polPending(t, s)["/opt/a.so"]; a == nil || polHosts(a) != "host-b" || a.Learned.Occurrences != 3 {
 		t.Fatalf("PENDING after approving for host-a: %+v", a)
 	}
-	// host-a is covered now: nothing recorded. host-c adds to the candidate.
-	if id := rec(kA, "host-a", t0.Add(4*time.Minute)); id != "" {
-		t.Errorf("recorded a key already approved for the host: %q", id)
+	// host-a is covered now: nothing recorded, and the sighting names the
+	// decision. host-c adds to the candidate.
+	if sg := recS(kA, "host-a", "", t0.Add(4*time.Minute)); sg.ID != "" || sg.Created || sg.DecidedAction != event.ActionAllow {
+		t.Errorf("recorded a key already approved for the host: %+v", sg)
 	}
 	if id := rec(kA, "host-c", t0.Add(5*time.Minute)); id != id1 {
 		t.Errorf("host-c: id %q, want %q", id, id1)
@@ -226,8 +236,8 @@ func TestPending_Lifecycle(t *testing.T) {
 	if err != nil || rB.Status != event.StatusRejected || rB.Action != event.ActionAlert || rB.HostID != "host-b" {
 		t.Fatalf("host rejection: %+v, %v", rB, err)
 	}
-	if id := rec(kA, "host-b", t0.Add(6*time.Minute)); id != "" {
-		t.Errorf("recorded a key rejected for the host: %q", id)
+	if sg := recS(kA, "host-b", "", t0.Add(6*time.Minute)); sg.ID != "" || sg.DecidedAction != event.ActionAlert {
+		t.Errorf("recorded a key rejected for the host: %+v", sg)
 	}
 
 	// Approve the rest for the fleet: the PENDING entry itself changes.
@@ -240,6 +250,11 @@ func TestPending_Lifecycle(t *testing.T) {
 	}
 	if id := rec(kA, "host-z", t0.Add(7*time.Minute)); id != "" {
 		t.Errorf("recorded a key approved for the fleet: %q", id)
+	}
+	// On host-b both the fleet approval and the host rejection apply: the
+	// rejection, the more restrictive, is the one reported.
+	if sg := recS(kA, "host-b", "", t0.Add(7*time.Minute)); sg.ID != "" || sg.DecidedAction != event.ActionAlert {
+		t.Errorf("host-b under a fleet approval and a host rejection: %+v, want ALERT", sg)
 	}
 	if _, err := s.DecideCandidate(ctx, id1, event.StatusRejected, ""); !errors.Is(err, ErrNotPending) {
 		t.Errorf("deciding a decided entry: %v, want ErrNotPending", err)
@@ -289,14 +304,19 @@ func TestPending_ConcurrentRecords(t *testing.T) {
 	s, _ := polMigrated(t)
 	k := polKey("/opt/hot.so")
 	var wg sync.WaitGroup
+	var created atomic.Int32
 	errs := make(chan error, 200)
 	for g := 0; g < 8; g++ {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < 25; i++ {
-				if _, err := s.RecordCandidate(context.Background(), k, "/usr/bin/app", "d", fmt.Sprintf("host-%d", g%3), time.Now()); err != nil {
+				sg, err := s.RecordCandidate(context.Background(), k, "/usr/bin/app", "d", fmt.Sprintf("host-%d", g%3), fmt.Sprintf("ev-%d-%d", g, i), time.Now())
+				if err != nil {
 					errs <- err
+				}
+				if sg.Created {
+					created.Add(1)
 				}
 			}
 		}(g)
@@ -310,6 +330,102 @@ func TestPending_ConcurrentRecords(t *testing.T) {
 	if len(p) != 1 || p["/opt/hot.so"].Learned.Occurrences != 200 || polHosts(p["/opt/hot.so"]) != "host-0,host-1,host-2" {
 		t.Fatalf("PENDING: %d entries, %+v", len(p), p["/opt/hot.so"].Learned)
 	}
+	if n := created.Load(); n != 1 {
+		t.Errorf("first sightings among 200 concurrent events of one key: %d, want 1", n)
+	}
+}
+
+// TestDecideCandidates_Bulk: several PENDING entries decided in one call,
+// for the fleet or for the hosts each was seen on; IDs that are missing,
+// not PENDING, repeated or (for seen_hosts) without hosts fail alone.
+func TestDecideCandidates_Bulk(t *testing.T) {
+	s, _ := polMigrated(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC)
+	rec := func(k event.LearnedKey, host, eventID string) string {
+		t.Helper()
+		sg, err := s.RecordCandidate(ctx, k, "/usr/bin/app", allowlist.Describe(k, "/usr/bin/app"), host, eventID, t0)
+		if err != nil || sg.ID == "" {
+			t.Fatalf("RecordCandidate: %+v %v", sg, err)
+		}
+		return sg.ID
+	}
+	kA, kB, kC, kD := polKey("/opt/a.so"), polKey("/opt/b.so"), polKey("/opt/c.so"), polKey("/opt/d.so")
+	idA := rec(kA, "host-a", "ev-a")
+	rec(kA, "host-b", "ev-a2")
+	idB := rec(kB, "host-a", "ev-b")
+	idC := rec(kC, "host-c", "ev-c")
+	idD := rec(kD, "host-d", "ev-d")
+	if _, err := s.pool.Exec(ctx, `UPDATE allowlist SET seen_hosts = '{}' WHERE id = $1`, idD); err != nil {
+		t.Fatal(err)
+	}
+
+	// For the hosts each was seen on.
+	out, err := s.DecideCandidates(ctx, []string{idA, "no-such-id", idB, idA, idD}, event.StatusApproved, ScopeSeenHosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 5 {
+		t.Fatalf("%d results, want 5", len(out))
+	}
+	if d := out[0]; d.ID != idA || d.Err != nil || len(d.Entries) != 2 {
+		t.Fatalf("a.so: %+v", d)
+	}
+	hostsOf := map[string]bool{}
+	for _, e := range out[0].Entries {
+		hostsOf[e.HostID] = true
+		if e.Status != event.StatusApproved || e.Action != event.ActionAllow || e.Learned == nil ||
+			e.Learned.Key != kA || e.Learned.FirstEventID != "ev-a" || polHosts(e) != e.HostID {
+			t.Errorf("a.so entry: %+v %+v", e, e.Learned)
+		}
+	}
+	if !hostsOf["host-a"] || !hostsOf["host-b"] {
+		t.Errorf("a.so entries for hosts %v, want host-a and host-b", hostsOf)
+	}
+	if !errors.Is(out[1].Err, ErrNotFound) {
+		t.Errorf("missing ID: %v", out[1].Err)
+	}
+	if d := out[2]; d.Err != nil || len(d.Entries) != 1 || d.Entries[0].HostID != "host-a" {
+		t.Errorf("b.so: %+v", d)
+	}
+	if out[3].Err == nil || !strings.Contains(out[3].Err.Error(), "more than once") {
+		t.Errorf("repeated ID: %v", out[3].Err)
+	}
+	if out[4].Err == nil || !strings.Contains(out[4].Err.Error(), "no hosts") {
+		t.Errorf("entry without hosts: %v", out[4].Err)
+	}
+	p := polPending(t, s)
+	if _, ok := p["/opt/a.so"]; ok || len(p) != 2 || p["/opt/c.so"] == nil || p["/opt/d.so"] == nil {
+		t.Errorf("PENDING after seen_hosts: %v", p)
+	}
+
+	// For the fleet: the PENDING entry itself is decided.
+	out, err = s.DecideCandidates(ctx, []string{idC, idA}, event.StatusRejected, ScopeFleet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := out[0]; d.Err != nil || len(d.Entries) != 1 || d.Entries[0].ID != idC ||
+		d.Entries[0].Status != event.StatusRejected || d.Entries[0].Action != event.ActionAlert || d.Entries[0].HostID != "" {
+		t.Errorf("c.so for the fleet: %+v", d)
+	}
+	if !errors.Is(out[1].Err, ErrNotFound) {
+		t.Errorf("a.so, no longer PENDING (deleted): %v", out[1].Err)
+	}
+	cur, err := s.GetAllowlistEntry(ctx, idC)
+	if err != nil || cur.Status != event.StatusRejected {
+		t.Errorf("c.so as stored: %+v %v", cur, err)
+	}
+	out, err = s.DecideCandidates(ctx, []string{idC}, event.StatusApproved, ScopeFleet)
+	if err != nil || !errors.Is(out[0].Err, ErrNotPending) {
+		t.Errorf("deciding a decided entry: %+v %v", out, err)
+	}
+
+	if _, err := s.DecideCandidates(ctx, []string{idD}, event.StatusApproved, "host"); err == nil {
+		t.Error("accepted scope host")
+	}
+	if _, err := s.DecideCandidates(ctx, []string{idD}, event.StatusPending, ScopeFleet); err == nil {
+		t.Error("accepted decision PENDING")
+	}
 }
 
 // TestPending_LongSubject: a key with a path longer than a btree index
@@ -318,7 +434,7 @@ func TestPending_LongSubject(t *testing.T) {
 	s, _ := polMigrated(t)
 	k := polKey(strings.Repeat("/very-long-directory-name", 400))
 	for i := 0; i < 2; i++ {
-		if _, err := s.RecordCandidate(context.Background(), k, "", "d", "h", time.Now()); err != nil {
+		if _, err := s.RecordCandidate(context.Background(), k, "", "d", "h", "", time.Now()); err != nil {
 			t.Fatalf("record %d: %v", i, err)
 		}
 	}

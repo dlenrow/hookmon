@@ -326,8 +326,9 @@ func TestAPI_RealStore_PolicyWritesReachTheEngine(t *testing.T) {
 		t.Errorf("after delete: %s %s", a, id)
 	}
 
-	// Learning for one host: its unmatched events become PENDING entries;
-	// the other host's do not.
+	// Every unmatched key becomes a PENDING entry, the first time it is
+	// seen; repeats only count. A learning window (quiet period) for one
+	// host marks that host's first sightings quiet, and no other host's.
 	var lv map[string]any
 	if code := s.do(t, http.MethodPut, "/api/v1/learning/hosts/h-1", `{"duration":"1h"}`, &lv); code != http.StatusOK {
 		t.Fatalf("PUT learning: %d", code)
@@ -335,17 +336,32 @@ func TestAPI_RealStore_PolicyWritesReachTheEngine(t *testing.T) {
 	if !s.engine.Learning("h-1") || s.engine.Learning("h-2") {
 		t.Fatalf("learning: h-1 %v, h-2 %v", s.engine.Learning("h-1"), s.engine.Learning("h-2"))
 	}
+	var learnedResults []*event.PolicyResult
 	for i := 0; i < 3; i++ {
-		action(t7hDlopen("l1", "h-1", "/opt/learned/x.so"))
+		learnedResults = append(learnedResults, s.engine.Evaluate(t7hDlopen("l1", "h-1", "/opt/learned/x.so")))
 	}
-	action(t7hDlopen("l2", "h-2", "/opt/other/y.so"))
+	if r := learnedResults[0]; r.Disposition != event.DispositionFirstSighting || !r.Quiet || r.CandidateID == "" {
+		t.Errorf("first l1 in h-1's quiet period: %+v", r)
+	}
+	if r := learnedResults[2]; r.Disposition != event.DispositionRepeat || r.CandidateID != learnedResults[0].CandidateID {
+		t.Errorf("third l1: %+v", r)
+	}
+	if r := s.engine.Evaluate(t7hDlopen("l2", "h-2", "/opt/other/y.so")); r.Disposition != event.DispositionFirstSighting || r.Quiet {
+		t.Errorf("l2 on h-2, outside any quiet period: %+v", r)
+	}
 	var pending []*event.AllowlistEntry
-	if code := s.do(t, http.MethodGet, "/api/v1/policies?status=PENDING", "", &pending); code != http.StatusOK || len(pending) != 1 {
-		t.Fatalf("PENDING: %d %+v", code, pending)
+	if code := s.do(t, http.MethodGet, "/api/v1/policies?status=PENDING", "", &pending); code != http.StatusOK {
+		t.Fatalf("PENDING: %d", code)
 	}
-	p := pending[0]
-	if p.Learned == nil || p.Learned.Occurrences != 3 || !reflect.DeepEqual(p.Learned.Hosts, []string{"h-1"}) || p.Learned.Key.Subject == "" {
-		t.Errorf("PENDING entry: %+v %+v", p, p.Learned)
+	var p *event.AllowlistEntry
+	for _, e := range pending {
+		if e.ID == learnedResults[0].CandidateID {
+			p = e
+		}
+	}
+	if p == nil || p.Learned == nil || p.Learned.Occurrences != 3 || !reflect.DeepEqual(p.Learned.Hosts, []string{"h-1"}) ||
+		p.Learned.Key.Subject == "" || p.Learned.FirstEventID != "l1" {
+		t.Fatalf("PENDING entry for l1: %+v in %d entries", p, len(pending))
 	}
 	var windows struct {
 		Windows []struct {
@@ -378,16 +394,16 @@ func TestAPI_RealStore_PolicyWritesReachTheEngine(t *testing.T) {
 		t.Errorf("rejecting an approved entry: %d, want 409", code)
 	}
 
-	// Stop learning: no more candidates.
+	// Stop the quiet period: first sightings are no longer quiet, and are
+	// still recorded.
 	if code := s.do(t, http.MethodDelete, "/api/v1/learning/hosts/h-1", "", nil); code != http.StatusNoContent {
 		t.Errorf("DELETE learning: %d", code)
 	}
 	if s.engine.Learning("h-1") {
 		t.Error("learning still on after DELETE")
 	}
-	action(t7hDlopen("l5", "h-1", "/opt/after/z.so"))
-	if s.do(t, http.MethodGet, "/api/v1/policies?status=PENDING", "", &pending); len(pending) != 0 {
-		t.Errorf("PENDING after learning stopped: %+v", pending)
+	if r := s.engine.Evaluate(t7hDlopen("l5", "h-1", "/opt/after/z.so")); r.Disposition != event.DispositionFirstSighting || r.Quiet {
+		t.Errorf("l5 after the quiet period: %+v", r)
 	}
 
 	// "Allowlist this event", from a stored event, for the fleet.
@@ -402,5 +418,105 @@ func TestAPI_RealStore_PolicyWritesReachTheEngine(t *testing.T) {
 	}
 	if a, id := action(t7hDlopen("ev-2", "h-1", "/opt/store/s.so")); a != event.ActionAllow || id != fromEvent.ID {
 		t.Errorf("after allowlisting the event: %s %s, want ALLOW by %s", a, id, fromEvent.ID)
+	}
+}
+
+// TestAPI_RealStore_AllowlistEventDecidesPending: "Allowlist this event" on
+// a new hook's first sighting decides the hook's PENDING entry instead of
+// adding a second entry, so the hook leaves the list of new hooks. For the
+// fleet the PENDING entry itself is approved; for one host a host-scoped
+// entry is made and the host comes off the PENDING entry, which is deleted
+// when no host is left.
+func TestAPI_RealStore_AllowlistEventDecidesPending(t *testing.T) {
+	s := t7hNewStack(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, id := range []string{"h-1", "h-2"} {
+		if err := s.store.EnrollHost(ctx, &event.Host{ID: id, Hostname: id, Status: event.HostOnline, EnrolledAt: now, LastHeartbeat: now}, "t7h", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ingest evaluates an event and stores it if the server would.
+	ingest := func(e *event.HookEvent) *event.PolicyResult {
+		t.Helper()
+		r := s.engine.Evaluate(e)
+		if r.Disposition.Kept() {
+			if err := s.store.InsertEvent(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return r
+	}
+	pendingEntry := func(id string) *event.AllowlistEntry {
+		t.Helper()
+		var pending []*event.AllowlistEntry
+		if code := s.do(t, http.MethodGet, "/api/v1/policies?status=PENDING", "", &pending); code != http.StatusOK {
+			t.Fatalf("PENDING: %d", code)
+		}
+		for _, p := range pending {
+			if p.ID == id {
+				return p
+			}
+		}
+		return nil
+	}
+
+	// Fleet: the PENDING entry itself is approved.
+	first := ingest(t7hDlopen("fs-1", "h-1", "/opt/fleet/a.so"))
+	if first.Disposition != event.DispositionFirstSighting || first.CandidateID == "" {
+		t.Fatalf("fs-1: %+v", first)
+	}
+	if r := ingest(t7hDlopen("fs-2", "h-2", "/opt/fleet/a.so")); r.Disposition != event.DispositionRepeat {
+		t.Fatalf("fs-2: %+v", r)
+	}
+	var fleet event.AllowlistEntry
+	if code := s.do(t, http.MethodPost, "/api/v1/events/fs-1/allowlist", `{"scope":"fleet"}`, &fleet); code != http.StatusCreated {
+		t.Fatalf("allowlist fs-1 for the fleet: %d", code)
+	}
+	if fleet.ID != first.CandidateID || fleet.Status != event.StatusApproved || fleet.HostID != "" ||
+		fleet.Learned == nil || fleet.Learned.FirstEventID != "fs-1" {
+		t.Errorf("fleet answer: %+v %+v", fleet, fleet.Learned)
+	}
+	if p := pendingEntry(first.CandidateID); p != nil {
+		t.Errorf("still PENDING after allowlisting its event: %+v", p)
+	}
+	var inForce []*event.AllowlistEntry
+	s.do(t, http.MethodGet, "/api/v1/policies", "", &inForce)
+	if len(inForce) != 1 || inForce[0].ID != first.CandidateID {
+		t.Errorf("entries in force: %+v, want only the approved PENDING entry", inForce)
+	}
+	if r := ingest(t7hDlopen("fs-3", "h-2", "/opt/fleet/a.so")); r.Disposition != event.DispositionAllowed || r.MatchedEntryID != fleet.ID {
+		t.Errorf("fs-3 after the fleet approval: %+v", r)
+	}
+
+	// One host at a time: a hook seen on h-1 and h-2.
+	hs := ingest(t7hDlopen("hs-1", "h-1", "/opt/host/b.so"))
+	ingest(t7hDlopen("hs-2", "h-2", "/opt/host/b.so"))
+	var forH1 event.AllowlistEntry
+	if code := s.do(t, http.MethodPost, "/api/v1/events/hs-1/allowlist", `{"scope":"host","description":"plugin ok"}`, &forH1); code != http.StatusCreated {
+		t.Fatalf("allowlist hs-1 for its host: %d", code)
+	}
+	if forH1.HostID != "h-1" || forH1.ID == hs.CandidateID || forH1.Status != event.StatusApproved || forH1.Description != "plugin ok" {
+		t.Errorf("host answer: %+v", forH1)
+	}
+	if p := pendingEntry(hs.CandidateID); p == nil || !reflect.DeepEqual(p.Learned.Hosts, []string{"h-2"}) {
+		t.Errorf("PENDING after h-1's decision: %+v, want h-2 left", p)
+	}
+	if r := ingest(t7hDlopen("hs-3", "h-1", "/opt/host/b.so")); r.Disposition != event.DispositionAllowed || r.MatchedEntryID != forH1.ID {
+		t.Errorf("hs-3 on h-1: %+v", r)
+	}
+	if r := s.engine.Evaluate(t7hDlopen("hs-4", "h-2", "/opt/host/b.so")); r.Disposition != event.DispositionRepeat {
+		t.Errorf("hs-4 on h-2, still undecided there: %+v", r)
+	}
+	// An event from h-2 with the key (stored as a denied one would be).
+	if err := s.store.InsertEvent(ctx, t7hDlopen("hs-5", "h-2", "/opt/host/b.so")); err != nil {
+		t.Fatal(err)
+	}
+	var forH2 event.AllowlistEntry
+	if code := s.do(t, http.MethodPost, "/api/v1/events/hs-5/allowlist", `{"scope":"host"}`, &forH2); code != http.StatusCreated || forH2.HostID != "h-2" {
+		t.Fatalf("allowlist hs-5 for its host: %d %+v", code, forH2)
+	}
+	if p := pendingEntry(hs.CandidateID); p != nil {
+		t.Errorf("PENDING entry left after its last host was decided: %+v", p)
 	}
 }

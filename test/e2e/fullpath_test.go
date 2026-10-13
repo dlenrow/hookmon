@@ -16,8 +16,10 @@ package e2e
 //
 // and checks each hop by event ID: the row in PostgreSQL with its policy
 // result, the webhook body, and the WebSocket message. The canary is loaded
-// twice, before and after an ALLOW entry for it, so the policy result
-// differs and must be the same at every hop.
+// twice. The first load is a first sighting: it reaches every hop with the
+// same policy result, and its PENDING entry names it as the first event.
+// After that entry is approved through the API, the second load reaches
+// none of them: an allowed hook is dropped.
 //
 // It needs, besides what every e2e test needs:
 //   - HOOKMON_TEST_PG_DSN: a PostgreSQL the test can create a schema in
@@ -482,27 +484,97 @@ connectors:
 	}
 	first := feed.wait(t, 30*time.Second, "the first canary BPF_LOAD", isCanary())
 	check("canary 1, no entry", first, event.ActionAlert, "", event.SeverityCritical)
-
-	// Hop 4, policy: an ALLOW entry for the canary through the REST API
-	// takes effect without a restart.
-	var entry event.AllowlistEntry
-	if code := apiCall(http.MethodPost, "/api/v1/policies",
-		`{"description":"full-path e2e: the canary","event_types":["BPF_LOAD"],"prog_name":"hello_count","action":"ALLOW","enabled":true}`, &entry); code != http.StatusCreated || entry.ID == "" {
-		t.Fatalf("POST /api/v1/policies: %d %+v", code, entry)
+	if r := first.PolicyResult; r.Disposition != event.DispositionFirstSighting || r.CandidateID == "" {
+		t.Fatalf("canary 1: %+v, want a first sighting with a candidate", r)
 	}
-	t.Logf("hop 4, policy: ALLOW entry %s for prog_name hello_count", entry.ID)
+
+	// Hop 4, policy: the canary's first sighting made a PENDING entry,
+	// whose first event is the canary event. Approving it for the fleet
+	// through the REST API takes effect without a restart.
+	var pending []*event.AllowlistEntry
+	if code := apiCall(http.MethodGet, "/api/v1/policies?status=PENDING", "", &pending); code != http.StatusOK {
+		t.Fatalf("GET PENDING: %d", code)
+	}
+	var cand *event.AllowlistEntry
+	for _, p := range pending {
+		if p.ID == first.PolicyResult.CandidateID {
+			cand = p
+		}
+	}
+	if cand == nil || cand.Learned == nil || cand.Learned.FirstEventID != first.ID || cand.Learned.Key.Subject != first.BPFDetail.ProgHash {
+		t.Fatalf("PENDING entry %s: %+v, want first_event_id %s", first.PolicyResult.CandidateID, cand, first.ID)
+	}
+	var entry event.AllowlistEntry
+	if code := apiCall(http.MethodPost, "/api/v1/policies/"+cand.ID+"/approve", `{"scope":"fleet"}`, &entry); code != http.StatusOK ||
+		entry.ID != cand.ID || entry.Status != event.StatusApproved {
+		t.Fatalf("approve %s: %d %+v", cand.ID, code, entry)
+	}
+	t.Logf("hop 4, policy: approved PENDING entry %s (%s) for the fleet", entry.ID, entry.Description)
+
+	// The canary again: allowed, so dropped. A different program loaded
+	// after it (hello_count_v2, a new hook) is the marker: the bus sends its
+	// events in order, so once the marker is stored and delivered, the
+	// second canary load has been evaluated.
 	if err := LoadCanary(canaryBinDir()+"/load_canary", canaryDir()+"/hello_bpf.o",
 		"syscalls", "sys_enter_getpid", "hello_count"); err != nil {
 		t.Fatalf("load canary: %v", err)
 	}
-	second := feed.wait(t, 30*time.Second, "the second canary BPF_LOAD", isCanary(first.ID))
-	check("canary 2, ALLOW entry", second, event.ActionAllow, entry.ID, event.SeverityInfo)
-	if second.BPFDetail.ProgHash != first.BPFDetail.ProgHash {
-		t.Errorf("the same bytecode has two tags: %s and %s", first.BPFDetail.ProgHash, second.BPFDetail.ProgHash)
+	if err := LoadCanary(canaryBinDir()+"/load_canary", canaryDir()+"/hello_bpf_v2.o",
+		"syscalls", "sys_enter_getpid", "hello_count_v2"); err != nil {
+		t.Fatalf("load marker canary: %v", err)
 	}
+	marker := feed.wait(t, 30*time.Second, "the marker BPF_LOAD (hello_count_v2)", func(e *event.HookEvent) bool {
+		return e.EventType == event.EventBPFLoad && e.BPFDetail != nil && e.BPFDetail.ProgName == "hello_count_v2"
+	})
+	if r := marker.PolicyResult; r == nil || r.Disposition != event.DispositionFirstSighting {
+		t.Errorf("marker: %+v, want a first sighting", r)
+	}
+	t7hWaitRow(t, schemaDSN, marker.ID)
+	t7hWaitHook(t, hook, marker.ID, 15*time.Second)
 
+	// The second canary load reached none of the three.
+	canaryLoads := func(evts []*event.HookEvent) int {
+		n := 0
+		for _, e := range evts {
+			if isCanary()(e) {
+				n++
+			}
+		}
+		return n
+	}
 	feed.mu.Lock()
+	onFeed := canaryLoads(feed.events)
 	n := len(feed.events)
 	feed.mu.Unlock()
-	t.Logf("WebSocket received %d events, the webhook %d", n, hook.count())
+	if onFeed != 1 {
+		t.Errorf("canary BPF_LOADs on the WebSocket: %d, want 1 (the allowed second load is dropped)", onFeed)
+	}
+	hook.mu.Lock()
+	atHook := canaryLoads(hook.events)
+	hook.mu.Unlock()
+	if atHook != 1 {
+		t.Errorf("canary BPF_LOADs at the webhook: %d, want 1", atHook)
+	}
+	if rows := t7hCanaryRows(t, schemaDSN); rows != 1 {
+		t.Errorf("canary BPF_LOAD rows in PostgreSQL: %d, want 1", rows)
+	}
+	t.Logf("second canary load: on the WebSocket %d, at the webhook %d, in PostgreSQL %d (each only the first); WebSocket received %d events, the webhook %d",
+		onFeed, atHook, t7hCanaryRows(t, schemaDSN), n, hook.count())
+}
+
+// t7hCanaryRows counts the stored BPF_LOAD events of the hello_count canary.
+func t7hCanaryRows(t *testing.T, dsn string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to the test schema: %v", err)
+	}
+	defer conn.Close(ctx)
+	var n int
+	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM events WHERE event_type = 'BPF_LOAD' AND bpf_detail->>'prog_name' = 'hello_count'`).Scan(&n); err != nil {
+		t.Fatalf("count canary rows: %v", err)
+	}
+	return n
 }

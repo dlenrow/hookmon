@@ -36,6 +36,8 @@ type recordingTransport struct {
 
 func (t *recordingTransport) Run(ctx context.Context) error { <-ctx.Done(); return nil }
 func (t *recordingTransport) SendHeartbeat() error          { return nil }
+func (t *recordingTransport) SendShutdown(_ string) error   { return nil }
+func (t *recordingTransport) SendMarker() error             { return nil }
 func (t *recordingTransport) IsConnected() bool             { return true }
 func (t *recordingTransport) Close() error                  { return nil }
 func (t *recordingTransport) SendEvent(evt *event.HookEvent) error {

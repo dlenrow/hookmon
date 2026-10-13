@@ -21,6 +21,7 @@ import (
 	"time"
 	_ "time/tzdata" // TZ=America/New_York works without the system zone files
 
+	"github.com/dlenrow/hookmon/pkg/allowlist"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -227,8 +228,9 @@ func TestStore_TimesReadBackInUTC(t *testing.T) {
 		Action: event.ActionAllow, Enabled: true, Expires: &expires}); err != nil {
 		t.Fatal(err)
 	}
-	key := event.LearnedKey{EventType: event.EventDlopen, SubjectKind: "library_path", Subject: "/opt/x.so"}
-	pendingID, err := s.RecordCandidate(ctx, key, "/usr/bin/app", "learned", "h-1", base.Add(2*time.Minute))
+	key := event.LearnedKey{SubjectKind: allowlist.SubjectDlopen, Subject: "/opt/x.so"}
+	sighting, err := s.RecordCandidate(ctx, key, "/usr/bin/app", "learned", "h-1", "e1", base.Add(2*time.Minute))
+	pendingID := sighting.ID
 	if err != nil || pendingID == "" {
 		t.Fatalf("RecordCandidate: %q %v", pendingID, err)
 	}

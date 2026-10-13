@@ -39,11 +39,17 @@ type Store interface {
 	// DecideCandidate approves or rejects a PENDING entry for the fleet
 	// (hostID "") or one host; store.ErrNotPending if it is not PENDING.
 	DecideCandidate(ctx context.Context, id string, decision event.EntryStatus, hostID string) (*event.AllowlistEntry, error)
+	// DecideCandidates decides several PENDING entries in one transaction,
+	// for the fleet (store.ScopeFleet) or the hosts each was seen on
+	// (store.ScopeSeenHosts). Per-ID failures are in the results; an error
+	// means nothing changed.
+	DecideCandidates(ctx context.Context, ids []string, decision event.EntryStatus, scope string) ([]store.CandidateDecision, error)
 	GetLearningWindows(ctx context.Context) ([]event.LearningWindow, error)
 	SetLearningWindow(ctx context.Context, w event.LearningWindow) error
 	DeleteLearningWindow(ctx context.Context, hostID string) error
 	GetHosts(ctx context.Context) ([]*event.Host, error)
 	GetHost(ctx context.Context, id string) (*event.Host, error)
+	KernelUpgrades(ctx context.Context) ([]event.KernelUpgrade, error)
 }
 
 // handleListEvents lists stored events, newest first. A query parameter

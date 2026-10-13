@@ -154,6 +154,28 @@ The allowlist is active. Known-good events log at INFO. Anything new raises an a
 **Phase 3: Enforcement (does not exist)**
 The idea was that the bus could block unauthorized BPF loads or LD_PRELOAD use. No code for this exists, and the fix plan does not add it. HookMon is read-only.
 
+### First-Sighting Triage
+
+Every event the server processes receives one of five dispositions:
+
+| Disposition | Meaning |
+|-------------|---------|
+| `first_sighting` | The server has never seen this key before. A PENDING allowlist entry is created and the first event is stored for investigation |
+| `repeat` | The key has a PENDING entry: same hook seen again. The entry's count and `last_seen` increment; no second alert |
+| `allowed` | The key matches an APPROVED ALLOW entry. Logged at INFO, no alert |
+| `denied` | The key matches a REJECTED or DENY entry. Alerts every time |
+| `lifecycle` | Server-generated events (AGENT_OFFLINE, AGENT_RECOVERED) that do not go through the allowlist |
+
+The first sighting is the only alert for a given hook. Its repeats silently add to the PENDING entry's count until the operator allows or denies it. This keeps the steady-state alert rate proportional to the number of *distinct new hooks*, not the volume of events.
+
+### Kernel Upgrade Correlation
+
+A kernel upgrade can change BPF program tags: the kernel computes the tag over the program's instructions, and the same object file can produce different instructions on different kernels. After an upgrade, previously allowed programs appear as first sightings with new tags.
+
+The bus sends `kernel_release` (from `uname -r`) in every heartbeat. The server records the current and previous kernel release per host, with a timestamp. When the kernel changes, the server marks the transition.
+
+`GET /api/v1/kernel-upgrades` lists hosts that recently changed kernels and correlates their PENDING BPF entries against the APPROVED entries from the old kernel, matching on program name and type. Entries that match a previously allowed program can be approved in one action from the dashboard; entries that don't match need investigation.
+
 ## How HookMon Monitors the Monitors
 
 An operational question few tools answer:
@@ -291,11 +313,11 @@ The base rate of legitimate *new* events, those not already in the allowlist, sh
 The allowlist does not need to be written by hand from documentation or vendor lists. Learning mode observes the fleet:
 
 1. Turn on learning mode for the fleet, or for some hosts, with an end time.
-2. For the learning period, every event that matches no entry is recorded by its key: event type, exe hash, subject (BPF program tag and type, library hash or path, file path, or the shared memory pattern), and whether it ran in a container.
-3. The server keeps one PENDING allowlist entry per key, with its count, first and last time seen, and the hosts that saw it.
+2. For the learning period, every event that matches no entry is recorded by its key: event type and a subject that identifies *what was loaded* — the BPF program tag and type, the library hash, the file path, or the shared memory pattern. The key does not include the loading process's exe hash, so the same program loaded by different binaries (an update that changes the loader but not the loaded program) is one entry, not many.
+3. The server keeps one PENDING allowlist entry per key, with its count, first and last time seen, the hosts that saw it, and the first event's ID (for investigation).
 4. Security operations reviews the entries and approves or rejects each one, for the fleet or for one host.
 
-When learning ends and monitoring starts, the allowlist records what the infrastructure actually does. An approved entry allows exactly the tuple that was seen, so a new binary version, a changed library or a new BPF program is new again. Descriptions are generated ("learned: BPF_LOAD by /usr/bin/foo: BPF tag …, prog type 8"); edit them, or disable an entry, in the dashboard's Policy Manager or with `PUT` / `PATCH /api/v1/policies/{id}`. The learned tuple itself cannot be edited. The [allowlist guide](allowlist-guide.md) covers learning, review and the pitfalls.
+When learning ends and monitoring starts, the allowlist records what the infrastructure actually does. An approved entry allows exactly the hook that was seen, so a new BPF tag (from a code change or a kernel upgrade) or a new library hash is new again, but a new version of the loader that loads the same program is not. Descriptions are generated ("learned: BPF_LOAD: BPF tag …, prog type 8"); edit them, or disable an entry, in the dashboard's Policy Manager or with `PUT` / `PATCH /api/v1/policies/{id}`. The learned tuple itself cannot be edited. The [allowlist guide](allowlist-guide.md) covers learning, review and the pitfalls.
 
 ### Operational Consequences
 
@@ -338,23 +360,28 @@ This does not cover an attacker with root on the host, who can stop the bus and 
 
 On the server path, `hookmon-server` has a watchdog of its own. A host with no heartbeat for `watchdog.heartbeat_timeout` (default 60 s) is marked UNRESPONSIVE and an AGENT_OFFLINE event (CRITICAL) is stored. Heartbeats arrive over mutual TLS, and the server takes the host ID from the bus's certificate, so one host cannot keep another looking alive. The same root attacker can still run a fake bus with the stolen key and certificate from `/var/lib/hookmon`. AGENT_OFFLINE is stored and sent to every configured SIEM connector, whatever its `min_severity`.
 
+### Shutdown Announcement and End-to-End Marker
+
+**Shutdown announcement.** When the bus stops cleanly (SIGTERM or SIGINT — a service restart, a package upgrade, a planned reboot), it sends a `ShutdownNotice` to the server over the gRPC stream before disconnecting. The server records the announcement and the watchdog suppresses AGENT_OFFLINE for that host. This avoids a false CRITICAL alert on every bus restart. A bus that is killed without a clean shutdown (SIGKILL, OOM, or an attacker) does not send the notice, so the watchdog fires as expected.
+
+**End-to-end marker.** The bus sends a `Marker` message through the gRPC stream every 60 seconds. The server tracks the last marker time per host. If a marker has not arrived for `marker_timeout` (default 3 minutes) on a host that is otherwise heartbeating, the watchdog raises an `AGENT_WEDGED` event (CRITICAL): the bus may be running, but events are not reaching the server. This closes the gap where heartbeats (sent on a separate timer) succeed but the event stream is blocked. When the marker resumes, the wedged state clears; if the marker goes stale again, a new alert fires.
+
 ### Tamper Signal Hierarchy
 
 | Signal | Interpretation | Prometheus rule | Severity label |
 |--------|---------------|-----------------|----------------|
 | Poll endpoint unreachable | Bus killed, or host network cut | `HookMonHostUnreachable` (for 2m) | critical |
-| Poll succeeds, but sensors report dead | A hook detached or a program unloaded | `HookMonSensorDead` (for 1m) | high |
-| Any host degraded (dead, failed or unverifiable sensors) | As above, or a sensor that never started | `HookMonFleetDegraded` (for 1m) | high |
-| All sensors alive, but no events for 24 h | Events being suppressed between the sensors and the bus | `HookMonNoEvents24h` (for 10m) | warning |
+| Poll succeeds, but sensors report dead (host reachable) | A hook detached or a program unloaded | `HookMonSensorDead` (for 1m) | high |
+| >20% of fleet unreachable | Network partition or fleet-wide outage | `HookMonFleetDegraded` (for 1m) | critical |
 | Collector has not pushed to Pushgateway for 90 s | Collector killed, or Pushgateway restarted and lost its data | `HookMonCollectorSilent` (for 30s) | critical |
 
 The rules are in `deploy/docker/grafana/alerts/hookmon-alerts.yaml`. Prometheus sends firing alerts to Alertmanager.
 
-The "no events for 24 h" row combines heartbeat liveness with event rate. A host can genuinely have no events for 24 hours (a dormant standby, for example); the host's role decides. Heartbeats confirm the sensors run; they cannot confirm events flow end to end. `HookMonNoEvents24h` uses the bus's own `/metrics` (`hookmon_sensor_alive` and `hookmon_events_total`), so it needs each bus listed as a scrape target in `prometheus.yml`.
-
-`hookmon_events_total` also counts BPF_INVENTORY events, which `bpf_syscall` sends every 5 minutes on its own, not from a hook. The rule leaves them out, so a host whose hooks' events are all lost can still fire `HookMonNoEvents24h`.
+`HookMonSensorDead` only fires when `hookmon_fleet_host_reachable == 1` for the host, so an unreachable host does not also fire per-sensor alerts. `HookMonFleetDegraded` fires when more than 20% of monitored hosts are unreachable, indicating a fleet-wide problem rather than individual failures. Alertmanager inhibition suppresses `HookMonHostUnreachable` per-host alerts when `HookMonFleetDegraded` is active, so a fleet outage produces one alert, not one per host.
 
 The collector-silence rule matters because Pushgateway keeps serving the last values it received. Without it, a dead collector would leave the fleet showing "all alive" forever.
+
+End-to-end liveness is tracked by the bus's marker (see below), not by an event-rate rule.
 
 ### Limitations of Polling
 

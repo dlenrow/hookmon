@@ -45,8 +45,8 @@ func (s *Server) reload(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // handleListPolicies lists allowlist entries. Without ?status it lists the
-// entries in force (APPROVED and REJECTED). ?status=PENDING lists the
-// learning-mode candidates, and ?status=ALL every entry. Statuses can be
+// entries in force (APPROVED and REJECTED). ?status=PENDING lists the new
+// hooks waiting for a decision, and ?status=ALL every entry. Statuses can be
 // combined with commas.
 func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request) {
 	statuses := []event.EntryStatus{event.StatusApproved, event.StatusRejected}
@@ -102,13 +102,13 @@ func (s *Server) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Entries written through the API are in force at once. PENDING entries
-	// come only from learning mode.
+	// come only from the server, when it first sees a hook.
 	if entry.Status != "" && entry.Status != event.StatusApproved {
-		writeError(w, http.StatusBadRequest, "status must be empty or APPROVED; PENDING entries come from learning mode")
+		writeError(w, http.StatusBadRequest, "status must be empty or APPROVED; PENDING entries come from the server, when it first sees a hook")
 		return
 	}
 	if entry.Learned != nil {
-		writeError(w, http.StatusBadRequest, "learned is set by learning mode only")
+		writeError(w, http.StatusBadRequest, "learned is set by the server only")
 		return
 	}
 	entry.Status = event.StatusApproved
@@ -370,6 +370,82 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request, decision event.E
 		return
 	}
 	writeJSON(w, http.StatusOK, entry)
+}
+
+// MaxDecideIDs is the most PENDING entries one /policies/decide call takes.
+const MaxDecideIDs = 1000
+
+// decideRequest is the body of POST /api/v1/policies/decide.
+type decideRequest struct {
+	IDs      []string `json:"ids"`
+	Decision string   `json:"decision"` // "approve" or "reject"
+	Scope    string   `json:"scope"`    // "fleet" or "seen_hosts"
+}
+
+// decideResult is one ID's outcome in the response to /policies/decide.
+type decideResult struct {
+	ID      string                  `json:"id"`
+	OK      bool                    `json:"ok"`
+	Entries []*event.AllowlistEntry `json:"entries,omitempty"`
+	Error   string                  `json:"error,omitempty"`
+}
+
+// handleDecidePolicies approves or rejects several PENDING entries at once,
+// such as every new hook an update brought: {"ids": [...], "decision":
+// "approve" | "reject", "scope": "fleet" | "seen_hosts"}. All are decided in
+// one transaction, and the policy is reloaded once. An ID that is not
+// PENDING is reported in its result with ok false, and the others still
+// apply.
+func (s *Server) handleDecidePolicies(w http.ResponseWriter, r *http.Request) {
+	var req decideRequest
+	if !decodeBody(w, r, &req, true, `invalid request body: want {"ids": [...], "decision": "approve" | "reject", "scope": "fleet" | "seen_hosts"}`) {
+		return
+	}
+	var decision event.EntryStatus
+	switch req.Decision {
+	case "approve":
+		decision = event.StatusApproved
+	case "reject":
+		decision = event.StatusRejected
+	default:
+		writeError(w, http.StatusBadRequest, `decision must be "approve" or "reject"`)
+		return
+	}
+	if req.Scope != store.ScopeFleet && req.Scope != store.ScopeSeenHosts {
+		writeError(w, http.StatusBadRequest, `scope must be "fleet" or "seen_hosts"`)
+		return
+	}
+	if len(req.IDs) == 0 || len(req.IDs) > MaxDecideIDs {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("ids must name 1 to %d entries", MaxDecideIDs))
+		return
+	}
+	for _, id := range req.IDs {
+		if strings.TrimSpace(id) == "" {
+			writeError(w, http.StatusBadRequest, "ids must not contain an empty ID")
+			return
+		}
+	}
+
+	decisions, err := s.store.DecideCandidates(r.Context(), req.IDs, decision, req.Scope)
+	if err != nil {
+		s.logger.Error("decide allowlist entries failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	results := make([]decideResult, len(decisions))
+	decided := 0
+	for i, d := range decisions {
+		results[i] = decideResult{ID: d.ID, OK: d.Err == nil, Entries: d.Entries}
+		if d.Err != nil {
+			results[i].Error = d.Err.Error()
+		} else {
+			decided++
+		}
+	}
+	if decided > 0 && !s.reload(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]decideResult{"results": results})
 }
 
 // writeError writes {"error": msg} with the given status.

@@ -28,6 +28,8 @@ type AgentMessage struct {
 	//
 	//	*AgentMessage_Event
 	//	*AgentMessage_Heartbeat
+	//	*AgentMessage_Shutdown
+	//	*AgentMessage_Marker
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -88,6 +90,24 @@ func (x *AgentMessage) GetHeartbeat() *Heartbeat {
 	return nil
 }
 
+func (x *AgentMessage) GetShutdown() *ShutdownNotice {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_Shutdown); ok {
+			return x.Shutdown
+		}
+	}
+	return nil
+}
+
+func (x *AgentMessage) GetMarker() *Marker {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_Marker); ok {
+			return x.Marker
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Payload interface {
 	isAgentMessage_Payload()
 }
@@ -100,9 +120,21 @@ type AgentMessage_Heartbeat struct {
 	Heartbeat *Heartbeat `protobuf:"bytes,2,opt,name=heartbeat,proto3,oneof"`
 }
 
+type AgentMessage_Shutdown struct {
+	Shutdown *ShutdownNotice `protobuf:"bytes,3,opt,name=shutdown,proto3,oneof"`
+}
+
+type AgentMessage_Marker struct {
+	Marker *Marker `protobuf:"bytes,4,opt,name=marker,proto3,oneof"`
+}
+
 func (*AgentMessage_Event) isAgentMessage_Payload() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Payload() {}
+
+func (*AgentMessage_Shutdown) isAgentMessage_Payload() {}
+
+func (*AgentMessage_Marker) isAgentMessage_Payload() {}
 
 type ServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -197,6 +229,7 @@ type Heartbeat struct {
 	UptimeSeconds uint64                 `protobuf:"varint,5,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
 	// sensors is the bus's sensor-registry snapshot, one entry per sensor.
 	Sensors       []*SensorHealth `protobuf:"bytes,6,rep,name=sensors,proto3" json:"sensors,omitempty"`
+	KernelRelease string          `protobuf:"bytes,7,opt,name=kernel_release,json=kernelRelease,proto3" json:"kernel_release,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -273,6 +306,13 @@ func (x *Heartbeat) GetSensors() []*SensorHealth {
 	return nil
 }
 
+func (x *Heartbeat) GetKernelRelease() string {
+	if x != nil {
+		return x.KernelRelease
+	}
+	return ""
+}
+
 // SensorHealth is one sensor's state in the bus's sensor registry.
 type SensorHealth struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -333,6 +373,46 @@ func (x *SensorHealth) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+// ShutdownNotice is sent when the bus is stopping cleanly.
+type ShutdownNotice struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShutdownNotice) Reset()         { *x = ShutdownNotice{} }
+func (x *ShutdownNotice) String() string  { return protoimpl.X.MessageStringOf(x) }
+func (*ShutdownNotice) ProtoMessage()     {}
+func (x *ShutdownNotice) ProtoReflect() protoreflect.Message { return nil }
+
+func (x *ShutdownNotice) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// Marker is an end-to-end liveness signal sent every 60 seconds.
+type Marker struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Marker) Reset()         { *x = Marker{} }
+func (x *Marker) String() string  { return protoimpl.X.MessageStringOf(x) }
+func (*Marker) ProtoMessage()     {}
+func (x *Marker) ProtoReflect() protoreflect.Message { return nil }
+
+func (x *Marker) GetTimestamp() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Timestamp
+	}
+	return nil
 }
 
 type EventAck struct {
@@ -764,6 +844,8 @@ func file_hookmon_v1_agent_proto_init() {
 	file_hookmon_v1_agent_proto_msgTypes[0].OneofWrappers = []any{
 		(*AgentMessage_Event)(nil),
 		(*AgentMessage_Heartbeat)(nil),
+		(*AgentMessage_Shutdown)(nil),
+		(*AgentMessage_Marker)(nil),
 	}
 	file_hookmon_v1_agent_proto_msgTypes[1].OneofWrappers = []any{
 		(*ServerMessage_Ack)(nil),

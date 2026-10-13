@@ -464,7 +464,8 @@ func (s *Store) GetHost(ctx context.Context, id string) (*event.Host, error) {
 const hostColumns = `
 	id, hostname, ip_address, agent_version,
 	os_info, status, enrolled_at,
-	last_heartbeat, last_event_at, sensors`
+	last_heartbeat, last_event_at, sensors,
+	kernel_release, prev_kernel_release, kernel_changed_at`
 
 // UpsertHost inserts a host or updates it if it already exists. It does not
 // touch the sensor snapshot, and never moves last_event_at back: an update
@@ -598,29 +599,39 @@ func (s *Store) RecordHeartbeat(ctx context.Context, hb *event.HostHeartbeat) (i
 
 	const query = `
 		WITH prev AS (
-			SELECT id, status, last_heartbeat FROM hosts WHERE id = $5 FOR UPDATE
+			SELECT id, status, last_heartbeat, kernel_release FROM hosts WHERE id = $6 FOR UPDATE
 		)
 		UPDATE hosts
 		SET last_heartbeat = $1,
 			status = $2,
 			agent_version = CASE WHEN $3 = '' THEN hosts.agent_version ELSE $3 END,
-			sensors = $4
+			sensors = $4,
+			prev_kernel_release = CASE WHEN $5 != '' AND $5 != hosts.kernel_release THEN hosts.kernel_release ELSE hosts.prev_kernel_release END,
+			kernel_release = CASE WHEN $5 != '' THEN $5 ELSE hosts.kernel_release END,
+			kernel_changed_at = CASE WHEN $5 != '' AND $5 != hosts.kernel_release AND hosts.kernel_release != '' THEN $1 ELSE hosts.kernel_changed_at END
 		FROM prev
 		WHERE hosts.id = prev.id
-		RETURNING prev.status, prev.last_heartbeat`
+		RETURNING prev.status, prev.last_heartbeat, prev.kernel_release`
 
 	var prevStatus string
 	var prevHeartbeat time.Time
+	var prevKernel string
 	err = s.pool.QueryRow(ctx, query,
-		hb.ReceivedAt, string(event.HostOnline), hb.AgentVersion, sensorsJSON, hb.HostID,
-	).Scan(&prevStatus, &prevHeartbeat)
+		hb.ReceivedAt, string(event.HostOnline), hb.AgentVersion, sensorsJSON, hb.KernelRelease, hb.HostID,
+	).Scan(&prevStatus, &prevHeartbeat, &prevKernel)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ingestion.HeartbeatChange{}, fmt.Errorf("host %s: %w", hb.HostID, ErrNotFound)
 	}
 	if err != nil {
 		return ingestion.HeartbeatChange{}, fmt.Errorf("update heartbeat for host %s: %w", hb.HostID, err)
 	}
-	return ingestion.HeartbeatChange{PrevStatus: event.HostStatus(prevStatus), PrevHeartbeat: prevHeartbeat}, nil
+	kernelChanged := hb.KernelRelease != "" && prevKernel != "" && hb.KernelRelease != prevKernel
+	return ingestion.HeartbeatChange{
+		PrevStatus:        event.HostStatus(prevStatus),
+		PrevHeartbeat:     prevHeartbeat,
+		PrevKernelRelease: prevKernel,
+		KernelChanged:     kernelChanged,
+	}, nil
 }
 
 // MarkHostUnresponsive sets an ONLINE host UNRESPONSIVE if its last
@@ -681,6 +692,7 @@ func scanHost(rows pgx.Rows) (*event.Host, error) {
 		&h.ID, &h.Hostname, &h.IPAddress, &h.AgentVersion,
 		&h.OSInfo, &status, &h.EnrolledAt,
 		&h.LastHeartbeat, &h.LastEventAt, &sensorsJSON,
+		&h.KernelRelease, &h.PrevKernelRelease, &h.KernelChangedAt,
 	)
 	if err != nil {
 		return nil, err

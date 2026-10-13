@@ -12,11 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
 // dlopen_monitor tests from fix plan step 4: a container's own libc is
-// covered, and repeats of (binary, library) are reported once.
+// covered, its libraries are judged in its own root, and repeats of
+// (binary, library) are reported once.
 
 // dlopenWImage is debian:bookworm-slim (glibc 2.36), pinned by index digest.
 // dlopen_canary is built against the host's glibc and runs inside it on the
@@ -104,24 +106,31 @@ func TestDlopenW_ContainerLibc(t *testing.T) {
 	}
 	t.Logf("host libc %s, container libc %s (pid %s)", hostLibc, ctrLibc, pid)
 
-	bus, err := StartBus(busBin())
-	if err != nil {
-		t.Fatalf("start bus: %v", err)
+	// A directory that exists only in the container, so a judgment made on
+	// the host's files instead would call it missing and report the dlopen.
+	const rootOnlyDir = "/hookmon-ctr-libs"
+	if _, err := os.Stat(rootOnlyDir); err == nil {
+		t.Skipf("%s exists on the host; the test needs it to exist only in the container", rootOnlyDir)
 	}
-	defer bus.Stop()
+	dlopenWDocker(t, "exec", name, "sh", "-c",
+		"cp /canary/libfake_hook.so /tmp/ && mkdir "+rootOnlyDir+" && cp /canary/libfake_hook.so "+rootOnlyDir+"/")
 
-	const ctrLib = "/canary/libfake_hook.so"
-	cmd := exec.Command("docker", "exec", name, "/canary/dlopen_canary", ctrLib)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("dlopen_canary in the container: %v", err)
+	const port = "2205"
+	bus := startFileBus(t, port, "dlopen_monitor")
+	ctrDlopen := func(lib string) {
+		t.Helper()
+		cmd := exec.Command("docker", "exec", name, "/canary/dlopen_canary", lib)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("dlopen_canary %s in the container: %v", lib, err)
+		}
 	}
 
-	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
-		return e.EventType == event.EventDlopen && e.DlopenDetail != nil &&
-			e.DlopenDetail.LibraryPath == ctrLib
-	}, 15*time.Second)
+	// In the container's /tmp: anyone there can plant a library. Reported.
+	const ctrLib = "/tmp/libfake_hook.so"
+	ctrDlopen(ctrLib)
+	evt, err := bus.WaitForEvent(dlopenOf(ctrLib), 15*time.Second)
 	if err != nil {
 		t.Fatalf("did not detect DLOPEN of %s inside the container: %v", ctrLib, err)
 	}
@@ -129,13 +138,21 @@ func TestDlopenW_ContainerLibc(t *testing.T) {
 		evt.DlopenDetail.LibraryPath, evt.DlopenDetail.LibraryHash, evt.PID, evt.ExePath, evt.ContainerID)
 
 	// The library path is the container's; the bus hashes it through the
-	// container's root, which here is the bind-mounted canary directory.
+	// container's root.
 	if want := dlopenWFileSHA(t, canaryBinDir()+"/libfake_hook.so"); evt.DlopenDetail.LibraryHash != want {
 		t.Errorf("LibraryHash = %q, want %q", evt.DlopenDetail.LibraryHash, want)
 	}
 	if want := dlopenWFileSHA(t, canaryBinDir()+"/dlopen_canary"); evt.ExeHash != want {
 		t.Errorf("ExeHash = %q, want %q", evt.ExeHash, want)
 	}
+
+	// In a directory only the container's root can write: dropped, judged
+	// in the container.
+	before := suppressedCount(t, port, "dlopen_monitor", suppress.RootOnlyDirectory)
+	rootOnlyLib := rootOnlyDir + "/libfake_hook.so"
+	ctrDlopen(rootOnlyLib)
+	waitSuppressed(t, port, "dlopen_monitor", suppress.RootOnlyDirectory, before, 15*time.Second)
+	noEvent(t, bus, "dlopen of "+rootOnlyLib+" in the container", 2*time.Second, dlopenOf(rootOnlyLib))
 }
 
 // TestDlopenW_Dedupe: the same binary loading the same library twice is

@@ -87,7 +87,7 @@ That suits allowlist-based monitoring: the base rate of legitimate new activity 
  └────────────────────────────────┘
 ```
 
-The sensor bus exposes Prometheus metrics and pushes structured logs to Loki. The `/status` endpoint reports each sensor's health, and the collector polls it from outside the host. The compose stack runs Grafana with a pre-built dashboard. See [docs/architecture.md](docs/architecture.md) for details.
+The sensor bus exposes Prometheus metrics and pushes structured logs to Loki. The `/status` endpoint reports each sensor's health, and the collector polls it from outside the host. The compose stack runs Grafana with two pre-built dashboards: Fleet Health (the SOC watches this) and Forensics (for investigation). See [docs/architecture.md](docs/architecture.md) for details.
 
 ## How HookMon Knows It's Still Running
 
@@ -96,9 +96,10 @@ A detector that dies silently is worse than none. HookMon checks its own sensors
 1. **Active probes.** Every 10 seconds the bus fires each eBPF sensor's hook itself with a harmless call: an `openat` and `openat2` of `/dev/null`, an invalid `ptrace`, a run of `/bin/true`, and a `dlopen` through a small helper (`hookmon-dlopen-probe`). Each hook writes a kernel timestamp to its heartbeat map. A sensor counts as alive only if its map moved forward and its program and link are still attached. The two fanotify sensors are marked alive by a timer in the bus. That shows the bus is running, not that the watch still fires.
 2. **The bus reports.** `/status` returns JSON with each sensor's status (`alive`, `dead`, `failed`, `unverifiable` or `unknown`), its last heartbeat and a reason. A sensor is dead after 15 seconds without a confirmed beat (`dead_threshold`).
 3. **The collector polls.** `hookmon-collector` polls `/status` on every host in its config file every 30 seconds. It pushes the results to Pushgateway and writes them to a JSON file (`fleet_status_file`).
-4. **Prometheus fires.** Alert rules fire when a host is unreachable, a sensor is dead, the fleet is degraded, or the collector stops pushing (`HookMonCollectorSilent`). Alertmanager routes the alerts. The Grafana "Fleet Health" panel shows the state.
+4. **Prometheus fires.** Alert rules fire when a host is unreachable, a sensor is dead, the fleet is degraded, or the collector stops pushing (`HookMonCollectorSilent`). When more than 20% of hosts are unreachable, a single fleet-degraded alert fires and Alertmanager suppresses the per-host alerts. Grafana's Fleet Health dashboard shows the state.
+5. **Shutdown notice and end-to-end marker.** On clean stop (SIGTERM/SIGINT), the bus tells the server, which suppresses the AGENT_OFFLINE alert. Every 60 seconds the bus sends a marker through the gRPC stream, so the server can detect a wedged bus-to-server path even when heartbeats succeed.
 
-The key property: the collector reaches out to the bus. If the bus process is killed, the collector notices at its next poll, because `/status` stops answering. If one sensor stops but the bus keeps running, `/status` reports that sensor dead. One case is not detected: a root attacker can kill the bus and serve a fake "alive" `/status`. See [SECURITY.md](SECURITY.md).
+The key property: the collector reaches out to the bus. If the bus process is killed, the collector notices at its next poll, because `/status` stops answering. If one sensor stops but the bus keeps running, `/status` reports that sensor dead. A clean restart does not alert; only an unannounced stop does. One case is not detected: a root attacker can kill the bus and serve a fake "alive" `/status`. See [SECURITY.md](SECURITY.md).
 
 ## Why This Should Generate Little Alert Noise
 
@@ -130,7 +131,7 @@ cd hookmon
 docker compose -f deploy/docker/docker-compose.grafana.yml up -d
 ```
 
-This starts Grafana (:3000), Loki (:3100), Prometheus (:9090), Pushgateway (:9091) and Alertmanager (:9093), with the HookMon dashboard pre-provisioned. All services use host networking. Default Grafana login: `admin` / `hookmon`. The collector is not part of the stack; step 3 runs it.
+This starts Grafana (:3000), Loki (:3100), Prometheus (:9090), Pushgateway (:9091) and Alertmanager (:9093), with the HookMon Fleet Health and Forensics dashboards pre-provisioned. All services use host networking. Default Grafana login: `admin` / `hookmon`. The collector is not part of the stack; step 3 runs it.
 
 Before use:
 - Add each sensor bus (`<host>:2112`) as a target under `hookmon-bus` in `deploy/docker/prometheus.yml`.
@@ -222,7 +223,7 @@ The Ansible role `deploy/ansible/roles/hookmon-agent` does the same on many host
 
 ## Allowlist Workflow
 
-- **Learning mode.** Turn it on for the fleet or for one host, always with an end time: `hookmon-cli learning start --fleet --for 7d` (or `--host <host-id>`, `--until <RFC 3339 time>`). Until then, the server records each unmatched event as a PENDING allowlist entry, one per unique tuple of event type, executable hash, subject (BPF program tag and type, library hash or path, file path, or the shared memory pattern) and whether it ran in a container. Each entry counts its occurrences and records when it was first and last seen and on which hosts. Learning mode changes no severity and suppresses no alert. The windows are stored in PostgreSQL, so a restarted server keeps learning until the end time.
+- **Learning mode.** Turn it on for the fleet or for one host, always with an end time: `hookmon-cli learning start --fleet --for 7d` (or `--host <host-id>`, `--until <RFC 3339 time>`). Until then, the server records each unmatched event as a PENDING allowlist entry, one per unique tuple of event type and subject — the subject identifies *what was loaded*: BPF program tag and type, library hash, file path, or shared memory pattern. The key does not include the loading process's executable hash, so the same program loaded by different binaries is one entry. Each entry counts its occurrences, stores the first event for investigation, records when it was first and last seen and on which hosts. Learning mode changes no severity and suppresses no alert. The windows are stored in PostgreSQL, so a restarted server keeps learning until the end time.
 - **Review.** The dashboard's Pending Approval page, or `hookmon-cli policies pending`, lists the candidates. `hookmon-cli policies approve <id> --fleet` allows the tuple on every host; `--host <host-id>` allows it on that host only. `reject` works the same way: a rejected tuple keeps alerting and is not proposed again. A learned entry matches exactly its tuple; an empty executable hash, for example, is not a wildcard.
 - **Writing entries by hand.** `hookmon-cli policies create` (JSON on stdin) or `POST /api/v1/policies`. File hashes are `sha256:<hex>`. `prog_hash` is the kernel's BPF program tag (16 hex digits, as `bpftool prog show` prints it); pin `prog_type` with it, because identical instructions of different program types share a tag. `host_id` limits an entry to one host. `action` must be ALLOW, ALERT or DENY. `PUT` and `PATCH /api/v1/policies/{id}` edit an entry or turn it off (`{"enabled": false}`), as the dashboard's Policy Manager does. When several entries match an event, the most restrictive action wins (DENY, then ALERT, then ALLOW).
 - **Allowlist one event.** The "Allowlist" button on an event in the dashboard (`POST /api/v1/events/{id}/allowlist`) creates an ALLOW entry for exactly that event's tuple, as learning mode would, for its host or the fleet.

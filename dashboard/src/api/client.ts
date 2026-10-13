@@ -4,8 +4,12 @@ import type {
   EntryStatus,
   Host,
   EventQueryParams,
+  KernelUpgrade,
   LearningState,
   Scope,
+  BulkDecision,
+  BulkScope,
+  DecideResponse,
   ServerSettings,
 } from './types';
 
@@ -207,7 +211,30 @@ export async function decidePolicy(
   });
 }
 
-// --- Learning mode ---
+/**
+ * Decide several PENDING entries (new hooks) at once: approve (ALLOW, never
+ * alerts again) or reject (keeps alerting every time), for the fleet or for
+ * the hosts each was seen on. The server decides them in one transaction
+ * and reports each ID: one that is no longer PENDING fails alone.
+ */
+export async function decidePolicies(
+  ids: string[],
+  decision: BulkDecision,
+  scope: BulkScope
+): Promise<DecideResponse> {
+  return apiFetch<DecideResponse>('/policies/decide', {
+    method: 'POST',
+    body: JSON.stringify({ ids, decision, scope }),
+  });
+}
+
+// --- Kernel upgrades ---
+
+export async function getKernelUpgrades(): Promise<KernelUpgrade[]> {
+  return apiFetch<KernelUpgrade[]>('/kernel-upgrades');
+}
+
+// --- Learning mode (a quiet period: first sightings are listed but not sent to alert connectors) ---
 
 export async function getLearning(): Promise<LearningState> {
   return apiFetch<LearningState>('/learning');

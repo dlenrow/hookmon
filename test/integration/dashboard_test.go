@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -64,8 +65,8 @@ func dashDial(t *testing.T, s *enrServer, pki *enrpki.PKI, origin, token string)
 }
 
 // TestIntegration_WebSocketFanOut: two WebSocket clients (two dashboard
-// tabs) on the real TLS server both receive every event an enrolled bus
-// sends, in order. A handshake without a valid token, or from another
+// tabs) on the real TLS server both receive every event the server stores
+// from an enrolled bus, in order. A handshake without a valid token, or from another
 // site's page, is refused. List endpoints answer [] when empty.
 func TestIntegration_WebSocketFanOut(t *testing.T) {
 	dsn := enrPGDSN(t)
@@ -113,10 +114,12 @@ func TestIntegration_WebSocketFanOut(t *testing.T) {
 		tabs = append(tabs, conn)
 	}
 
+	// Each event names its own library, so each is a first sighting: the
+	// feed carries only stored events.
 	const n = 40
 	var sent []string
 	for i := 0; i < n; i++ {
-		evt := polDlopen("/opt/fanout.so")
+		evt := polDlopen(fmt.Sprintf("/opt/fanout-%d.so", i))
 		if err := tr.SendEvent(evt); err != nil {
 			t.Fatal(err)
 		}
@@ -152,33 +155,39 @@ func TestIntegration_PolicyEditAndAllowlistEvent(t *testing.T) {
 	host := bus.HostID
 
 	first := polSend(t, s, tr, host, polBPFLoad())
-	if first.PolicyResult.Action != event.ActionAlert {
+	if first.PolicyResult.Action != event.ActionAlert || first.PolicyResult.Disposition != event.DispositionFirstSighting {
 		t.Fatalf("before: %+v", first.PolicyResult)
 	}
 
+	// Allowlisting the first sighting decides its PENDING entry for this
+	// host: the new hook leaves the PENDING list.
 	var entry event.AllowlistEntry
 	if code := polDo(t, s, http.MethodPost, "/api/v1/events/"+first.ID+"/allowlist", `{"scope":"host"}`, &entry); code != http.StatusCreated {
 		t.Fatalf("allowlist event: %d", code)
 	}
-	if entry.HostID != host || entry.Learned == nil || entry.Learned.Key.Subject != polTag || entry.Status != event.StatusApproved {
+	if entry.HostID != host || entry.Learned == nil || entry.Learned.Key.Subject != polTag || entry.Status != event.StatusApproved ||
+		entry.Learned.FirstEventID != first.ID {
 		t.Errorf("entry from event: %+v", entry)
+	}
+	if p := polPending(t, s); len(p) != 0 {
+		t.Errorf("PENDING after allowlisting the first sighting: %+v", p)
 	}
 	if code := polDo(t, s, http.MethodPost, "/api/v1/events/"+first.ID+"/allowlist", `{"scope":"host"}`, nil); code != http.StatusConflict {
 		t.Errorf("allowlisting twice: %d, want 409", code)
 	}
-	if got := polSend(t, s, tr, host, polBPFLoad()); got.PolicyResult.Action != event.ActionAllow || got.PolicyResult.MatchedEntryID != entry.ID {
-		t.Errorf("after allowlisting: %+v", got.PolicyResult)
-	}
+	polSendDropped(t, s, tr, host, polBPFLoad())
 	other := polBPFLoad()
 	other.BPFDetail.ProgHash = "1111111111111111"
 	if got := polSend(t, s, tr, host, other); got.PolicyResult.Action == event.ActionAllow {
 		t.Errorf("another program was allowed: %+v", got.PolicyResult)
 	}
 
+	// Disabled, the entry no longer matches: the program is a new hook again.
 	if code := polDo(t, s, http.MethodPatch, "/api/v1/policies/"+entry.ID, `{"enabled":false}`, nil); code != http.StatusOK {
 		t.Fatalf("disable: %d", code)
 	}
-	if got := polSend(t, s, tr, host, polBPFLoad()); got.PolicyResult.Action == event.ActionAllow {
+	if got := polSend(t, s, tr, host, polBPFLoad()); got.PolicyResult.Action == event.ActionAllow ||
+		got.PolicyResult.Disposition != event.DispositionFirstSighting {
 		t.Errorf("after disabling: %+v", got.PolicyResult)
 	}
 
@@ -194,12 +203,11 @@ func TestIntegration_PolicyEditAndAllowlistEvent(t *testing.T) {
 	if code := polDo(t, s, http.MethodPut, "/api/v1/policies/"+entry.ID, edited, &replaced); code != http.StatusOK {
 		t.Fatalf("PUT: %d", code)
 	}
-	if !replaced.Enabled || !strings.HasPrefix(replaced.Description, "edited: ") || replaced.Learned == nil || replaced.CreatedBy != "api" {
+	// The entry came from the server's record of the new hook.
+	if !replaced.Enabled || !strings.HasPrefix(replaced.Description, "edited: ") || replaced.Learned == nil || replaced.CreatedBy != "learning-mode" {
 		t.Errorf("after PUT: %+v", replaced)
 	}
-	if got := polSend(t, s, tr, host, polBPFLoad()); got.PolicyResult.Action != event.ActionAllow {
-		t.Errorf("after re-enabling: %+v", got.PolicyResult)
-	}
+	polSendDropped(t, s, tr, host, polBPFLoad())
 
 	for name, c := range map[string]struct {
 		method, path, body string

@@ -16,36 +16,43 @@ import (
 
 // polCandidate is one RecordCandidate call.
 type polCandidate struct {
-	key    event.LearnedKey
-	exe    string
-	hostID string
-	seen   time.Time
+	key     event.LearnedKey
+	exe     string
+	hostID  string
+	eventID string
+	seen    time.Time
 }
 
-// polSink records candidates and keeps one ID per key, as the store does.
+// polSink keeps one PENDING entry per key, as the store does: the first
+// call for a key creates it, later ones are repeats. A key in decided
+// stands for an entry decided since the engine last loaded the policy.
 type polSink struct {
-	mu    sync.Mutex
-	calls []polCandidate
-	ids   map[event.LearnedKey]string
-	err   error
+	mu      sync.Mutex
+	calls   []polCandidate
+	ids     map[event.LearnedKey]string
+	decided map[event.LearnedKey]event.PolicyAction
+	err     error
 }
 
-func (s *polSink) RecordCandidate(_ context.Context, key event.LearnedKey, exePath, _, hostID string, seen time.Time) (string, error) {
+func (s *polSink) RecordCandidate(_ context.Context, key event.LearnedKey, exePath, _, hostID, eventID string, seen time.Time) (event.CandidateSighting, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
-		return "", s.err
+		return event.CandidateSighting{}, s.err
 	}
-	s.calls = append(s.calls, polCandidate{key, exePath, hostID, seen})
+	if a, ok := s.decided[key]; ok {
+		return event.CandidateSighting{DecidedAction: a}, nil
+	}
+	s.calls = append(s.calls, polCandidate{key, exePath, hostID, eventID, seen})
 	if s.ids == nil {
 		s.ids = map[event.LearnedKey]string{}
 	}
-	id, ok := s.ids[key]
-	if !ok {
-		id = "cand-" + allowlist.KeyHash(key)[:8]
-		s.ids[key] = id
+	if id, ok := s.ids[key]; ok {
+		return event.CandidateSighting{ID: id}, nil
 	}
-	return id, nil
+	id := "cand-" + allowlist.KeyHash(key)[:8]
+	s.ids[key] = id
+	return event.CandidateSighting{ID: id, Created: true}, nil
 }
 
 func (s *polSink) count() int {
@@ -108,20 +115,69 @@ func polDlopen(host, lib string) *event.HookEvent {
 
 var polT0 = time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 
-// TestLearning_StartEndAndScope: learning mode records unmatched events
-// only while a window is open, for the fleet or for the one host it names.
-func TestLearning_StartEndAndScope(t *testing.T) {
+// TestFirstSighting_RepeatAndKept: the first event of an unmatched key is a
+// first sighting, kept and recorded as the PENDING entry's first event;
+// later ones, from any host, are repeats of the same entry and not kept. A
+// learning window does not change that.
+func TestFirstSighting_RepeatAndKept(t *testing.T) {
+	src, sink, clock := &polSource{}, &polSink{}, &polClock{t: polT0}
+	e := polEngine(src, sink, clock)
+	if err := e.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	first := polDlopen("host-a", "/opt/a.so")
+	first.ID = "ev-1"
+	res := e.Evaluate(first)
+	if res.Disposition != event.DispositionFirstSighting || !res.Disposition.Kept() || res.Quiet ||
+		res.CandidateID == "" || res.Action != event.ActionAlert || first.Severity != event.SeverityWarn {
+		t.Fatalf("first: %+v severity %s", res, first.Severity)
+	}
+	if !strings.Contains(res.Reason, "first sighting: PENDING entry "+res.CandidateID) {
+		t.Errorf("reason does not name the entry: %q", res.Reason)
+	}
+	if sink.count() != 1 || sink.calls[0].eventID != "ev-1" || sink.calls[0].hostID != "host-a" || !sink.calls[0].seen.Equal(first.Timestamp) {
+		t.Errorf("recorded %+v", sink.calls)
+	}
+
+	for _, host := range []string{"host-a", "host-b"} {
+		res2 := e.Evaluate(polDlopen(host, "/opt/a.so"))
+		if res2.Disposition != event.DispositionRepeat || res2.Disposition.Kept() || res2.CandidateID != res.CandidateID ||
+			!strings.Contains(res2.Reason, "repeat of PENDING entry") {
+			t.Errorf("repeat on %s: %+v", host, res2)
+		}
+	}
+	if sink.count() != 3 {
+		t.Errorf("RecordCandidate calls: %d, want 3 (repeats are counted)", sink.count())
+	}
+
+	// A different key is a first sighting of its own.
+	if res3 := e.Evaluate(polDlopen("host-b", "/opt/b.so")); res3.Disposition != event.DispositionFirstSighting || res3.CandidateID == res.CandidateID {
+		t.Errorf("other key: %+v", res3)
+	}
+}
+
+// TestQuietPeriod_StartEndAndScope: a learning window makes the first
+// sightings of the hosts it covers quiet, and no others; it ends at its end
+// time or when the window is removed.
+func TestQuietPeriod_StartEndAndScope(t *testing.T) {
 	src, sink, clock := &polSource{}, &polSink{}, &polClock{t: polT0}
 	e := polEngine(src, sink, clock)
 	ctx := context.Background()
+	quiet := func(host, lib string) bool {
+		t.Helper()
+		res := e.Evaluate(polDlopen(host, lib))
+		if res.Disposition != event.DispositionFirstSighting {
+			t.Fatalf("%s %s: disposition %q, want first_sighting", host, lib, res.Disposition)
+		}
+		return res.Quiet
+	}
 
-	// No window: nothing is learned.
 	if err := e.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	e.Evaluate(polDlopen("host-a", "/opt/a.so"))
-	if sink.count() != 0 {
-		t.Fatalf("learned with learning mode off: %+v", sink.calls)
+	if quiet("host-a", "/opt/0.so") {
+		t.Error("quiet with no window")
 	}
 
 	// A window for host-a only.
@@ -133,23 +189,14 @@ func TestLearning_StartEndAndScope(t *testing.T) {
 		t.Fatalf("Learning: host-a %v, host-b %v, fleet %v; want true, false, false",
 			e.Learning("host-a"), e.Learning("host-b"), e.Learning(""))
 	}
-	res := e.Evaluate(polDlopen("host-a", "/opt/a.so"))
-	e.Evaluate(polDlopen("host-b", "/opt/b.so"))
-	if sink.count() != 1 || sink.calls[0].hostID != "host-a" {
-		t.Fatalf("host window: candidates %+v, want one from host-a", sink.calls)
-	}
-	if !strings.Contains(res.Reason, "learning mode: PENDING entry cand-") {
-		t.Errorf("reason does not name the candidate: %q", res.Reason)
-	}
-	if res.Action != event.ActionAlert {
-		t.Errorf("learning mode changed the action: %s", res.Action)
+	if !quiet("host-a", "/opt/a.so") || quiet("host-b", "/opt/b.so") {
+		t.Error("host window: want host-a quiet and host-b not")
 	}
 
-	// The window ends: nothing more is learned.
+	// The window ends.
 	clock.set(polT0.Add(time.Hour))
-	e.Evaluate(polDlopen("host-a", "/opt/a2.so"))
-	if sink.count() != 1 {
-		t.Fatalf("learned after the window ended: %+v", sink.calls)
+	if quiet("host-a", "/opt/a2.so") {
+		t.Error("quiet after the window ended")
 	}
 
 	// A fleet window covers every host.
@@ -157,10 +204,8 @@ func TestLearning_StartEndAndScope(t *testing.T) {
 	if err := e.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	e.Evaluate(polDlopen("host-b", "/opt/b.so"))
-	e.Evaluate(polDlopen("host-c", "/opt/c.so"))
-	if sink.count() != 3 {
-		t.Fatalf("fleet window: %d candidates, want 3", sink.count())
+	if !quiet("host-b", "/opt/b2.so") || !quiet("host-c", "/opt/c.so") {
+		t.Error("fleet window: want every host quiet")
 	}
 	clock.set(clock.now().Add(time.Minute + time.Nanosecond))
 	if e.Learning("host-b") {
@@ -181,11 +226,11 @@ func TestLearning_StartEndAndScope(t *testing.T) {
 	}
 }
 
-// TestLearning_WhatIsLearned: matched events, lifecycle events and inventory
-// summaries are never candidates; per-program inventory events are.
-func TestLearning_WhatIsLearned(t *testing.T) {
+// TestDispositions_WhatIsRecorded: matched events, lifecycle events and
+// inventory summaries are never recorded as new hooks; per-program
+// inventory events are, at ALERT.
+func TestDispositions_WhatIsRecorded(t *testing.T) {
 	src, sink, clock := &polSource{}, &polSink{}, &polClock{t: polT0}
-	src.windows = []event.LearningWindow{{EndsAt: polT0.Add(time.Hour)}}
 	src.entries = []*event.AllowlistEntry{{
 		ID: "allow-a", LibraryPath: "/opt/allowed.so", Action: event.ActionAllow, Enabled: true,
 	}}
@@ -194,52 +239,100 @@ func TestLearning_WhatIsLearned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e.Evaluate(polDlopen("h", "/opt/allowed.so")) // matched
-	e.Evaluate(&event.HookEvent{ID: "o", HostID: "h", EventType: event.EventAgentOffline})
-	e.Evaluate(&event.HookEvent{ID: "s", HostID: "h", EventType: event.EventBPFInventory,
-		BPFInventoryDetail: &event.BPFInventoryDetail{ScanID: "1", Summary: true, ProgCount: 3}})
+	for name, c := range map[string]struct {
+		evt  *event.HookEvent
+		want event.Disposition
+	}{
+		"matched ALLOW": {polDlopen("h", "/opt/allowed.so"), event.DispositionAllowed},
+		"offline":       {&event.HookEvent{ID: "o", HostID: "h", EventType: event.EventAgentOffline}, event.DispositionLifecycle},
+		"summary": {&event.HookEvent{ID: "s", HostID: "h", EventType: event.EventBPFInventory,
+			BPFInventoryDetail: &event.BPFInventoryDetail{ScanID: "1", Summary: true, ProgCount: 3}}, event.DispositionAllowed},
+	} {
+		if res := e.Evaluate(c.evt); res.Disposition != c.want {
+			t.Errorf("%s: disposition %q, want %q", name, res.Disposition, c.want)
+		}
+	}
 	if sink.count() != 0 {
-		t.Fatalf("candidates: %+v, want none", sink.calls)
+		t.Fatalf("recorded: %+v, want nothing", sink.calls)
 	}
 
-	inv := &event.HookEvent{ID: "i", HostID: "h", EventType: event.EventBPFInventory, Severity: event.SeverityInfo,
-		BPFDetail:          &event.BPFDetail{ProgID: 9, ProgType: 8, ProgHash: "AABBCCDDEEFF0011"},
-		BPFInventoryDetail: &event.BPFInventoryDetail{ScanID: "1"}}
-	res := e.Evaluate(inv)
-	if sink.count() != 1 || inv.Severity != event.SeverityInfo || res.Action != event.ActionAlert {
-		t.Fatalf("inventory program: %d candidates, severity %s, action %s", sink.count(), inv.Severity, res.Action)
+	inv := func() *event.HookEvent {
+		return &event.HookEvent{ID: "i", HostID: "h", EventType: event.EventBPFInventory, Severity: event.SeverityInfo,
+			BPFDetail:          &event.BPFDetail{ProgID: 9, ProgType: 8, ProgHash: "AABBCCDDEEFF0011"},
+			BPFInventoryDetail: &event.BPFInventoryDetail{ScanID: "1"}}
 	}
-	want := event.LearnedKey{EventType: event.EventBPFInventory, SubjectKind: "bpf_tag",
+	first := inv()
+	res := e.Evaluate(first)
+	if sink.count() != 1 || first.Severity != event.SeverityAlert || res.Action != event.ActionAlert || res.Disposition != event.DispositionFirstSighting {
+		t.Fatalf("inventory program: %d recorded, severity %s, action %s, disposition %s", sink.count(), first.Severity, res.Action, res.Disposition)
+	}
+	want := event.LearnedKey{SubjectKind: "bpf_tag",
 		Subject: "aabbccddeeff0011", ProgType: 8}
 	if got := sink.calls[0].key; got != want {
 		t.Errorf("inventory key %+v, want %+v", got, want)
 	}
+	if res := e.Evaluate(inv()); res.Disposition != event.DispositionRepeat {
+		t.Errorf("next scan of the same program: %q, want repeat", res.Disposition)
+	}
 
-	// A rejected candidate matches (action ALERT), so it is not learned again.
+	// A rejected key matches (action ALERT): denied every time, never
+	// recorded again.
 	d := polDlopen("h", "/opt/rejected.so")
 	src.entries = append(src.entries, &event.AllowlistEntry{
 		ID: "rej", Action: event.ActionAlert, Enabled: true, Status: event.StatusRejected,
 		Learned: &event.Learned{Key: allowlist.KeyOf(d)},
 	})
 	_ = e.Reload(context.Background())
-	res = e.Evaluate(d)
-	if sink.count() != 1 || res.MatchedEntryID != "rej" || res.Action != event.ActionAlert || d.Severity != event.SeverityWarn {
-		t.Errorf("rejected key: %d candidates, entry %q, action %s, severity %s; want 1, rej, ALERT, WARN",
-			sink.count(), res.MatchedEntryID, res.Action, d.Severity)
+	before := sink.count()
+	for i := 0; i < 2; i++ {
+		d := polDlopen("h", "/opt/rejected.so")
+		res := e.Evaluate(d)
+		if res.Disposition != event.DispositionDenied || !res.Disposition.Kept() || res.MatchedEntryID != "rej" ||
+			res.Action != event.ActionAlert || d.Severity != event.SeverityWarn {
+			t.Errorf("rejected key, occurrence %d: %+v severity %s; want denied by rej, ALERT, WARN", i, res, d.Severity)
+		}
+	}
+	if sink.count() != before {
+		t.Errorf("a rejected key was recorded as a new hook")
 	}
 }
 
-// TestLearning_SinkErrorStillEvaluates: a failing store does not stop the
-// event from being evaluated.
-func TestLearning_SinkErrorStillEvaluates(t *testing.T) {
-	src, sink, clock := &polSource{}, &polSink{err: errors.New("db down")}, &polClock{t: polT0}
-	src.windows = []event.LearningWindow{{EndsAt: polT0.Add(time.Hour)}}
+// TestDisposition_DecidedSinceLoad: when the store finds a decided entry
+// the engine has not loaded yet, the event follows that entry.
+func TestDisposition_DecidedSinceLoad(t *testing.T) {
+	src, sink, clock := &polSource{}, &polSink{}, &polClock{t: polT0}
 	e := polEngine(src, sink, clock)
 	_ = e.Reload(context.Background())
-	evt := polDlopen("h", "/opt/x.so")
-	res := e.Evaluate(evt)
-	if res.Action != event.ActionAlert || evt.Severity != event.SeverityWarn || strings.Contains(res.Reason, "PENDING") {
-		t.Errorf("got %+v severity %s", res, evt.Severity)
+	allowed, denied := polDlopen("h", "/opt/ok.so"), polDlopen("h", "/opt/bad.so")
+	sink.decided = map[event.LearnedKey]event.PolicyAction{
+		allowlist.KeyOf(allowed): event.ActionAllow,
+		allowlist.KeyOf(denied):  event.ActionAlert,
+	}
+	if res := e.Evaluate(allowed); res.Disposition != event.DispositionAllowed || res.Action != event.ActionAllow || allowed.Severity != event.SeverityInfo {
+		t.Errorf("allowed since load: %+v severity %s", res, allowed.Severity)
+	}
+	if res := e.Evaluate(denied); res.Disposition != event.DispositionDenied || res.Action != event.ActionAlert || res.CandidateID != "" {
+		t.Errorf("denied since load: %+v", res)
+	}
+}
+
+// TestDisposition_NoSinkOrSinkErrorKeepsTheEvent: without a sink, or when
+// the store fails, an unmatched event is kept as a first sighting rather
+// than dropped.
+func TestDisposition_NoSinkOrSinkErrorKeepsTheEvent(t *testing.T) {
+	src, clock := &polSource{}, &polClock{t: polT0}
+	failing := polEngine(src, &polSink{err: errors.New("db down")}, clock)
+	_ = failing.Reload(context.Background())
+	noSink := NewEngine(zap.NewNop())
+	for name, e := range map[string]*Engine{"sink error": failing, "no sink": noSink} {
+		for i := 0; i < 2; i++ {
+			evt := polDlopen("h", "/opt/x.so")
+			res := e.Evaluate(evt)
+			if res.Disposition != event.DispositionFirstSighting || res.CandidateID != "" || res.Action != event.ActionAlert ||
+				evt.Severity != event.SeverityWarn || strings.Contains(res.Reason, "PENDING") {
+				t.Errorf("%s, occurrence %d: %+v severity %s", name, i, res, evt.Severity)
+			}
+		}
 	}
 }
 

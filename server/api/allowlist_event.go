@@ -26,13 +26,10 @@ type allowlistEventRequest struct {
 }
 
 // EntryForEvent returns an APPROVED ALLOW entry that matches exactly the
-// events with evt's learning-mode key (allowlist.KeyOf: event type, exe
-// hash, subject such as the BPF tag or library hash, and container
-// context), for the fleet (hostID "") or one host. It is the entry learning
-// mode would have proposed for the event, approved. The key is the only
-// criterion, as for learned entries: the field criteria cannot express some
-// subjects (a shared-memory pattern, a linker config file), and an empty
-// exe hash would match any binary.
+// events with evt's learning-mode key (allowlist.KeyOf: what was loaded or
+// changed, such as the BPF tag or library hash), for the fleet (hostID "")
+// or one host. It is the entry learning mode would have proposed for the
+// event, approved.
 func EntryForEvent(evt *event.HookEvent, hostID, description string, now time.Time) *event.AllowlistEntry {
 	k := allowlist.KeyOf(evt)
 	if description == "" {
@@ -43,7 +40,7 @@ func EntryForEvent(evt *event.HookEvent, hostID, description string, now time.Ti
 		CreatedAt:   now,
 		CreatedBy:   "api",
 		Description: description,
-		EventTypes:  []event.EventType{evt.EventType},
+		EventTypes:  allowlist.EventTypesFor(k),
 		HostID:      hostID,
 		Action:      event.ActionAllow,
 		Enabled:     true,
@@ -59,10 +56,12 @@ func EntryForEvent(evt *event.HookEvent, hostID, description string, now time.Ti
 	}
 }
 
-// handleAllowlistEvent creates an allowlist entry from a stored event
-// ("Allowlist this event" in the dashboard). See EntryForEvent. When an
-// enabled ALLOW entry for the same key and scope exists, it answers 409
-// with that entry's ID.
+// handleAllowlistEvent allows a stored event's key from now on ("Allowlist
+// this event" in the dashboard). When a PENDING entry for the key exists,
+// which it does for the first sighting of a new hook, the entry is
+// approved for the scope, as POST /policies/{id}/approve would. Otherwise a
+// new entry is created (see EntryForEvent). When an enabled ALLOW entry for
+// the same key and scope exists, it answers 409 with that entry's ID.
 func (s *Server) handleAllowlistEvent(w http.ResponseWriter, r *http.Request) {
 	var req allowlistEventRequest
 	if !decodeBody(w, r, &req, true, `invalid request body: want {"scope": "fleet"} or {"scope": "host"}`) {
@@ -127,7 +126,19 @@ func (s *Server) handleAllowlistEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.store.CreateAllowlistEntry(r.Context(), entry); err != nil {
+	// The event's key is usually a new hook waiting for a decision: its
+	// first sighting created a PENDING entry. Allowlisting the event then
+	// decides that entry, as approving it would, so it leaves the list of
+	// new hooks. Otherwise a new entry is created.
+	decided, err := s.approvePendingFor(r, entry, hostID, req.Description)
+	if err != nil {
+		s.logger.Error("approve the event's PENDING entry failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "failed to create policy")
+		return
+	}
+	if decided != nil {
+		entry = decided
+	} else if err := s.store.CreateAllowlistEntry(r.Context(), entry); err != nil {
 		s.logger.Error("create allowlist entry failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to create policy")
 		return
@@ -136,4 +147,37 @@ func (s *Server) handleAllowlistEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, entry)
+}
+
+// approvePendingFor approves the PENDING entry with entry's key, if there
+// is one: for the fleet (hostID "") the PENDING entry itself, or for one
+// host a new host-scoped entry (store.DecideCandidate). A description the
+// caller gave replaces the PENDING entry's. It returns the entry now in
+// force, or nil when no PENDING entry has the key (or another request
+// decided it first).
+func (s *Server) approvePendingFor(r *http.Request, entry *event.AllowlistEntry, hostID, description string) (*event.AllowlistEntry, error) {
+	pending, err := s.store.QueryAllowlist(r.Context(), event.StatusPending)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pending {
+		if p.Learned == nil || p.Learned.Key != entry.Learned.Key {
+			continue
+		}
+		decided, err := s.store.DecideCandidate(r.Context(), p.ID, event.StatusApproved, hostID)
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrNotPending) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if description != "" {
+			decided.Description = description
+			if err := s.store.UpdateAllowlistEntry(r.Context(), decided); err != nil {
+				return nil, err
+			}
+		}
+		return decided, nil
+	}
+	return nil, nil
 }

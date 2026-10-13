@@ -66,6 +66,7 @@ func (s *Server) Router(apiTokens []string, dashboard http.Handler) http.Handler
 		r.Put("/api/v1/policies/{id}", s.handleReplacePolicy)
 		r.Patch("/api/v1/policies/{id}", s.handlePatchPolicy)
 		r.Delete("/api/v1/policies/{id}", s.handleDeletePolicy)
+		r.Post("/api/v1/policies/decide", s.handleDecidePolicies)
 		r.Post("/api/v1/policies/{id}/approve", s.handleApprovePolicy)
 		r.Post("/api/v1/policies/{id}/reject", s.handleRejectPolicy)
 
@@ -79,6 +80,9 @@ func (s *Server) Router(apiTokens []string, dashboard http.Handler) http.Handler
 		// Hosts
 		r.Get("/api/v1/hosts", s.handleListHosts)
 		r.Get("/api/v1/hosts/{id}", s.handleGetHost)
+
+		// Kernel upgrades
+		r.Get("/api/v1/kernel-upgrades", s.handleKernelUpgrades)
 
 		// Server settings for the dashboard (no secrets)
 		r.Get("/api/v1/settings", s.handleSettings)

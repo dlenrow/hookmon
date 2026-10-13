@@ -131,6 +131,7 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 	} else {
 		gt := transport.NewGRPCTransport(cfg, logger, transport.DefaultRetryConfig())
 		gt.SetSensorSource(func() []event.SensorHealth { return sensorHealth(reg) })
+		gt.KernelRelease = kernelRelease()
 		t = gt
 	}
 
@@ -264,8 +265,22 @@ func (a *Agent) Run(ctx context.Context) error {
 		go a.heartbeatLoop(ctx)
 	}
 
+	// Send end-to-end markers every 60 s (not in console mode).
+	if !a.cfg.ConsoleMode {
+		a.wg.Add(1)
+		go a.markerLoop(ctx)
+	}
+
 	<-ctx.Done()
 	a.logger.Info("sensor bus shutting down")
+
+	// Announce the clean shutdown so the server does not raise AGENT_OFFLINE.
+	if !a.cfg.ConsoleMode {
+		if err := a.transport.SendShutdown("shutdown"); err != nil {
+			a.logger.Debug("shutdown notice failed", zap.Error(err))
+		}
+	}
+
 	err := a.shutdown()
 	a.fatalMu.Lock()
 	defer a.fatalMu.Unlock()
@@ -398,6 +413,22 @@ func (a *Agent) healthLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+func (a *Agent) markerLoop(ctx context.Context) {
+	defer a.wg.Done()
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := a.transport.SendMarker(); err != nil {
+				a.logger.Debug("marker send failed", zap.Error(err))
+			}
 		}
 	}
 }

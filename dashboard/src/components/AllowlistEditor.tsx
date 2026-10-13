@@ -228,9 +228,8 @@ export function AllowlistEditor({ onSave, onCancel, initial, editing }: Allowlis
 
       {initial?.learned && (
         <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-          This entry also matches only events with its exact key ({initial.learned.key.event_type},{' '}
-          {initial.learned.key.subject_kind || 'binary'} {initial.learned.key.subject || ''}). The key cannot be
-          edited.
+          This entry matches only events with its exact key ({initial.learned.key.subject_kind || 'unknown'}{' '}
+          {initial.learned.key.subject || ''}). The key cannot be edited.
         </p>
       )}
 

@@ -12,9 +12,11 @@ The examples were run against a real `hookmon-server` with PostgreSQL 16. Events
 - [Events](#events)
 - [Event JSON](#event-json)
 - [Hosts](#hosts)
+- [Kernel Upgrades](#kernel-upgrades)
 - [Policies (Allowlist)](#policies-allowlist)
 - [Learning Mode](#learning-mode)
 - [Settings](#settings)
+- [Bus–Server gRPC Stream](#busserver-grpc-stream)
 - [WebSocket Event Feed](#websocket-event-feed)
 - [hookmon-cli](#hookmon-cli)
 - [Example Runs](#example-runs)
@@ -58,7 +60,7 @@ Authorization: Bearer <token>
 
 ### Request Bodies
 
-These rules apply to every write that takes a body: create, replace and patch a policy; approve and reject; start learning; allowlist an event.
+These rules apply to every write that takes a body: create, replace and patch a policy; approve and reject, one entry or many; start learning; allowlist an event.
 
 - The body is one JSON value. Data after it is a 400.
 - The body is at most 64 KiB (65536 bytes). A larger body is a 413.
@@ -98,6 +100,20 @@ Times are RFC 3339, in UTC (`Z`), whatever the server's time zone. The one excep
 
 Every write to the allowlist or to learning mode reloads the policy engine before the server answers. The next event is evaluated with the change. If the write is saved but the reload fails, the answer is 500 with `saved, but reloading the policy failed; send SIGHUP to retry`.
 
+### Which Events Are Stored
+
+The server keeps a hook once, the first time it sees it. Each event it evaluates gets a `policy_result.disposition`:
+
+| Disposition | When | Stored, on the WebSocket feed, sent to connectors |
+|-------------|------|---------------------------------------------------|
+| `first_sighting` | No APPROVED or REJECTED entry matched, and this event created the PENDING entry for its [key](allowlist-guide.md#the-dedupe-key). The key is fleet-wide: a new hook seen on 40 hosts is one PENDING entry with 40 hosts, and one first-sighting event from the first host | Yes. During a [learning window](#learning-mode) it is `quiet`: not sent to alert connectors |
+| `repeat` | No decided entry matched, and a PENDING entry for the key already existed. Its `occurrences`, `last_seen` and `hosts` are updated | No |
+| `allowed` | An entry with action ALLOW matched (or a BPF inventory summary) | No |
+| `denied` | An ALERT or DENY entry matched, such as a rejected PENDING entry | Yes, every time |
+| `lifecycle` | AGENT_OFFLINE or AGENT_RECOVERED | Yes |
+
+So the event list, the WebSocket feed and the connectors carry first sightings, denied hooks and host status events. A new hook waits as a PENDING entry, with its count and hosts, until someone approves it (it is then silent) or rejects it (it then alerts every time). The bus still sends every occurrence; the server drops repeats and allowed ones, and acknowledges them like any other event.
+
 ### Paths Outside the API
 
 With `dashboard_dir` set, any path outside `/api` that is not a route serves the dashboard (`index.html` for its client-side routes, or the asset file). An unknown path under `/api` always gets the JSON 404. With no dashboard, every unknown path gets the JSON 404.
@@ -109,7 +125,7 @@ With `dashboard_dir` set, any path outside `/api` that is not a route serves the
 | GET | `/api/v1/health` | none | 200 | Liveness of the HTTP listener | `health` |
 | GET | `/api/v1/events` | token | 200 | List events, newest first | `events` |
 | GET | `/api/v1/events/{id}` | token | 200 | One event | none |
-| POST | `/api/v1/events/{id}/allowlist` | token | 201 | Allowlist this event | none |
+| POST | `/api/v1/events/{id}/allowlist` | token | 201 | Allowlist this event (approves its PENDING entry if it has one) | none |
 | GET | `/api/v1/hosts` | token | 200 | Host inventory | `hosts` |
 | GET | `/api/v1/hosts/{id}` | token | 200 | One host | none |
 | GET | `/api/v1/policies` | token | 200 | List allowlist entries | `policies`, `policies pending` |
@@ -119,11 +135,12 @@ With `dashboard_dir` set, any path outside `/api` that is not a route serves the
 | DELETE | `/api/v1/policies/{id}` | token | 204 | Delete an entry | `policies delete` |
 | POST | `/api/v1/policies/{id}/approve` | token | 200 | Approve a PENDING entry | `policies approve` |
 | POST | `/api/v1/policies/{id}/reject` | token | 200 | Reject a PENDING entry | `policies reject` |
-| GET | `/api/v1/learning` | token | 200 | Learning windows | `learning` |
-| PUT | `/api/v1/learning/fleet` | token | 200 | Start fleet learning | `learning start --fleet` |
-| DELETE | `/api/v1/learning/fleet` | token | 204 | Stop fleet learning | `learning stop --fleet` |
-| PUT | `/api/v1/learning/hosts/{hostID}` | token | 200 | Start learning for one host | `learning start --host` |
-| DELETE | `/api/v1/learning/hosts/{hostID}` | token | 204 | Stop learning for one host | `learning stop --host` |
+| POST | `/api/v1/policies/decide` | token | 200 | Approve or reject many PENDING entries at once | `policies approve\|reject ID...` |
+| GET | `/api/v1/learning` | token | 200 | Learning windows (quiet periods) | `learning` |
+| PUT | `/api/v1/learning/fleet` | token | 200 | Start a fleet quiet period | `learning start --fleet` |
+| DELETE | `/api/v1/learning/fleet` | token | 204 | Stop the fleet quiet period | `learning stop --fleet` |
+| PUT | `/api/v1/learning/hosts/{hostID}` | token | 200 | Start a quiet period for one host | `learning start --host` |
+| DELETE | `/api/v1/learning/hosts/{hostID}` | token | 204 | Stop one host's quiet period | `learning stop --host` |
 | GET | `/api/v1/settings` | token | 200 | Server settings for the dashboard | none |
 | GET | `/api/v1/ws/events` | token (subprotocol or header) | 101 | Live event feed | none |
 
@@ -148,7 +165,7 @@ hookmon-cli $FLAGS health
 
 ### GET /api/v1/events
 
-Lists stored events, newest first (by `timestamp`).
+Lists stored events, newest first (by `timestamp`): first sightings, denied hooks and host status events (see [Which Events Are Stored](#which-events-are-stored)).
 
 | Parameter | Type | Default | Meaning |
 |-----------|------|---------|---------|
@@ -191,7 +208,10 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/events/$EVENT_
 
 ### POST /api/v1/events/{id}/allowlist
 
-"Allowlist this event" in the dashboard. Creates an APPROVED entry with action ALLOW that matches exactly the events with this event's [learning key](allowlist-guide.md#the-dedupe-key), for the fleet or for the event's host.
+"Allowlist this event" in the dashboard. Allows, from now on, exactly the events with this event's [key](allowlist-guide.md#the-dedupe-key), for the fleet or for the event's host.
+
+- **When a PENDING entry has the event's key**, as it does for a first sighting until someone decides it, that entry is approved, exactly as [`POST /policies/{id}/approve`](#post-apiv1policiesidapprove-and-reject) would approve it. With scope `fleet` the PENDING entry itself becomes APPROVED with action ALLOW. With scope `host` a new host-scoped entry is created and the host is taken off the PENDING entry's `learned.hosts`; the PENDING entry is deleted when no host is left. Either way the hook leaves the list of new hooks, and no second entry for the key is created. The answer is the entry now in force, with `created_by` `learning-mode` and the PENDING entry's `learned` block (including `first_event_id`). A `description` given here replaces the PENDING entry's.
+- **Otherwise** (an event from before first sightings were recorded, or a denied event whose key has no PENDING entry), a new APPROVED entry with action ALLOW is created, as below.
 
 Body:
 
@@ -201,11 +221,11 @@ Body:
 | `host_id` | string | no | With `host`, may repeat the event's host ID; any other ID is a 400. With `fleet`, must be empty. |
 | `description` | string | no | Defaults to `from event <id>: <event type> by <exe path>: <subject>`. |
 
-The new entry has `created_by` `api`, `event_types` set to the event's type, and a `learned` block: the key, the event's exe path, `occurrences` 1, `first_seen` and `last_seen` set to the event's time, and `hosts` set to the event's host. The key is its only criterion. Field criteria can't express some subjects (a shared memory pattern, a linker config file), and an empty `exe_hash` criterion would match any binary.
+A new entry has `created_by` `api`, `event_types` set to the event's type, and a `learned` block: the key, the event's exe path, `occurrences` 1, `first_seen` and `last_seen` set to the event's time, and `hosts` set to the event's host. The key is its only criterion. Field criteria can't express some subjects (a shared memory pattern, a linker config file), and an empty `exe_hash` criterion would match any binary.
 
 | Status | When |
 |--------|------|
-| 201 | The new entry |
+| 201 | The entry now in force: the approved PENDING entry, the new host-scoped entry, or the new entry |
 | 400 | Bad `scope`; `host_id` with `fleet`; a `host_id` that is not the event's host; scope `host` for an event with no host ID; the event is AGENT_OFFLINE or AGENT_RECOVERED (`... is a host status event, not a hook; there is nothing to allowlist`) |
 | 404 | `{"error":"event not found"}` |
 | 409 | An enabled, unexpired ALLOW entry with the same key and scope already exists. The body names it: `{"error":"an entry for this event's key and scope already allows it","id":"<entry id>"}` |
@@ -218,7 +238,7 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X POST \
   "$HM/api/v1/events/$EVENT_ID/allowlist" -d '{"scope": "host"}'
 ```
 
-Response (201, abridged):
+Response (201, abridged), for an event whose key had no PENDING entry:
 
 ```json
 {
@@ -291,7 +311,9 @@ Every event, from REST and from the WebSocket, has this shape. Detail objects ar
   },
   "policy_result": {
     "action": "ALERT",
-    "reason": "no allowlist match for BPF_LOAD event from web-01 (exe=/tmp/loader, hash=sha256:20cd6f458a31cbc5b5c44ab824dcd2d3edc60d51e44b61683bfe9fae7e04f67d)"
+    "reason": "no allowlist match for BPF_LOAD event from web-01 (exe=/tmp/loader, hash=sha256:20cd6f458a31cbc5b5c44ab824dcd2d3edc60d51e44b61683bfe9fae7e04f67d); first sighting: PENDING entry 0b5f3c6e-2f43-4f0e-9d0e-2b6a4f1f6c11",
+    "disposition": "first_sighting",
+    "candidate_id": "0b5f3c6e-2f43-4f0e-9d0e-2b6a4f1f6c11"
   }
 }
 ```
@@ -322,9 +344,12 @@ Every event, from REST and from the WebSocket, has this shape. Detail objects ar
 |-------|------|---------|
 | `action` | string | `ALLOW` if an ALLOW entry matched; otherwise the action of the entry that matched (`ALERT` or `DENY`), or `ALERT` when nothing matched. AGENT_OFFLINE and AGENT_RECOVERED are always `ALERT`. `DENY` blocks nothing |
 | `matched_entry_id` | string | The entry that decided the event. Omitted when none did |
-| `reason` | string | Why. For example `matched allowlist entry: <description>`, `no allowlist match for ...`, a built-in rule such as `rule:linker_config_modified — ...`, and `; learning mode: PENDING entry <id>` when learning mode recorded it |
+| `reason` | string | Why. For example `matched allowlist entry: <description>`, `no allowlist match for ...`, a built-in rule such as `rule:linker_config_modified — ...`, and `; first sighting: PENDING entry <id>` on a first sighting |
+| `disposition` | string | `first_sighting`, `denied` or `lifecycle` on a stored event (`repeat` and `allowed` events are not stored). See [Which Events Are Stored](#which-events-are-stored). Omitted on events stored before the field existed |
+| `candidate_id` | string | On a first sighting, the PENDING entry it created. Omitted otherwise |
+| `quiet` | boolean | True on a first sighting during a learning window: it was not sent to alert connectors. Omitted when false |
 
-`action` and `severity` are separate. An unmatched `/dev/shm` segment the bus rated INFO has `severity` INFO and `action` ALERT.
+`action` and `severity` are separate. A first sighting of a `/dev/shm` segment the bus rated INFO has `severity` INFO and `action` ALERT.
 
 ### Event Types
 
@@ -471,6 +496,9 @@ hookmon-cli $FLAGS hosts
 | `enrolled_at` | time | Enrollment time |
 | `last_heartbeat` | time | When the server received the latest heartbeat (server clock) |
 | `last_event_at` | time | The newest `timestamp` of the host's stored events, AGENT_OFFLINE and AGENT_RECOVERED included. Storing an event moves it forward; an event that arrives late, with an older timestamp, leaves it alone. Omitted until the host's first event |
+| `kernel_release` | string | The running kernel (`uname -r`), from the latest heartbeat. Omitted before the first heartbeat |
+| `prev_kernel_release` | string | The previous kernel, when the host changed kernels. Omitted when no change has been recorded |
+| `kernel_changed_at` | time | When the kernel change was detected. Omitted when no change has been recorded |
 | `sensors` | array | Sensor health from the latest heartbeat: `name`, `status` (`alive`, `dead`, `failed`, `unverifiable` or `unknown`) and `reason`. Omitted before the first heartbeat |
 
 ```json
@@ -492,6 +520,28 @@ hookmon-cli $FLAGS hosts
 
 (The `sensors` list is abridged; a real bus reports all eight. The example run was before `last_event_at` was written, so it is missing here; a host that has sent an event has it.)
 
+## Kernel Upgrades
+
+### GET /api/v1/kernel-upgrades
+
+Lists hosts that recently changed kernels and correlates their PENDING BPF entries against APPROVED entries from the previous kernel, matching on program name and type. Helps an operator approve BPF programs that reappeared with new tags after a kernel upgrade.
+
+```bash
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/kernel-upgrades"
+```
+
+Returns a JSON array. Each element:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `prev_kernel` | string | The kernel the hosts upgraded from |
+| `new_kernel` | string | The kernel the hosts upgraded to |
+| `hosts` | string[] | Host IDs that made this transition |
+| `matched_ids` | string[] | PENDING entry IDs whose program name and type match an APPROVED entry |
+| `unmatched_ids` | string[] | PENDING entry IDs that do not match any APPROVED entry |
+
+Matched entries can be approved in bulk (the dashboard offers an "Allow N matched" button). Unmatched entries need investigation: they may be new programs, or programs whose names changed.
+
 ## Policies (Allowlist)
 
 Policies are allowlist entries. How they match events is in [allowlist-guide.md](allowlist-guide.md#how-matching-works).
@@ -502,7 +552,7 @@ Policies are allowlist entries. How they match events is in [allowlist-guide.md]
 |-------|------|--------|---------|
 | `id` | string | server, or the creator | Entry ID. A UUID unless the creator gives one |
 | `created_at` | time | server, or the creator | Creation time |
-| `created_by` | string | creator | Free text. Learning mode sets `learning-mode`; allowlisting an event sets `api`; otherwise whatever the body says (empty by default) |
+| `created_by` | string | creator | Free text. Entries the server made for a new hook (PENDING, and the entries deciding them) have `learning-mode`; allowlisting an event that had no PENDING entry sets `api`; otherwise whatever the body says (empty by default) |
 | `description` | string | operator | Shown in the dashboard and in `policy_result.reason` |
 | `event_types` | array of strings | operator | Event types it applies to. Empty: every type |
 | `exe_hash` | string | operator | `sha256:<hex>` of the executable |
@@ -521,7 +571,7 @@ Policies are allowlist entries. How they match events is in [allowlist-guide.md]
 | `expires` | time or null | operator | The entry stops matching at this time. `null`: never |
 | `enabled` | boolean | operator | Only enabled entries match. **Defaults to false when omitted** |
 | `status` | string | server | `APPROVED`, `PENDING` or `REJECTED` |
-| `learned` | object | server | Present on entries from learning mode or from an event: `key`, `exe_path`, `occurrences`, `first_seen`, `last_seen`, `hosts`. See [the dedupe key](allowlist-guide.md#the-dedupe-key) |
+| `learned` | object | server | Present on entries the server made for a new hook, and on entries from an event: `key`, `exe_path`, `occurrences`, `first_seen`, `last_seen`, `hosts`, and `first_event_id`, the stored first-sighting event (omitted when there is none). See [the dedupe key](allowlist-guide.md#the-dedupe-key) |
 
 On write, `exe_hash` and `library_hash` accept `sha256:<64 hex digits>` (prefix in any case) or the 64 hex digits alone, and are stored as `sha256:<lowercase hex>`. `prog_hash` must be 16 hex digits and is stored in lower case. Anything else is a 400, since it could never match.
 
@@ -530,7 +580,7 @@ On write, `exe_hash` and `library_hash` accept `sha256:<64 hex digits>` (prefix 
 | Parameter | Meaning |
 |-----------|---------|
 | (none) | Entries in force: `APPROVED` and `REJECTED` |
-| `status=PENDING` | Learning-mode candidates |
+| `status=PENDING` | New hooks waiting for a decision |
 | `status=APPROVED`, `status=REJECTED` | Those only |
 | `status=ALL` | Every entry |
 
@@ -542,7 +592,10 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/policies?statu
 curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/policies?status=ALL"
 hookmon-cli $FLAGS policies            # APPROVED and REJECTED
 hookmon-cli $FLAGS policies pending    # PENDING
+hookmon-cli $FLAGS policies pending --since 2h --host web-01 --type BPF_LOAD
 ```
+
+`policies pending` filters on the client: `--since` (an RFC 3339 time, or a duration back from now such as `90m`, `36h`, `7d`) keeps entries first seen at or after it; `--host` (host ID or hostname) keeps entries seen on that host; `--type` keeps one event type (case-insensitive).
 
 There is no route for one entry. Filter the list by `id`, for example with `jq`.
 
@@ -552,7 +605,7 @@ Creates an entry. It is APPROVED and in force at once (if `enabled` is true).
 
 - The body is an [entry object](#allowlist-entry-object). `action` is required.
 - Set `"enabled": true`. An entry created without it is stored disabled and matches nothing.
-- `status` must be empty or `APPROVED`; PENDING entries come only from learning mode.
+- `status` must be empty or `APPROVED`; PENDING entries come only from the server, when it first sees a hook.
 - `learned` must be absent.
 - `id` and `created_at` are generated when absent. An `id` that is already taken is a 409, and the existing entry is not changed.
 
@@ -634,7 +687,7 @@ CLI: none. The dashboard's Policy Manager uses PATCH for its enable toggle and P
 
 ### DELETE /api/v1/policies/{id}
 
-Deletes any entry, including a PENDING one. 204 with no body; 404 if there is no such entry. If learning mode is on and the event happens again, a deleted entry's key is proposed again.
+Deletes any entry, including a PENDING one. 204 with no body; 404 if there is no such entry. If the event happens again, a deleted entry's key is a new hook again: a first sighting and a new PENDING entry.
 
 ```bash
 curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X DELETE "$HM/api/v1/policies/$ENTRY_ID"
@@ -650,7 +703,7 @@ Body: `{"scope": "fleet"}` or `{"scope": "host", "host_id": "<enrolled host ID>"
 | Decision | Scope | Effect | Answer |
 |----------|-------|--------|--------|
 | approve | fleet | The entry becomes APPROVED with action ALLOW, for every host | The same entry |
-| reject | fleet | The entry becomes REJECTED with action ALERT. Its events keep alerting, and learning mode does not propose them again | The same entry |
+| reject | fleet | The entry becomes REJECTED with action ALERT. Its events are stored and alert every time, and the key is not proposed again | The same entry |
 | approve or reject | host | A new entry with the same key, for that host only (`host_id` set, `learned.hosts` set to the host). The host is taken off the PENDING entry's `learned.hosts`; the PENDING entry is deleted when no host is left | The new entry |
 
 | Status | When |
@@ -669,11 +722,58 @@ hookmon-cli $FLAGS policies approve "$ENTRY_ID" --fleet
 hookmon-cli $FLAGS policies reject "$ENTRY_ID" --host "$HOST_ID"
 ```
 
-The ID and the flags can come in either order.
+The ID and the flags can come in either order. With several IDs, or `--seen-hosts`, the CLI uses [`/policies/decide`](#post-apiv1policiesdecide).
+
+### POST /api/v1/policies/decide
+
+Decides many PENDING entries in one call, such as every new hook a software update brought. All are decided in one database transaction, and the policy is reloaded once.
+
+Body:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `ids` | array of strings | 1 to 1000 PENDING entry IDs. An empty ID is a 400 |
+| `decision` | string | `approve` (APPROVED, action ALLOW: silent from now on) or `reject` (REJECTED, action ALERT: stored and alerting every time) |
+| `scope` | string | `fleet`: each entry itself is decided for every host. `seen_hosts`: for each host in the entry's `learned.hosts`, a host-scoped entry with the same key is created, and the PENDING entry is deleted; other hosts that later see the hook get a new first sighting |
+
+Response 200: one result per ID, in order:
+
+```json
+{
+  "results": [
+    {"id": "0b5f3c6e-2f43-4f0e-9d0e-2b6a4f1f6c11", "ok": true, "entries": [{"id": "0b5f3c6e-2f43-4f0e-9d0e-2b6a4f1f6c11", "status": "APPROVED", "action": "ALLOW", "...": "..."}]},
+    {"id": "7d1e0c2a-5a3b-4c8e-9f6d-1e2a3b4c5d6e", "ok": false, "error": "allowlist entry 7d1e0c2a-5a3b-4c8e-9f6d-1e2a3b4c5d6e is APPROVED: allowlist entry is not PENDING"}
+  ]
+}
+```
+
+- `entries` are the entries now in force for that ID: the entry itself (`fleet`), or one per host (`seen_hosts`).
+- An ID that does not exist, is not PENDING, appears twice, or (with `seen_hosts`) has no hosts recorded gets `ok: false` and an `error`; the other IDs still apply.
+- The policy is reloaded only if at least one ID was decided.
+
+| Status | When |
+|--------|------|
+| 200 | The results, including any per-ID failures |
+| 400 | Not JSON; an unknown field; `decision must be "approve" or "reject"`; `scope must be "fleet" or "seen_hosts"`; `ids must name 1 to 1000 entries`; `ids must not contain an empty ID` |
+| 413 | Body over 64 KiB |
+| 500 | Database error: nothing was decided |
+
+```bash
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X POST "$HM/api/v1/policies/decide" \
+  -d '{"ids": ["'"$ID1"'", "'"$ID2"'"], "decision": "approve", "scope": "seen_hosts"}'
+hookmon-cli $FLAGS policies approve "$ID1" "$ID2" --seen-hosts
+hookmon-cli $FLAGS policies reject "$ID3" --fleet
+```
+
+The CLI prints the results and exits non-zero if any ID was not decided. Every new hook first seen in the last two hours, allowed where it was seen:
+
+```bash
+hookmon-cli $FLAGS policies pending --since 2h | jq -r '.[].id' | xargs hookmon-cli $FLAGS policies approve --seen-hosts
+```
 
 ## Learning Mode
 
-While a learning window covers a host, every event from it that no entry matches becomes a PENDING entry. See [allowlist-guide.md](allowlist-guide.md#learning-mode).
+Every unmatched key becomes a PENDING entry the first time it is seen, whether or not a learning window is open. A learning window is a quiet period for the hosts it covers: first sightings in it are stored and shown as usual, and marked `quiet`, so they are not sent to alert connectors (`min_severity` ALERT or CRITICAL); event-feed connectors still get them. Use one when HookMon first meets a fleet, review the PENDING list, then let it end. See [allowlist-guide.md](allowlist-guide.md#learning-mode).
 
 ### GET /api/v1/learning
 
@@ -709,7 +809,7 @@ hookmon-cli $FLAGS learning
 
 ### PUT /api/v1/learning/fleet and /api/v1/learning/hosts/{hostID}
 
-Starts learning mode, or restarts it with a new end time. There is one window per scope; a PUT replaces it.
+Starts a quiet period, or restarts it with a new end time. There is one window per scope; a PUT replaces it.
 
 Body, exactly one of:
 
@@ -734,7 +834,7 @@ hookmon-cli $FLAGS learning start --host "$HOST_ID" --until 2026-11-01T00:00:00Z
 
 ### DELETE /api/v1/learning/fleet and /api/v1/learning/hosts/{hostID}
 
-Ends learning mode now by deleting the window. PENDING entries stay for review. 204; 404 (`no learning window for that scope`) when there is none. An ended window that was not deleted also gives 204.
+Ends the quiet period now by deleting the window: later first sightings go to alert connectors again. PENDING entries stay for review. 204; 404 (`no learning window for that scope`) when there is none. An ended window that was not deleted also gives 204.
 
 ```bash
 curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X DELETE "$HM/api/v1/learning/fleet"
@@ -799,6 +899,19 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/settings"
 
 CLI: none.
 
+## Bus–Server gRPC Stream
+
+The bus connects to `hookmon-server` on the mutual-TLS gRPC port (9443) and sends a stream of `AgentMessage` payloads. Each message is one of four kinds:
+
+| Kind | Proto field | Meaning |
+|------|-------------|---------|
+| `event` | `HookEvent event = 1` | A sensor event |
+| `heartbeat` | `Heartbeat heartbeat = 2` | Sensor health snapshot, sent periodically. Carries `kernel_release` (from `uname -r`) |
+| `shutdown` | `ShutdownNotice shutdown = 3` | The bus is stopping cleanly (SIGTERM/SIGINT). Contains a `reason` string. The server suppresses AGENT_OFFLINE for this host |
+| `marker` | `Marker marker = 4` | End-to-end liveness probe, sent every 60 s. Contains a `timestamp`. The server tracks the last marker per host |
+
+The heartbeat's `kernel_release` field lets the server detect kernel upgrades. When the value changes, the server records the previous kernel and the transition time on the host record.
+
 ## WebSocket Event Feed
 
 `GET /api/v1/ws/events` upgrades to a WebSocket and streams every event the server processes, from the moment the handshake completes. It sends no history: load recent events over REST, then follow the feed.
@@ -855,7 +968,8 @@ curl exits with code 28 when `--max-time` runs out; that is expected.
 ### Messages
 
 - Each event is one text message: the [event JSON](#event-json) after policy evaluation, the same object REST returns for it (REST's times have at most microsecond precision, as PostgreSQL stores them).
-- Every subscriber gets every event, in the order the server processed them. Several tabs each get the full feed.
+- The feed carries the events the server stores: first sightings, denied hooks and host status events. Repeats of a new hook and allowed hooks are not sent (see [Which Events Are Stored](#which-events-are-stored)).
+- Every subscriber gets every one of those events, in the order the server processed them. Several tabs each get the full feed.
 - AGENT_OFFLINE and AGENT_RECOVERED are sent too.
 - The server sends a ping every 30 s and closes the connection when no pong has arrived for 60 s. Browsers answer pings on their own.
 - Client messages are read and ignored. A client message over 4096 bytes closes the connection.
@@ -888,11 +1002,12 @@ Output is the server's JSON, indented, with object keys sorted. Errors print `er
 | `events [--limit N] [--host ID] [--type TYPE]` | `GET /api/v1/events?limit=N&host_id=ID&event_type=TYPE` (limit 50 by default) |
 | `hosts` | `GET /api/v1/hosts` |
 | `policies` | `GET /api/v1/policies` |
-| `policies pending` | `GET /api/v1/policies?status=PENDING` |
+| `policies pending [--since TIME\|DURATION] [--host ID\|NAME] [--type TYPE]` | `GET /api/v1/policies?status=PENDING`, filtered on the client (`--host` by name also reads `GET /api/v1/hosts`) |
 | `policies create` (JSON on stdin) | `POST /api/v1/policies` |
 | `policies delete ID` | `DELETE /api/v1/policies/ID` |
 | `policies approve ID --fleet\|--host HOST_ID` | `POST /api/v1/policies/ID/approve` |
 | `policies reject ID --fleet\|--host HOST_ID` | `POST /api/v1/policies/ID/reject` |
+| `policies approve\|reject ID... --fleet\|--seen-hosts` (several IDs, or `--seen-hosts`) | `POST /api/v1/policies/decide`. Exits 1 if any ID was not decided |
 | `learning` (or `learning status`) | `GET /api/v1/learning` |
 | `learning start --fleet\|--host HOST_ID --for DURATION\|--until TIME` | `PUT /api/v1/learning/fleet` or `/hosts/HOST_ID` |
 | `learning stop --fleet\|--host HOST_ID` | `DELETE /api/v1/learning/fleet` or `/hosts/HOST_ID` |
@@ -902,6 +1017,8 @@ No CLI command covers one event, one host, PUT, PATCH, allowlisting an event, `s
 ## Example Runs
 
 Every curl and `hookmon-cli` example in this document and in [allowlist-guide.md](allowlist-guide.md) was run on 2026-10-11 against `hookmon-server` built from this tree, on drl-nuc8i3bek (Ubuntu 22.10), with TLS from a test CA and `postgres:16-alpine` pinned by digest. A test client enrolled two hosts, `web-01` and `web-02`, through the enrollment port, and streamed synthetic events of every type over the bus's gRPC transport (`agent/transport`). No real bus ran, so the events' process details are made up; their shape and the server's handling of them are real. The outputs shown are from that run; IDs differ on every server.
+
+First sightings came later (the server stores a hook once and keeps its repeats as a count). The examples added with them, `POST /policies/decide`, the `policies pending` filters, the multi-ID `policies approve`, and allowlisting an event that has a PENDING entry, were not part of that run. Tests cover each: `TestDecidePolicies_Bulk`, `TestDecideCandidates_Bulk`, `TestIntegration_BulkDecide`, `TestCLI_PendingFilters`, `TestAllowlistEvent_DecidesPendingEntry` and `TestAPI_RealStore_AllowlistEventDecidesPending`. The JSON shown for them is from those tests' shapes, abridged.
 
 That run found bugs that were fixed afterwards: an empty API token that authenticated, a 500 for a duplicate policy `id`, an ignored bad `since` or `until`, 401s sent as `text/plain`, `last_event_at` never set, and times read back with the server's `-04:00` offset. The outputs above give those times as the same instants in UTC, which is what the server returns now. The 400 and 409 messages for bad event-list parameters and a duplicate `id`, and the startup error for an empty token, come from the fixed server, run on the same host with `--insecure` and `TZ=America/New_York`.
 

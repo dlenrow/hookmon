@@ -20,16 +20,19 @@ type AlertFilter interface {
 }
 
 // Dispatcher routes events to the connectors' queues. Ingestion calls Send
-// for every stored event; the watchdog calls Dispatch for AGENT_OFFLINE and
-// the heartbeat handler for AGENT_RECOVERED. Both only enqueue, so they
-// never wait for a sink.
+// for every stored event: first sightings of new hooks and denied hooks
+// (repeats of a new hook waiting for a decision, and allowed hooks, are not
+// stored or sent). The watchdog calls Dispatch for AGENT_OFFLINE and the
+// heartbeat handler for AGENT_RECOVERED. Both only enqueue, so they never
+// wait for a sink.
 //
 // Routing, per connector (see Delivery.MinSeverity):
 //   - Alert connectors (min_severity ALERT or CRITICAL) receive alerts:
-//     events at or above min_severity whose policy action is not ALLOW. A
+//     events at or above min_severity whose policy action is not ALLOW and
+//     that are not quiet (a first sighting during a learning window). A
 //     repeat of an alert sent within the AlertFilter's window is dropped.
 //   - Event-feed connectors (min_severity INFO or WARN) receive every event
-//     at or above min_severity, allowed or not, repeats included.
+//     they are sent at or above min_severity, quiet ones included.
 //   - Host status events (Dispatch) go to every connector, whatever its
 //     min_severity, and are never treated as repeats: each AGENT_OFFLINE
 //     marks a host going UNRESPONSIVE, and each AGENT_RECOVERED (INFO) the
@@ -197,8 +200,10 @@ func (d *Dispatcher) route(evt *event.HookEvent) {
 	if sev == 0 {
 		sev = severityRank(event.SeverityInfo)
 	}
+	// A first sighting during a learning window (quiet) is not an alert: it
+	// goes to the event-feed connectors only.
 	alert := sev >= severityRank(event.SeverityAlert) &&
-		(evt.PolicyResult == nil || evt.PolicyResult.Action != event.ActionAllow)
+		(evt.PolicyResult == nil || (evt.PolicyResult.Action != event.ActionAllow && !evt.PolicyResult.Quiet))
 	fresh := true
 	if alert && d.dedup && d.alerts != nil {
 		fresh = d.alerts.Admit(evt)

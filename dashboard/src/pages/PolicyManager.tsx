@@ -12,7 +12,7 @@ function criteria(p: AllowlistEntry): string[] {
     const subject = k.subject_kind
       ? `${k.subject_kind.replace('_', ' ')} ${k.subject_kind.endsWith('hash') ? truncateHash(k.subject || '') : k.subject}`
       : 'binary only';
-    out.push(`exact key: ${subject}${k.exe_hash ? `, exe ${truncateHash(k.exe_hash)}` : ''}${k.in_container ? ', in a container' : ''}`);
+    out.push(`exact key: ${subject}`);
   }
   if (p.exe_path) out.push(`exe ${p.exe_path}`);
   if (p.exe_hash) out.push(`exe ${truncateHash(p.exe_hash)}`);
@@ -129,7 +129,7 @@ export function PolicyManager() {
         ) : policies.length === 0 ? (
           <div className="empty-state">
             <h3>No policies configured</h3>
-            <p>Create allowlist entries to define trusted hook activity, or approve learning-mode candidates.</p>
+            <p>The allowlist entries in force: allowed and denied hooks. New hooks are decided on the New hooks page.</p>
           </div>
         ) : (
           <div className="card">

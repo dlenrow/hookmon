@@ -30,7 +30,7 @@ ifeq ($(TARGET_OS),linux)
 BPF_DEPS := bpf
 endif
 
-.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dlopen-probe build-dashboard build-canaries build-canaries-noebpf
+.PHONY: build-all build-bus build-agent build-server build-cli build-collector build-dlopen-probe build-smoketest build-dashboard build-canaries build-canaries-noebpf
 .PHONY: bpf generate test test-unit test-registry test-collector test-integration test-e2e test-e2e-full e2e-deploy smoketest lint clean ci
 .PHONY: package-deb package-rpm docker-agent docker-server
 .PHONY: appliance-server appliance-qcow2 appliance-vhd appliance-ova appliance-compose
@@ -64,6 +64,15 @@ build-server:
 build-cli:
 	@mkdir -p $(BIN_DIR)
 	go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-cli ./cmd/hookmon-cli
+
+# Smoketest binary and its C helpers. The Go binary is static; the helpers
+# are dynamically linked (glibc) and ship alongside it in the DEB/RPM.
+build-smoketest: $(BPF_DEPS)
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build $(LDFLAGS) -o $(BIN_DIR)/hookmon-smoketest ./cmd/hookmon-smoketest
+	$(CC) -shared -fPIC -O2 -Wall -o $(BIN_DIR)/libhookmon_smoketest.so cmd/hookmon-smoketest/noop.c
+	$(CC) -O2 -Wall -o $(BIN_DIR)/hookmon-smoketest-helper cmd/hookmon-smoketest/helper.c -ldl \
+		-Wl,--enable-new-dtags,-rpath,/tmp/hookmon-smoketest
 
 build-dashboard:
 	cd dashboard && npm ci && npm run build
@@ -169,10 +178,10 @@ ci: build-all test-unit
 # hookmon-bus packages for this host's architecture (Linux only): the eBPF
 # objects first, then the dlopen helper with $(CC), then the static bus and
 # the package (scripts/build-agent.sh; needs dpkg-deb or rpmbuild).
-package-deb: $(BPF_DEPS) build-dlopen-probe
+package-deb: $(BPF_DEPS) build-dlopen-probe build-smoketest
 	VERSION=$(VERSION) COMMIT=$(COMMIT) DATE=$(DATE) ./scripts/build-agent.sh deb
 
-package-rpm: $(BPF_DEPS) build-dlopen-probe
+package-rpm: $(BPF_DEPS) build-dlopen-probe build-smoketest
 	VERSION=$(VERSION) COMMIT=$(COMMIT) DATE=$(DATE) ./scripts/build-agent.sh rpm
 
 docker-agent:

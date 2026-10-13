@@ -313,6 +313,8 @@ func (s *Server) Run(ctx context.Context) error {
 	// Watchdog: AGENT_OFFLINE goes to every connector and to the WebSocket
 	// feed, as AGENT_RECOVERED does from the ingestion server.
 	s.watchdog = NewWatchdog(s.cfg.Watchdog, s.store, statusFanout{s.dispatcher, s.ingestion}, s.logger)
+	s.watchdog.SetShutdownChecker(s.ingestion)
+	s.watchdog.SetMarkerChecker(s.ingestion)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

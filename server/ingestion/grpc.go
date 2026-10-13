@@ -42,8 +42,10 @@ type HeartbeatRecorder interface {
 
 // HeartbeatChange is a host's state from before a heartbeat was recorded.
 type HeartbeatChange struct {
-	PrevStatus    event.HostStatus
-	PrevHeartbeat time.Time
+	PrevStatus        event.HostStatus
+	PrevHeartbeat     time.Time
+	PrevKernelRelease string
+	KernelChanged     bool
 }
 
 // HostLookup is implemented by a Store that can return an enrolled host.
@@ -72,8 +74,11 @@ type StatusSink interface {
 
 // hostState tracks per-host liveness metadata protected by IngestionServer's mutex.
 type hostState struct {
-	lastHeartbeat time.Time
-	agentVersion  string
+	lastHeartbeat  time.Time
+	agentVersion   string
+	shutdownReason string
+	shutdownAt     time.Time
+	lastMarker     time.Time
 }
 
 // broadcastDropLogEvery bounds how often a full broadcast channel is logged.
@@ -109,6 +114,9 @@ type IngestionServer struct {
 	eventCh chan *event.HookEvent
 
 	broadcastDrops atomic.Uint64
+	// dropped counts events evaluated as a repeat or allowed, and so not
+	// stored, shown or sent.
+	dropped        atomic.Uint64
 	dropLogMu      sync.Mutex
 	dropLogAt      time.Time
 	dropsAtLastLog uint64
@@ -209,6 +217,12 @@ func (s *IngestionServer) BroadcastDrops() uint64 {
 	return s.broadcastDrops.Load()
 }
 
+// Dropped returns how many events were evaluated as a repeat of a PENDING
+// new hook or as allowed, and so were not stored, shown or sent.
+func (s *IngestionServer) Dropped() uint64 {
+	return s.dropped.Load()
+}
+
 // StreamEvents implements the bidirectional streaming RPC through which agents
 // deliver events and heartbeats. The server processes each incoming AgentMessage,
 // applying validation, rate limiting, policy evaluation, storage, and fan-out
@@ -256,6 +270,12 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 
 		case msg.GetHeartbeat() != nil:
 			s.handleHeartbeat(stream.Context(), id, msg.GetHeartbeat())
+
+		case msg.GetShutdown() != nil:
+			s.handleShutdown(stream.Context(), id, msg.GetShutdown())
+
+		case msg.GetMarker() != nil:
+			s.handleMarker(id)
 
 		default:
 			s.logger.Warn("received empty agent message", zap.String("peer", peerAddr))
@@ -397,6 +417,18 @@ func (s *IngestionServer) handleEvent(stream hookmonv1.AgentService_StreamEvents
 		evt.PolicyResult = result
 	}
 
+	// A repeat of a new hook still waiting for a decision, and an allowed
+	// hook, are not stored, shown or sent: the engine has counted a repeat
+	// on its PENDING entry. Only first sightings, denied hooks and host
+	// status events go on.
+	if res := evt.PolicyResult; res != nil && !res.Disposition.Kept() {
+		s.dropped.Add(1)
+		if err := s.sendEventAck(stream, evt.ID, true); err != nil {
+			return fmt.Errorf("send ack: %w", err)
+		}
+		return nil
+	}
+
 	// Persist the event.
 	if s.store != nil {
 		if err := s.store.InsertEvent(ctx, evt); err != nil {
@@ -450,21 +482,27 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentit
 
 	now := s.now().UTC()
 
-	// Update in-memory tracker.
+	// Update in-memory tracker. A heartbeat clears any shutdown announcement.
 	s.hostMu.Lock()
-	s.hostTracker[hostID] = &hostState{
+	prev := s.hostTracker[hostID]
+	st := &hostState{
 		lastHeartbeat: now,
 		agentVersion:  hb.AgentVersion,
 	}
+	if prev != nil {
+		st.lastMarker = prev.lastMarker
+	}
+	s.hostTracker[hostID] = st
 	s.hostMu.Unlock()
 
 	// Persist heartbeat to the store.
 	if s.store != nil {
 		rec := &event.HostHeartbeat{
-			HostID:       hostID,
-			ReceivedAt:   now,
-			AgentVersion: hb.AgentVersion,
-			Sensors:      protoToSensors(hb.Sensors),
+			HostID:        hostID,
+			ReceivedAt:    now,
+			AgentVersion:  hb.AgentVersion,
+			KernelRelease: hb.KernelRelease,
+			Sensors:       protoToSensors(hb.Sensors),
 		}
 		if recorder, ok := s.store.(HeartbeatRecorder); ok {
 			change, err := recorder.RecordHeartbeat(ctx, rec)
@@ -537,6 +575,83 @@ func (s *IngestionServer) hostRecovered(ctx context.Context, id *streamIdentity,
 		s.statusSink.Dispatch(evt)
 	}
 	s.Publish(evt)
+}
+
+func (s *IngestionServer) handleShutdown(_ context.Context, id *streamIdentity, sd *hookmonv1.ShutdownNotice) {
+	hostID := id.hostID
+	if hostID == "" {
+		return
+	}
+	now := s.now().UTC()
+	s.hostMu.Lock()
+	st, ok := s.hostTracker[hostID]
+	if !ok {
+		st = &hostState{}
+		s.hostTracker[hostID] = st
+	}
+	st.shutdownReason = sd.GetReason()
+	st.shutdownAt = now
+	s.hostMu.Unlock()
+
+	s.logger.Info("host announced shutdown",
+		zap.String("host_id", hostID),
+		zap.String("reason", sd.GetReason()),
+	)
+}
+
+func (s *IngestionServer) handleMarker(id *streamIdentity) {
+	hostID := id.hostID
+	if hostID == "" {
+		return
+	}
+	now := s.now().UTC()
+	s.hostMu.Lock()
+	st, ok := s.hostTracker[hostID]
+	if !ok {
+		st = &hostState{}
+		s.hostTracker[hostID] = st
+	}
+	st.lastMarker = now
+	s.hostMu.Unlock()
+}
+
+// HostShutdownAnnounced returns true if the host announced a clean shutdown
+// and has not heartbeated since.
+func (s *IngestionServer) HostShutdownAnnounced(hostID string) bool {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	st := s.hostTracker[hostID]
+	return st != nil && st.shutdownReason != ""
+}
+
+// LastMarker returns the time of the last end-to-end marker from a host, or zero.
+func (s *IngestionServer) LastMarker(hostID string) time.Time {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	st := s.hostTracker[hostID]
+	if st == nil {
+		return time.Time{}
+	}
+	return st.lastMarker
+}
+
+// WedgedHosts returns the IDs of hosts that have sent at least one marker
+// but whose last marker is older than the given threshold, and that have
+// not announced a shutdown.
+func (s *IngestionServer) WedgedHosts(threshold time.Duration) []string {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	cutoff := time.Now().Add(-threshold)
+	var out []string
+	for id, st := range s.hostTracker {
+		if st.lastMarker.IsZero() || st.shutdownReason != "" {
+			continue
+		}
+		if st.lastMarker.Before(cutoff) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // protoToSensors converts a heartbeat's sensor snapshot. Nil entries are

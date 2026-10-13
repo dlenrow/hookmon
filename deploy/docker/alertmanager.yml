@@ -18,3 +18,9 @@ receivers:
     # webhook_configs:
     #   - url: https://alerts.example.internal/hookmon
     #     send_resolved: true
+
+inhibit_rules:
+  # When the fleet is degraded (>20% unreachable), suppress per-host alerts.
+  - source_matchers: ['alertname = HookMonFleetDegraded']
+    target_matchers: ['alertname = HookMonHostUnreachable']
+    equal: []

@@ -98,6 +98,9 @@ func TestIntegration_OfflineAndRecoveredReachFeedAndConnector(t *testing.T) {
 		}
 		evt := enrEvent(eventID)
 		evt.Hostname = "not-the-enrolled-name"
+		// Its own program, so each round's event is a first sighting and
+		// stored, not a repeat of the last round's.
+		evt.BPFDetail = &event.BPFDetail{ProgName: eventID}
 		if err := tr.SendEvent(evt); err != nil {
 			t.Fatal(err)
 		}

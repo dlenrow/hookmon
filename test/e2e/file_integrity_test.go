@@ -16,6 +16,7 @@ import (
 
 	"github.com/dlenrow/hookmon/agent/observability"
 	"github.com/dlenrow/hookmon/agent/registry"
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -289,10 +290,10 @@ func TestLibIntegrity_SoOperations(t *testing.T) {
 	}
 }
 
-// TestLibIntegrity_AptReinstallIsInfo: reinstalling one small library
-// package with apt-get produces INFO events for its files, not ALERT,
-// because dpkg is in the writer's ancestry.
-func TestLibIntegrity_AptReinstallIsInfo(t *testing.T) {
+// TestLibIntegrity_AptReinstallIsSuppressed: reinstalling one small library
+// package with apt-get reports nothing for its files, because dpkg is in
+// the writer's ancestry; each write is counted as suppressed.
+func TestLibIntegrity_AptReinstallIsSuppressed(t *testing.T) {
 	if _, err := exec.LookPath("apt-get"); err != nil {
 		t.Skip("apt-get not available")
 	}
@@ -339,6 +340,7 @@ func TestLibIntegrity_AptReinstallIsInfo(t *testing.T) {
 	})
 
 	bus := startFileBus(t, "2187", "lib_integrity", "linker_config")
+	pkgWrites := suppressedCount(t, "2187", "lib_integrity", suppress.PackageManager)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -364,33 +366,16 @@ func TestLibIntegrity_AptReinstallIsInfo(t *testing.T) {
 		}
 		return false
 	}
-	// dpkg unpacks <lib>.dpkg-new and renames it over <lib>.
-	evt, err := bus.WaitForEvent(func(e *event.HookEvent) bool {
-		p, op, _, _, ok := libDetail(e)
-		return ok && op == "rename" && isPkgLib(p) && !strings.Contains(p, ".dpkg-")
-	}, 30*time.Second)
-	if err != nil {
-		t.Fatalf("no LIB_INTEGRITY rename event for %v: %v", libs, err)
-	}
-	d := evt.LibIntegrityDetail
-	t.Logf("reinstall: lib=%s op=%s severity=%s in_ld_cache=%v pid=%d ppid=%d comm=%s uid=%d",
-		d.LibraryPath, d.Operation, evt.Severity, d.InLdCache, evt.PID, evt.PPID, evt.Comm, evt.UID)
-	if evt.Severity != event.SeverityInfo {
-		t.Errorf("package-manager write has severity %s, want INFO", evt.Severity)
-	}
-	if !d.InLdCache {
-		t.Errorf("%s not reported as in ld.so.cache", d.LibraryPath)
-	}
-
-	// Every other event for the package's files must be INFO as well.
+	// dpkg unpacks <lib>.dpkg-new and renames it over <lib>: at least two
+	// writes, each counted, none reported.
+	waitSuppressed(t, "2187", "lib_integrity", suppress.PackageManager, pkgWrites, 30*time.Second)
 	bus.WaitForEvent(func(*event.HookEvent) bool { return false }, 3*time.Second)
-	n := 0
+	t.Logf("lib_integrity suppressed %v package-manager writes",
+		suppressedCount(t, "2187", "lib_integrity", suppress.PackageManager)-pkgWrites)
 	for _, e := range bus.unmatched {
 		if p, op, _, _, ok := libDetail(e); ok && isPkgLib(p) {
-			n++
-			if e.Severity != event.SeverityInfo {
-				t.Errorf("%s %s by pid %d (%s): severity %s, want INFO", op, p, e.PID, e.Comm, e.Severity)
-			}
+			t.Errorf("%s %s by pid %d (%s) reported with severity %s; a package-manager write is suppressed",
+				op, p, e.PID, e.Comm, e.Severity)
 		}
 		if p, op, _, _, ok := linkerDetail(e); ok {
 			// ldconfig, run from dpkg's libc-bin trigger, rewrites the cache.
@@ -398,5 +383,6 @@ func TestLibIntegrity_AptReinstallIsInfo(t *testing.T) {
 			t.Logf("linker_config: %s %s by pid %d (%s): severity %s", op, p, e.PID, e.Comm, e.Severity)
 		}
 	}
-	t.Logf("%d further LIB_INTEGRITY events for %s, all checked for INFO", n, pkg)
+	t.Logf("linker_config suppressed %v package-manager writes",
+		suppressedCount(t, "2187", "linker_config", suppress.PackageManager))
 }

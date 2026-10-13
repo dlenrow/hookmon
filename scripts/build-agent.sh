@@ -24,6 +24,9 @@ COMMIT="${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 DATE="${DATE:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 BUS_BIN="${BUS_BIN:-bin/hookmon-bus}"
 PROBE_BIN="${PROBE_BIN:-bin/hookmon-dlopen-probe}"
+SMOKETEST_BIN="${SMOKETEST_BIN:-bin/hookmon-smoketest}"
+SMOKETEST_LIB="${SMOKETEST_LIB:-bin/libhookmon_smoketest.so}"
+SMOKETEST_HELPER="${SMOKETEST_HELPER:-bin/hookmon-smoketest-helper}"
 
 if [ -z "${ARCH:-}" ]; then
     case "$(uname -m)" in
@@ -89,6 +92,11 @@ case "$FORMAT" in
         install -d "$root/DEBIAN"
         install -D -m 0755 "$BUS_BIN" "$root/usr/bin/hookmon-bus"
         install -D -m 0755 "$PROBE_BIN" "$root/usr/bin/hookmon-dlopen-probe"
+        if [ -x "$SMOKETEST_BIN" ]; then
+            install -D -m 0755 "$SMOKETEST_BIN" "$root/usr/libexec/hookmon/hookmon-smoketest"
+            install -D -m 0644 "$SMOKETEST_LIB" "$root/usr/libexec/hookmon/libhookmon_smoketest.so"
+            install -D -m 0755 "$SMOKETEST_HELPER" "$root/usr/libexec/hookmon/hookmon-smoketest-helper"
+        fi
         install -D -m 0644 deploy/systemd/hookmon-bus.service "$root/lib/systemd/system/hookmon-bus.service"
         install -D -m 0644 deploy/systemd/bus.yaml "$root/etc/hookmon/bus.yaml"
         install -D -m 0644 LICENSE "$root/usr/share/doc/hookmon-bus/copyright"
@@ -123,6 +131,11 @@ case "$FORMAT" in
         mkdir -p "$top"/{BUILD,RPMS,SOURCES,SPECS,SRPMS,stage/"$src"}
         install -m 0755 "$BUS_BIN" "$top/stage/$src/hookmon-bus"
         install -m 0755 "$PROBE_BIN" "$top/stage/$src/hookmon-dlopen-probe"
+        if [ -x "$SMOKETEST_BIN" ]; then
+            install -m 0755 "$SMOKETEST_BIN" "$top/stage/$src/hookmon-smoketest"
+            install -m 0644 "$SMOKETEST_LIB" "$top/stage/$src/libhookmon_smoketest.so"
+            install -m 0755 "$SMOKETEST_HELPER" "$top/stage/$src/hookmon-smoketest-helper"
+        fi
         install -m 0644 deploy/systemd/hookmon-bus.service deploy/systemd/bus.yaml LICENSE "$top/stage/$src/"
         tar -C "$top/stage" --owner=0 --group=0 -czf "$top/SOURCES/$src.tar.gz" "$src"
         rpmbuild -bb deploy/rpm/hookmon-bus.spec \

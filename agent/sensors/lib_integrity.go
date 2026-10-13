@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 
+	"github.com/dlenrow/hookmon/agent/suppress"
 	"github.com/dlenrow/hookmon/pkg/event"
 )
 
@@ -36,8 +37,9 @@ var watchedLibDirs = []string{
 // turn has no OldHash. InLdCache says whether the dynamic linker finds the
 // library through /etc/ld.so.cache.
 //
-// A change is ALERT, or INFO when a package manager is in the writer's
-// process ancestry (see procReader for what happens when the writer exited).
+// A change is ALERT. A change with a package manager in the writer's
+// process ancestry is not reported, only counted as suppressed; see
+// procReader for what happens when the writer exited.
 type LibIntegritySensor struct {
 	roots       []string
 	ldCachePath string
@@ -214,11 +216,12 @@ func (s *LibIntegritySensor) handleEvent(ev dirEvent) {
 	if op == "delete" {
 		newHash = ""
 	}
+	// The baseline moves on either way, so the next reported change carries
+	// the package's version as its old hash.
 	oldHash := s.baseline.swap(path, newHash)
-
-	severity := event.SeverityAlert
 	if ev.Proc.PkgMgr != "" {
-		severity = event.SeverityInfo
+		suppress.Add(s.Name(), suppress.PackageManager)
+		return
 	}
 	uid, gid, ppid, comm := procIDs(ev.Proc)
 
@@ -226,7 +229,7 @@ func (s *LibIntegritySensor) handleEvent(ev dirEvent) {
 		ID:        uuid.New().String(),
 		Timestamp: time.Now(),
 		EventType: event.EventLibIntegrity,
-		Severity:  severity,
+		Severity:  event.SeverityAlert,
 		PID:       ev.Pid,
 		PPID:      ppid,
 		UID:       uid,
