@@ -175,6 +175,7 @@ interface NewHooksProps {
  */
 export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
   const [pending, setPending] = useState<AllowlistEntry[]>([]);
+  const [denied, setDenied] = useState<AllowlistEntry[]>([]);
   const [hosts, setHosts] = useState<Record<string, Host>>({});
   const [windows, setWindows] = useState<LearningWindow[]>([]);
   const [kernelUpgrades, setKernelUpgrades] = useState<KernelUpgrade[]>([]);
@@ -205,13 +206,15 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
     setError(null);
     const seen = arrivalsRef.current;
     try {
-      const [entries, hostList, learning, upgrades] = await Promise.all([
+      const [entries, rejected, hostList, learning, upgrades] = await Promise.all([
         getPolicies('PENDING'),
+        getPolicies('REJECTED'),
         getHosts(),
         getLearning(),
         getKernelUpgrades().catch(() => [] as KernelUpgrade[]),
       ]);
       setPending(entries || []);
+      setDenied((rejected || []).filter(e => e.learned && e.learned.occurrences > 0));
       const byID: Record<string, Host> = {};
       for (const h of hostList || []) byID[h.id] = h;
       setHosts(byID);
@@ -408,6 +411,7 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
                     ? `${total} host${total === 1 ? '' : 's'}, all sensors healthy.`
                     : `${total} host${total === 1 ? '' : 's'}. ${offline} offline or unresponsive.`}
                 {pending.length > 0 && ` ${pending.length} new hook${pending.length === 1 ? '' : 's'} to review.`}
+                {denied.length > 0 && ` ${denied.length} denied hook${denied.length === 1 ? '' : 's'} still active.`}
               </div>
             </div>
           );
@@ -479,6 +483,43 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {denied.length > 0 && (
+          <div className="card" style={{ marginBottom: '16px' }} data-testid="denied-hits">
+            <div className="card-body">
+              <h3 style={{ margin: '0 0 8px', fontSize: '14px' }}>Denied hooks with recent activity</h3>
+              <table className="table" style={{ fontSize: '13px' }}>
+                <thead>
+                  <tr>
+                    <th>Hook</th>
+                    <th>Event type</th>
+                    <th>Hits</th>
+                    <th>Last seen</th>
+                    <th>Hosts</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {denied
+                    .sort((a, b) => Date.parse(b.learned?.last_seen || '') - Date.parse(a.learned?.last_seen || ''))
+                    .slice(0, 20)
+                    .map((entry) => (
+                      <tr key={entry.id}>
+                        <td>{subjectLabel(entry)}</td>
+                        <td>{eventTypeOf(entry)}</td>
+                        <td>{entry.learned?.occurrences ?? 0}</td>
+                        <td>{entry.learned ? formatRelativeTime(entry.learned.last_seen) : '-'}</td>
+                        <td>{(entry.learned?.hosts || []).map(hostName).join(', ') || '-'}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+              <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                These hooks were denied but are still active. Each produces an alert every time it recurs.
+                Remove the program to stop the alerts, or allow it if the decision was wrong.
+              </div>
+            </div>
           </div>
         )}
 

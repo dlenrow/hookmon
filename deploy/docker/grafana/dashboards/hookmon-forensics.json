@@ -6,134 +6,20 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
-  "links": [],
-  "panels": [
+  "links": [
     {
       "title": "Fleet Health",
-      "description": "Shows ALL SENSORS OPERATIONAL when fleet is healthy, or SENSOR COVERAGE DEGRADED when any host has dead sensors or is unreachable.",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
-          },
-          "mappings": [
-            { "type": "value", "options": { "0": { "text": "ALL SENSORS OPERATIONAL", "color": "green" } } },
-            { "type": "range", "options": { "from": 1, "to": 9999, "result": { "text": "SENSOR COVERAGE DEGRADED", "color": "red" } } }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "textMode": "value",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
-      },
-      "targets": [
-        {
-          "expr": "(sum(hookmon_fleet_hosts_degraded) or vector(0)) + (sum(hookmon_fleet_hosts_unreachable) or vector(0))",
-          "legendFormat": "affected"
-        }
-      ]
-    },
-    {
-      "title": "Fleet Status",
-      "type": "table",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "options": {
-        "showHeader": true,
-        "sortBy": [{ "displayName": "host", "desc": false }]
-      },
-      "targets": [
-        {
-          "expr": "hookmon_fleet_host_reachable",
-          "legendFormat": "{{host}}",
-          "refId": "A",
-          "format": "table",
-          "instant": true
-        }
-      ]
-    },
-    {
-      "title": "Sensor Health Grid (24h)",
-      "description": "Per-host, per-sensor alive/dead status over time.",
-      "type": "state-timeline",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
-            ]
-          },
-          "mappings": [
-            { "type": "value", "options": { "0": { "text": "DEAD", "color": "red" }, "1": { "text": "ALIVE", "color": "green" } } }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "showValue": "auto",
-        "alignValue": "left",
-        "mergeValues": true,
-        "rowHeight": 0.8,
-        "legend": { "displayMode": "list", "placement": "bottom" }
-      },
-      "targets": [
-        {
-          "expr": "hookmon_fleet_sensor_alive",
-          "legendFormat": "{{host}} / {{sensor}}"
-        }
-      ]
-    },
-    {
-      "title": "Active Sensors",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 10 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "green", "value": 3 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value_and_name",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
-      },
-      "targets": [
-        {
-          "expr": "hookmon_sensors_active",
-          "legendFormat": "{{instance}}"
-        }
-      ]
-    },
+      "url": "/d/hookmon-fleet-health",
+      "tooltip": "Live fleet and sensor monitoring",
+      "icon": "heart",
+      "type": "link"
+    }
+  ],
+  "panels": [
     {
       "title": "Total Events",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 10 },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -161,40 +47,9 @@
       ]
     },
     {
-      "title": "Sensor Errors",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 10 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": {
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value",
-        "reduceOptions": { "calcs": ["lastNotNull"] }
-      },
-      "targets": [
-        {
-          "expr": "sum(hookmon_sensor_errors_total)",
-          "legendFormat": "errors"
-        }
-      ]
-    },
-    {
       "title": "Event Rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "gridPos": { "h": 8, "w": 20, "x": 4, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -224,7 +79,7 @@
     {
       "title": "Events by Type",
       "type": "barchart",
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -248,7 +103,7 @@
     {
       "title": "Events by Severity",
       "type": "piechart",
-      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 14 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -286,9 +141,36 @@
       ]
     },
     {
+      "title": "BPF Instruction Count Distribution",
+      "type": "histogram",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "bucketOffset": 0,
+        "combine": false,
+        "fillOpacity": 80,
+        "gradientMode": "scheme",
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "expr": "hookmon_bpf_insn_count_bucket",
+          "legendFormat": "{{prog_name}} le={{le}}",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
       "title": "Event Timeline",
       "type": "logs",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 16 },
       "datasource": { "type": "loki", "uid": "loki" },
       "options": {
         "showTime": true,
@@ -311,7 +193,7 @@
     {
       "title": "Recent BPF Loads",
       "type": "table",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
       "datasource": { "type": "loki", "uid": "loki" },
       "options": {
         "showHeader": true,
@@ -352,7 +234,7 @@
     {
       "title": "Exec Injection Detections",
       "type": "table",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
       "datasource": { "type": "loki", "uid": "loki" },
       "options": {
         "showHeader": true,
@@ -388,43 +270,16 @@
           "refId": "A"
         }
       ]
-    },
-    {
-      "title": "BPF Instruction Count Distribution",
-      "type": "histogram",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" }
-        },
-        "overrides": []
-      },
-      "options": {
-        "bucketOffset": 0,
-        "combine": false,
-        "fillOpacity": 80,
-        "gradientMode": "scheme",
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
-      },
-      "targets": [
-        {
-          "expr": "hookmon_bpf_insn_count_bucket",
-          "legendFormat": "{{prog_name}} le={{le}}",
-          "format": "heatmap"
-        }
-      ]
     }
   ],
-  "refresh": "5s",
+  "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["hookmon", "security", "ebpf"],
+  "tags": ["hookmon", "security", "forensics"],
   "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "time": { "from": "now-24h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "HookMon",
-  "uid": "hookmon-main",
+  "title": "HookMon Forensics",
+  "uid": "hookmon-forensics",
   "version": 1
 }
