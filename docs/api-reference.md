@@ -12,9 +12,11 @@ The examples were run against a real `hookmon-server` with PostgreSQL 16. Events
 - [Events](#events)
 - [Event JSON](#event-json)
 - [Hosts](#hosts)
+- [Kernel Upgrades](#kernel-upgrades)
 - [Policies (Allowlist)](#policies-allowlist)
 - [Learning Mode](#learning-mode)
 - [Settings](#settings)
+- [Bus–Server gRPC Stream](#busserver-grpc-stream)
 - [WebSocket Event Feed](#websocket-event-feed)
 - [hookmon-cli](#hookmon-cli)
 - [Example Runs](#example-runs)
@@ -494,6 +496,9 @@ hookmon-cli $FLAGS hosts
 | `enrolled_at` | time | Enrollment time |
 | `last_heartbeat` | time | When the server received the latest heartbeat (server clock) |
 | `last_event_at` | time | The newest `timestamp` of the host's stored events, AGENT_OFFLINE and AGENT_RECOVERED included. Storing an event moves it forward; an event that arrives late, with an older timestamp, leaves it alone. Omitted until the host's first event |
+| `kernel_release` | string | The running kernel (`uname -r`), from the latest heartbeat. Omitted before the first heartbeat |
+| `prev_kernel_release` | string | The previous kernel, when the host changed kernels. Omitted when no change has been recorded |
+| `kernel_changed_at` | time | When the kernel change was detected. Omitted when no change has been recorded |
 | `sensors` | array | Sensor health from the latest heartbeat: `name`, `status` (`alive`, `dead`, `failed`, `unverifiable` or `unknown`) and `reason`. Omitted before the first heartbeat |
 
 ```json
@@ -514,6 +519,28 @@ hookmon-cli $FLAGS hosts
 ```
 
 (The `sensors` list is abridged; a real bus reports all eight. The example run was before `last_event_at` was written, so it is missing here; a host that has sent an event has it.)
+
+## Kernel Upgrades
+
+### GET /api/v1/kernel-upgrades
+
+Lists hosts that recently changed kernels and correlates their PENDING BPF entries against APPROVED entries from the previous kernel, matching on program name and type. Helps an operator approve BPF programs that reappeared with new tags after a kernel upgrade.
+
+```bash
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/kernel-upgrades"
+```
+
+Returns a JSON array. Each element:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `prev_kernel` | string | The kernel the hosts upgraded from |
+| `new_kernel` | string | The kernel the hosts upgraded to |
+| `hosts` | string[] | Host IDs that made this transition |
+| `matched_ids` | string[] | PENDING entry IDs whose program name and type match an APPROVED entry |
+| `unmatched_ids` | string[] | PENDING entry IDs that do not match any APPROVED entry |
+
+Matched entries can be approved in bulk (the dashboard offers an "Allow N matched" button). Unmatched entries need investigation: they may be new programs, or programs whose names changed.
 
 ## Policies (Allowlist)
 
@@ -871,6 +898,19 @@ curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$HM/api/v1/settings"
 | `websocket.allowed_origins` | `api.allowed_origins`, normalized, sorted |
 
 CLI: none.
+
+## Bus–Server gRPC Stream
+
+The bus connects to `hookmon-server` on the mutual-TLS gRPC port (9443) and sends a stream of `AgentMessage` payloads. Each message is one of four kinds:
+
+| Kind | Proto field | Meaning |
+|------|-------------|---------|
+| `event` | `HookEvent event = 1` | A sensor event |
+| `heartbeat` | `Heartbeat heartbeat = 2` | Sensor health snapshot, sent periodically. Carries `kernel_release` (from `uname -r`) |
+| `shutdown` | `ShutdownNotice shutdown = 3` | The bus is stopping cleanly (SIGTERM/SIGINT). Contains a `reason` string. The server suppresses AGENT_OFFLINE for this host |
+| `marker` | `Marker marker = 4` | End-to-end liveness probe, sent every 60 s. Contains a `timestamp`. The server tracks the last marker per host |
+
+The heartbeat's `kernel_release` field lets the server detect kernel upgrades. When the value changes, the server records the previous kernel and the transition time on the host record.
 
 ## WebSocket Event Feed
 

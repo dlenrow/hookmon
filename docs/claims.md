@@ -44,7 +44,7 @@ A claim is never made true by changing its test. Rows are updated as each fix-pl
 | A collector on the HookMon appliance polls every host's /status every thirty seconds; the collector reaches out, the bus does not phone home | `cmd/hookmon-collector` tests; compose appliance (CI, step 8) | The default poll is 30 s. The collector is in the compose appliance. The VM image and the Ansible appliance role don't include it, and on the observability path it runs outside Compose. The poll asks the bus itself: nothing checks the host without the bus's answer (SSH mode runs the same `/status` request on the host). | Verified |
 | If the bus process is killed, the poll endpoint becomes unreachable, which is its own alert | `TestHeartbeat_KillBusCollectorUnreachable`; `promtool test rules` | After `kill -9` of the bus, the collector (set to poll every 2 s for the test) reported the host unreachable 1.955 s later. `HookMonHostUnreachable` fires after 2 minutes unreachable. | Verified |
 | An attacker who kills the bus cannot prevent the missing response from being noticed | SECURITY.md; `TestHeartbeat_KillBusCollectorUnreachable` | A kill alone is noticed (row above). But the attacker in this threat model is root, and root can kill the bus and answer `/status` in its place. HookMon does not detect that (SECURITY.md). | Not true |
-| A graduated alert hierarchy (unreachable; degraded; alive with no events for 24 h; collector stopped; clean), where each of the first four rows is a Prometheus alert rule that Alertmanager routes to a paging or chat system | `promtool test rules deploy/docker/grafana/alerts/tests/*.yml`; live run on drl-nuc8i3bek | Five rules cover the four rows: HostUnreachable; SensorDead and FleetDegraded; NoEvents24h; CollectorSilent. All pass promtool unit tests, and CollectorSilent fired live and reached Alertmanager. NoEvents24h has not fired on a live host. Step 5 found that the periodic BPF_INVENTORY events kept it from ever firing; the rule now excludes them. The shipped Alertmanager config routes to a placeholder receiver: the paging or chat destination is the operator's to add. | Verified |
+| A graduated alert hierarchy (unreachable; degraded; sensor dead; collector stopped; clean), where each is a Prometheus alert rule that Alertmanager routes to a paging or chat system | `promtool test rules deploy/docker/grafana/alerts/tests/*.yml`; live run on drl-nuc8i3bek | Four rules: HostUnreachable, SensorDead (fires only when the host is reachable), FleetDegraded (>20% unreachable), and CollectorSilent. HookMonNoEvents24h was removed (signal plan Part 1: replaced by the bus's end-to-end marker). Alertmanager inhibition: FleetDegraded suppresses per-host HostUnreachable alerts. All pass promtool unit tests, and CollectorSilent fired live and reached Alertmanager. The shipped Alertmanager config routes to a placeholder receiver: the paging or chat destination is the operator's to add. | Verified |
 | The Grafana dashboard has a full-width fleet health banner that turns red with the affected host count | `deploy/docker/grafana/dashboards/hookmon.json`; `fleet_banner_test.yml` (promtool, in CI); `docs/evidence/step8-grafana.png` | The banner shows the number of degraded plus unreachable hosts, green at zero and red above. The step 8 screenshot showed it broken: two tiles, because the query's `or vector(0)` kept an unlabelled zero next to the labelled Pushgateway series. With only the unreachable count pushed, the same mismatch would have shown green with hosts unreachable. The query now sums each side first. A promtool test proves one correct series with both metrics, with only one, and with none, and it fails on the old query. CI runs it. The fixed banner has not been screenshotted again. | Verified |
 | Review approves each pending entry for the whole fleet or a single host, from the web dashboard or the command line | `test/integration/policy_test.go`; `pkg/allowlist` tests; Playwright pending page; real stack on drl-nuc8i3bek | Since 7c, candidates are approved or rejected through the API and `hookmon-cli policies approve` or `reject`, with `--fleet` or `--host`; since 7e, also on the dashboard's pending page (42 entries in the Playwright run). After all 14 PENDING entries on the idle host were approved, the only non-ALLOW events came from a newly loaded BPF canary. | Verified |
 | With a validated allowlist, every new event generates an alert for investigation | `server/policy/severity.go`, `server/policy/engine.go`, `server/connectors/config.go`; `TestSIEM_RealStackCanaryReachesSyslogAndWebhook` | An event that matches no ALLOW entry is stored with policy action ALERT and appears in the dashboard and the live feed. Its severity stays the bus's rating, and alert connectors (default `min_severity` ALERT) receive only ALERT and CRITICAL. So by default these reach no connector: events rated INFO (shared memory with no BPF pattern, package-manager writes, and every BPF_INVENTORY event, including a program not on the allowlist) and events rated WARN (a BPF load or attach, or a dlopen, by a non-root process). A connector set to INFO or WARN receives them. | Not true |
@@ -548,3 +548,47 @@ Not true in the new text:
 - "Lists each claim in this post with the test that checks it". Four rows have no test that checks the claim.
 
 Not tested: the base rate over weeks or months ("then none for weeks"), and "no false positives".
+
+### Signal plan (2026-10-13)
+
+Six-part plan (`SIGNAL_PLAN.md`) to eliminate alert fatigue: every alert needs action, nothing else reaches the dashboard.
+
+**Part 1 — Health:**
+- Bus sends `ShutdownNotice` on clean stop (SIGTERM/SIGINT); server suppresses AGENT_OFFLINE for announced shutdowns.
+- Bus sends `Marker` every 60 s through the gRPC stream; server tracks last marker per host. The watchdog raises `AGENT_WEDGED` (CRITICAL) when a host's marker is stale for `marker_timeout` (default 3 min) but heartbeats continue, and clears it when the marker resumes.
+- Grafana alert consolidation: `HookMonSensorDead` only fires when the host is reachable (avoids duplicate with `HookMonHostUnreachable`). `HookMonFleetDegraded` fires at >20% unreachable (fleet outage, not individual). `HookMonNoEvents24h` removed (replaced by the e2e marker). Alertmanager inhibition: fleet-degraded suppresses per-host unreachable.
+- Dashboard fleet health summary line and denied-hooks section.
+
+**Part 2 — Re-key allowlist on what was loaded, not who loaded it:**
+- The dedupe key is the subject (BPF tag+type, library hash, env var value, etc.), not the loading process. An update to the loading binary no longer creates a new first sighting.
+- First-sighting events are stored for investigation. Triage dispositions: first_sighting, repeat, allowed, denied, lifecycle.
+
+**Part 3 — Kernel upgrade correlation:**
+- Bus sends `kernel_release` in heartbeat. Server tracks kernel changes per host (`prev_kernel_release`, `kernel_changed_at`).
+- `GET /api/v1/kernel-upgrades` correlates PENDING BPF entries after a kernel change to APPROVED entries by prog_name+prog_type.
+- Dashboard shows kernel upgrade cards with matched/unmatched counts.
+
+**Part 4 — Denied hooks:** Documented in `docs/allowlist-guide.md`: denied BPF programs alert on every inventory scan.
+
+**Part 5 — Dashboards:**
+- Grafana split into Fleet Health (live monitoring) and Forensics (investigation).
+- Server dashboard home shows only open items: new hooks, denied hits, health line.
+
+**Part 6 — Docs:** This entry; doc updates across the repo.
+
+| Check | Command | Result | Status |
+| --- | --- | --- | --- |
+| Go builds clean | `go build ./...`, `go vet ./...` | Pass. | Verified |
+| Dashboard builds clean | `npx tsc --noEmit`, `npx vite build` | Pass. | Verified |
+| All Go tests pass | `go test ./...` | 31 packages pass. | Verified |
+| Signal plan parts 1–5 committed and green | `git log --oneline first-sighting` | 6 commits on first-sighting above main. | Verified |
+| Shutdown suppresses AGENT_OFFLINE | `TestWatchdog_ShutdownSuppressesOffline` | A host that announced shutdown is not marked unresponsive and gets no alert. | Verified |
+| Wedged host raises AGENT_WEDGED once | `TestWatchdog_Wedged` | An online host whose marker is stale gets one AGENT_WEDGED (CRITICAL). A second check with the same state produces no duplicate. | Verified |
+| Wedged host re-alerts after recovery | `TestWatchdog_WedgedClears` | After the marker resumes and then goes stale again, a new AGENT_WEDGED fires. | Verified |
+
+Claims table updates for the signal plan:
+
+| Claim | Change |
+| --- | --- |
+| "A graduated alert hierarchy" (row 47) | Now 4 rules (was 5): HookMonNoEvents24h removed. HookMonSensorDead only fires when host reachable. HookMonFleetDegraded triggers at >20% unreachable. Alertmanager inhibition suppresses per-host alerts during a fleet outage. Update "five rules" to "four rules". |
+| "The bus keeps a health record" (row 42) | Shutdown announcement suppresses AGENT_OFFLINE for clean stops. End-to-end marker (every 60 s) tracks liveness beyond the heartbeat. |

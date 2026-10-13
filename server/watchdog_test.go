@@ -43,6 +43,17 @@ func (s *enrWatchdogStore) MarkHostUnresponsive(_ context.Context, id string, st
 	return true, nil
 }
 
+func (s *enrWatchdogStore) GetHost(_ context.Context, id string) (*event.Host, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.hosts[id]
+	if h == nil {
+		return nil, nil
+	}
+	c := *h
+	return &c, nil
+}
+
 func (s *enrWatchdogStore) InsertEvent(_ context.Context, evt *event.HookEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -104,6 +115,103 @@ func TestWatchdog_HeartbeatDuringCheck(t *testing.T) {
 	w.check(context.Background())
 	if len(store.events) != 0 || store.hosts["h"].Status != event.HostOnline {
 		t.Errorf("events %d, status %s; want no alert and ONLINE", len(store.events), store.hosts["h"].Status)
+	}
+}
+
+// enrShutdownChecker is a test ShutdownChecker.
+type enrShutdownChecker struct {
+	announced map[string]bool
+}
+
+func (s *enrShutdownChecker) HostShutdownAnnounced(hostID string) bool {
+	return s.announced[hostID]
+}
+
+func TestWatchdog_ShutdownSuppressesOffline(t *testing.T) {
+	store := &enrWatchdogStore{hosts: map[string]*event.Host{
+		"clean": {ID: "clean", Hostname: "web-clean", Status: event.HostOnline, LastHeartbeat: time.Now().Add(-time.Minute)},
+	}}
+	sink := &enrSink{}
+	w := NewWatchdog(WatchdogConfig{CheckInterval: time.Second, HeartbeatTimeout: 10 * time.Second}, store, sink, zap.NewNop())
+	w.SetShutdownChecker(&enrShutdownChecker{announced: map[string]bool{"clean": true}})
+
+	w.check(context.Background())
+
+	if len(store.events) != 0 {
+		t.Fatalf("shutdown host got %d events, want 0", len(store.events))
+	}
+	if store.hosts["clean"].Status != event.HostOnline {
+		t.Errorf("status %s, want ONLINE (not marked unresponsive)", store.hosts["clean"].Status)
+	}
+}
+
+// enrMarkerChecker is a test MarkerChecker that returns a fixed set of wedged hosts.
+type enrMarkerChecker struct {
+	wedged []string
+}
+
+func (m *enrMarkerChecker) WedgedHosts(_ time.Duration) []string {
+	return m.wedged
+}
+
+func TestWatchdog_Wedged(t *testing.T) {
+	store := &enrWatchdogStore{hosts: map[string]*event.Host{
+		"w1": {ID: "w1", Hostname: "web-wedged", Status: event.HostOnline, LastHeartbeat: time.Now()},
+	}}
+	sink := &enrSink{}
+	w := NewWatchdog(WatchdogConfig{
+		CheckInterval:    time.Second,
+		HeartbeatTimeout: 10 * time.Second,
+		MarkerTimeout:    3 * time.Minute,
+	}, store, sink, zap.NewNop())
+	w.SetMarkerChecker(&enrMarkerChecker{wedged: []string{"w1"}})
+
+	w.check(context.Background())
+
+	if len(store.events) != 1 {
+		t.Fatalf("stored events: got %d, want 1", len(store.events))
+	}
+	evt := store.events[0]
+	if evt.EventType != event.EventAgentWedged || evt.HostID != "w1" {
+		t.Errorf("wedged event: %+v", evt)
+	}
+	if len(sink.evts) != 1 {
+		t.Fatalf("dispatched: got %d, want 1", len(sink.evts))
+	}
+
+	// Second check: same host still wedged, no duplicate alert.
+	w.check(context.Background())
+	if len(store.events) != 1 {
+		t.Errorf("duplicate wedged alert: got %d events, want 1", len(store.events))
+	}
+}
+
+func TestWatchdog_WedgedClears(t *testing.T) {
+	store := &enrWatchdogStore{hosts: map[string]*event.Host{
+		"w1": {ID: "w1", Hostname: "web-wedged", Status: event.HostOnline, LastHeartbeat: time.Now()},
+	}}
+	mc := &enrMarkerChecker{wedged: []string{"w1"}}
+	w := NewWatchdog(WatchdogConfig{
+		CheckInterval:    time.Second,
+		HeartbeatTimeout: 10 * time.Second,
+		MarkerTimeout:    3 * time.Minute,
+	}, store, &enrSink{}, zap.NewNop())
+	w.SetMarkerChecker(mc)
+
+	w.check(context.Background())
+	if len(store.events) != 1 {
+		t.Fatalf("first check: got %d events, want 1", len(store.events))
+	}
+
+	// Host recovers.
+	mc.wedged = nil
+	w.check(context.Background())
+
+	// Wedges again: should alert again.
+	mc.wedged = []string{"w1"}
+	w.check(context.Background())
+	if len(store.events) != 2 {
+		t.Errorf("re-wedge: got %d events, want 2", len(store.events))
 	}
 }
 

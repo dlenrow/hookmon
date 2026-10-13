@@ -14,8 +14,9 @@ const (
 	EventLinkerConfig  EventType = "LINKER_CONFIG"
 	EventPtraceInject  EventType = "PTRACE_INJECT"
 	EventLibIntegrity  EventType = "LIB_INTEGRITY"
-	EventAgentOffline  EventType = "AGENT_OFFLINE"
+	EventAgentOffline   EventType = "AGENT_OFFLINE"
 	EventAgentRecovered EventType = "AGENT_RECOVERED"
+	EventAgentWedged    EventType = "AGENT_WEDGED"
 	EventElfRpath       EventType = "ELF_RPATH"
 	EventBPFInventory   EventType = "BPF_INVENTORY"
 )

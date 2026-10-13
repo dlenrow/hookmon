@@ -635,6 +635,25 @@ func (s *IngestionServer) LastMarker(hostID string) time.Time {
 	return st.lastMarker
 }
 
+// WedgedHosts returns the IDs of hosts that have sent at least one marker
+// but whose last marker is older than the given threshold, and that have
+// not announced a shutdown.
+func (s *IngestionServer) WedgedHosts(threshold time.Duration) []string {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	cutoff := time.Now().Add(-threshold)
+	var out []string
+	for id, st := range s.hostTracker {
+		if st.lastMarker.IsZero() || st.shutdownReason != "" {
+			continue
+		}
+		if st.lastMarker.Before(cutoff) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // protoToSensors converts a heartbeat's sensor snapshot. Nil entries are
 // skipped.
 func protoToSensors(in []*hookmonv1.SensorHealth) []event.SensorHealth {

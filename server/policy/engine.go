@@ -142,7 +142,7 @@ func (e *Engine) learningLocked(hostID string, now time.Time) bool {
 // result's Disposition says whether the server keeps the event.
 func (e *Engine) Evaluate(evt *event.HookEvent) *event.PolicyResult {
 	// Agent lifecycle events always produce an ALERT.
-	if evt.EventType == event.EventAgentOffline || evt.EventType == event.EventAgentRecovered {
+	if evt.EventType == event.EventAgentOffline || evt.EventType == event.EventAgentRecovered || evt.EventType == event.EventAgentWedged {
 		result := &event.PolicyResult{
 			Action:      event.ActionAlert,
 			Reason:      fmt.Sprintf("agent lifecycle event: %s", evt.EventType),

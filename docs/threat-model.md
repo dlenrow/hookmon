@@ -226,7 +226,7 @@ For musl (Alpine and other musl-based images):
 - load a kernel module;
 - replace the bus binary, its config, or the `hookmon-dlopen-probe` helper the bus runs every 10 seconds.
 
-Killing the bus outright is detected (the host goes unreachable), and so is a detached hook whose heartbeat is not forged. The rest is not. [SECURITY.md](../SECURITY.md) has the details.
+Killing the bus outright is detected (the host goes unreachable), and so is a detached hook whose heartbeat is not forged. A clean stop (SIGTERM/SIGINT) is announced to the server, which suppresses the AGENT_OFFLINE alert; SIGKILL or an OOM kill is not announced, so the watchdog fires. The bus also sends an end-to-end marker every 60 seconds through the gRPC stream, so the server can detect a wedged bus-to-server path even when heartbeats succeed. The rest is not detected. [SECURITY.md](../SECURITY.md) has the details.
 
 **The kernel.** Every sensor depends on tracepoints, uprobes, fanotify and BTF reporting honestly. A kernel rootkit defeats all of them.
 
@@ -240,6 +240,6 @@ Killing the bus outright is detected (the host goes unreachable), and so is a de
 
 **Deduplication.** `dlopen_monitor` reports each (binary, library) pair at most once an hour, and `elf_rpath` reports each binary version once. Repeated use inside those windows is not reported.
 
-**The network.** Loki pushes and `/status` are unauthenticated plain HTTP. gRPC to the server is plaintext unless TLS is configured (fix plan step 7b). The collector's SSH mode does not verify host keys.
+**The network.** Loki pushes and `/status` are unauthenticated plain HTTP. gRPC to the server requires mutual TLS (the server refuses to start without a certificate unless `--insecure`). The collector's SSH mode verifies host keys against `ssh_known_hosts` (fail closed).
 
 **Time between checks.** The collector polls every 30 seconds and the bus checks hooks every 10. An attack that completes and cleans up inside that window, while the bus is down, is missed. Persistent changes are not: BPF programs still loaded show in the next inventory. Files changed while the bus was down are not reported, because the next startup takes their new hashes as the baseline.
