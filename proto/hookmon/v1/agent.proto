@@ -43,6 +43,7 @@ message Heartbeat {
   uint64 uptime_seconds = 5;
   // sensors is the bus's sensor-registry snapshot, one entry per sensor.
   repeated SensorHealth sensors = 6;
+  string kernel_release = 7;
 }
 
 // SensorHealth is one sensor's state in the bus's sensor registry.

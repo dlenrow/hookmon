@@ -197,6 +197,7 @@ type Heartbeat struct {
 	UptimeSeconds uint64                 `protobuf:"varint,5,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
 	// sensors is the bus's sensor-registry snapshot, one entry per sensor.
 	Sensors       []*SensorHealth `protobuf:"bytes,6,rep,name=sensors,proto3" json:"sensors,omitempty"`
+	KernelRelease string          `protobuf:"bytes,7,opt,name=kernel_release,json=kernelRelease,proto3" json:"kernel_release,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -271,6 +272,13 @@ func (x *Heartbeat) GetSensors() []*SensorHealth {
 		return x.Sensors
 	}
 	return nil
+}
+
+func (x *Heartbeat) GetKernelRelease() string {
+	if x != nil {
+		return x.KernelRelease
+	}
+	return ""
 }
 
 // SensorHealth is one sensor's state in the bus's sensor registry.

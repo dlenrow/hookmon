@@ -49,6 +49,7 @@ type Store interface {
 	DeleteLearningWindow(ctx context.Context, hostID string) error
 	GetHosts(ctx context.Context) ([]*event.Host, error)
 	GetHost(ctx context.Context, id string) (*event.Host, error)
+	KernelUpgrades(ctx context.Context) ([]event.KernelUpgrade, error)
 }
 
 // handleListEvents lists stored events, newest first. A query parameter

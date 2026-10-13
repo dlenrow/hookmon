@@ -4,6 +4,7 @@ import type {
   EntryStatus,
   Host,
   EventQueryParams,
+  KernelUpgrade,
   LearningState,
   Scope,
   BulkDecision,
@@ -225,6 +226,12 @@ export async function decidePolicies(
     method: 'POST',
     body: JSON.stringify({ ids, decision, scope }),
   });
+}
+
+// --- Kernel upgrades ---
+
+export async function getKernelUpgrades(): Promise<KernelUpgrade[]> {
+  return apiFetch<KernelUpgrade[]>('/kernel-upgrades');
 }
 
 // --- Learning mode (a quiet period: first sightings are listed but not sent to alert connectors) ---

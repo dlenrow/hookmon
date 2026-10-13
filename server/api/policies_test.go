@@ -82,6 +82,9 @@ func (s *polStore) UpdateAllowlistEntry(_ context.Context, e *event.AllowlistEnt
 	return fmt.Errorf("allowlist entry %s: %w", e.ID, store.ErrNotFound)
 }
 func (s *polStore) GetHosts(context.Context) ([]*event.Host, error) { return nil, nil }
+func (s *polStore) KernelUpgrades(context.Context) ([]event.KernelUpgrade, error) {
+	return nil, nil
+}
 func (s *polStore) GetHost(_ context.Context, id string) (*event.Host, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

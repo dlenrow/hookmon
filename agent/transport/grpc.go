@@ -86,6 +86,10 @@ type GRPCTransport struct {
 	// sensors returns the sensor-registry snapshot each heartbeat carries.
 	// Set before Run; nil sends heartbeats without one.
 	sensors func() []event.SensorHealth
+
+	// KernelRelease is the running kernel's release string (uname -r).
+	// Set before Run on Linux; empty on other platforms.
+	KernelRelease string
 }
 
 // session is one ClientConn and the event stream opened on it.
@@ -280,6 +284,7 @@ func (t *GRPCTransport) send(stream hookmonv1.AgentService_StreamEventsClient, m
 			AgentVersion:  version.Version,
 			EventsSent:    t.eventsSent,
 			UptimeSeconds: uint64(time.Since(t.startTime).Seconds()),
+			KernelRelease: t.KernelRelease,
 		}
 		if t.sensors != nil {
 			hb.Sensors = sensorsToProto(t.sensors())

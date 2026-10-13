@@ -313,6 +313,15 @@ export interface ConnectorStatus {
   queued: number;
 }
 
+/** GET /api/v1/kernel-upgrades: kernel changes with correlated BPF entries. */
+export interface KernelUpgrade {
+  prev_kernel: string;
+  new_kernel: string;
+  hosts: string[];
+  matched_ids: string[];
+  unmatched_ids: string[];
+}
+
 /** GET /api/v1/settings. It holds no secrets. */
 export interface ServerSettings {
   version: string;

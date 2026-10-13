@@ -81,6 +81,9 @@ func (s *Server) Router(apiTokens []string, dashboard http.Handler) http.Handler
 		r.Get("/api/v1/hosts", s.handleListHosts)
 		r.Get("/api/v1/hosts/{id}", s.handleGetHost)
 
+		// Kernel upgrades
+		r.Get("/api/v1/kernel-upgrades", s.handleKernelUpgrades)
+
 		// Server settings for the dashboard (no secrets)
 		r.Get("/api/v1/settings", s.handleSettings)
 	})

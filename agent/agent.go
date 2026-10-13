@@ -131,6 +131,7 @@ func New(cfg *config.AgentConfig, logger *zap.Logger) *Agent {
 	} else {
 		gt := transport.NewGRPCTransport(cfg, logger, transport.DefaultRetryConfig())
 		gt.SetSensorSource(func() []event.SensorHealth { return sensorHealth(reg) })
+		gt.KernelRelease = kernelRelease()
 		t = gt
 	}
 

@@ -424,6 +424,10 @@ type Host struct {
 	LastHeartbeat time.Time  `json:"last_heartbeat"`
 	LastEventAt   *time.Time `json:"last_event_at,omitempty"`
 
+	KernelRelease     string     `json:"kernel_release,omitempty"`
+	PrevKernelRelease string     `json:"prev_kernel_release,omitempty"`
+	KernelChangedAt   *time.Time `json:"kernel_changed_at,omitempty"`
+
 	// Sensors is the sensor-registry snapshot from the host's latest
 	// heartbeat.
 	Sensors []SensorHealth `json:"sensors,omitempty"`
@@ -443,7 +447,20 @@ type HostHeartbeat struct {
 	HostID string
 	// ReceivedAt is the server's clock when the heartbeat arrived. The bus's
 	// own timestamp is not used, so a host's clock cannot hold it online.
-	ReceivedAt   time.Time
-	AgentVersion string
-	Sensors      []SensorHealth
+	ReceivedAt    time.Time
+	AgentVersion  string
+	KernelRelease string
+	Sensors       []SensorHealth
+}
+
+// KernelUpgrade groups PENDING BPF entries that appeared after a kernel
+// change on one or more hosts. Entries whose prog_name + prog_type match
+// an existing APPROVED entry are "matched" (the same program under a new
+// kernel tag); the rest are "unmatched" and need individual review.
+type KernelUpgrade struct {
+	PrevKernel   string   `json:"prev_kernel"`
+	NewKernel    string   `json:"new_kernel"`
+	Hosts        []string `json:"hosts"`
+	MatchedIDs   []string `json:"matched_ids"`
+	UnmatchedIDs []string `json:"unmatched_ids"`
 }

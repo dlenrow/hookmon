@@ -7,9 +7,10 @@ import type {
   DecideResult,
   EventType,
   Host,
+  KernelUpgrade,
   LearningWindow,
 } from '../api/types';
-import { getPolicies, getHosts, getLearning, decidePolicies } from '../api/client';
+import { getPolicies, getHosts, getLearning, decidePolicies, getKernelUpgrades } from '../api/client';
 import { EVENT_TYPE_CLASS } from '../components/EventCard';
 import { formatTimestamp, formatRelativeTime, bpfProgTypeName, truncateHash } from '../utils';
 
@@ -176,6 +177,7 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
   const [pending, setPending] = useState<AllowlistEntry[]>([]);
   const [hosts, setHosts] = useState<Record<string, Host>>({});
   const [windows, setWindows] = useState<LearningWindow[]>([]);
+  const [kernelUpgrades, setKernelUpgrades] = useState<KernelUpgrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [arrivalsAtLoad, setArrivalsAtLoad] = useState(arrivals);
@@ -203,16 +205,18 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
     setError(null);
     const seen = arrivalsRef.current;
     try {
-      const [entries, hostList, learning] = await Promise.all([
+      const [entries, hostList, learning, upgrades] = await Promise.all([
         getPolicies('PENDING'),
         getHosts(),
         getLearning(),
+        getKernelUpgrades().catch(() => [] as KernelUpgrade[]),
       ]);
       setPending(entries || []);
       const byID: Record<string, Host> = {};
       for (const h of hostList || []) byID[h.id] = h;
       setHosts(byID);
       setWindows(learning.windows || []);
+      setKernelUpgrades(upgrades || []);
       setArrivalsAtLoad(seen);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load new hooks');
@@ -410,6 +414,54 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
             )}
           </div>
         </div>
+
+        {kernelUpgrades.length > 0 && (
+          <div style={{ marginBottom: '16px' }}>
+            {kernelUpgrades.map((ku) => {
+              const total = (ku.matched_ids?.length || 0) + (ku.unmatched_ids?.length || 0);
+              const matched = ku.matched_ids?.length || 0;
+              const unmatched = ku.unmatched_ids?.length || 0;
+              return (
+                <div key={`${ku.prev_kernel}-${ku.new_kernel}`} className="card" style={{ marginBottom: '8px' }} data-testid="kernel-upgrade">
+                  <div className="card-body" style={{ fontSize: '13px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div>
+                        <strong>Kernel {ku.prev_kernel} → {ku.new_kernel}</strong> on{' '}
+                        {ku.hosts?.length || 0} host{(ku.hosts?.length || 0) === 1 ? '' : 's'}.{' '}
+                        {total} program{total === 1 ? ' has a' : 's have'} new tag{total === 1 ? '' : 's'}.{' '}
+                        {matched > 0 && (
+                          <span style={{ color: 'var(--success)' }}>
+                            {matched} match{matched === 1 ? 'es' : ''} program{matched === 1 ? '' : 's'} allowed under the previous kernel.{' '}
+                          </span>
+                        )}
+                        {unmatched > 0 && (
+                          <span style={{ color: 'var(--severity-alert)' }}>
+                            {unmatched} {unmatched === 1 ? 'does' : 'do'} not match: review.
+                          </span>
+                        )}
+                      </div>
+                      {matched > 0 && (
+                        <button
+                          className="btn btn-primary btn-sm"
+                          disabled={busy}
+                          onClick={() => {
+                            const entries = pending.filter((e) => ku.matched_ids?.includes(e.id));
+                            if (entries.length > 0) {
+                              setSummary(null);
+                              setConfirm({ decision: 'approve', scope: 'fleet', entries });
+                            }
+                          }}
+                        >
+                          Allow {matched} matched
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {newArrivals > 0 && (
           <div className="card notice-card" data-testid="new-arrivals">

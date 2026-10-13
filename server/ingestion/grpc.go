@@ -42,8 +42,10 @@ type HeartbeatRecorder interface {
 
 // HeartbeatChange is a host's state from before a heartbeat was recorded.
 type HeartbeatChange struct {
-	PrevStatus    event.HostStatus
-	PrevHeartbeat time.Time
+	PrevStatus        event.HostStatus
+	PrevHeartbeat     time.Time
+	PrevKernelRelease string
+	KernelChanged     bool
 }
 
 // HostLookup is implemented by a Store that can return an enrolled host.
@@ -482,10 +484,11 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentit
 	// Persist heartbeat to the store.
 	if s.store != nil {
 		rec := &event.HostHeartbeat{
-			HostID:       hostID,
-			ReceivedAt:   now,
-			AgentVersion: hb.AgentVersion,
-			Sensors:      protoToSensors(hb.Sensors),
+			HostID:        hostID,
+			ReceivedAt:    now,
+			AgentVersion:  hb.AgentVersion,
+			KernelRelease: hb.KernelRelease,
+			Sensors:       protoToSensors(hb.Sensors),
 		}
 		if recorder, ok := s.store.(HeartbeatRecorder); ok {
 			change, err := recorder.RecordHeartbeat(ctx, rec)
