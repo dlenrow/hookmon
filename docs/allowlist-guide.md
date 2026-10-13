@@ -496,6 +496,12 @@ In a **learned key**, `exe_hash` is part of the key like any other value. An emp
 
 In a **hand-written entry**, it is the other way round: leaving `exe_hash` empty means any binary. Combine `exe_path` with `exe_hash` when you can.
 
+### Denied BPF Programs Alert on Every Inventory Scan
+
+A REJECTED or DENY entry matches events that carry its key or criteria. The BPF inventory sensor reports every loaded program every 5 minutes, and the policy engine evaluates each inventory event against the allowlist. A denied BPF program that is still loaded in the kernel produces an alert on every scan — roughly 288 per day per host — until the program is actually removed.
+
+This is intentional: a denied program is one you decided should not be there, and a repeating alert is the only pressure HookMon can apply, since it has no enforcement mode. To stop the alerts, remove the program (unload it, restart the service that loaded it, or reboot the host). Disabling the REJECTED entry silences it but leaves the program unmonitored — it will not be proposed again because the key is remembered.
+
 ### Also Watch For
 
 - **`enabled` defaults to false.** `POST /api/v1/policies` without `"enabled": true` creates an entry that matches nothing.
