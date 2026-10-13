@@ -12,6 +12,8 @@ type Transport interface {
 	Run(ctx context.Context) error
 	SendEvent(evt *event.HookEvent) error
 	SendHeartbeat() error
+	SendShutdown(reason string) error
+	SendMarker() error
 	IsConnected() bool
 	Close() error
 }

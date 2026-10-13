@@ -23,7 +23,24 @@ message AgentMessage {
   oneof payload {
     HookEvent event = 1;
     Heartbeat heartbeat = 2;
+    ShutdownNotice shutdown = 3;
+    Marker marker = 4;
   }
+}
+
+// ShutdownNotice is sent when the bus is stopping cleanly (systemctl stop,
+// reboot, suspend). The server records it and does not raise AGENT_OFFLINE
+// until the bus has been silent longer than expected for that reason.
+message ShutdownNotice {
+  string reason = 1;  // "shutdown", "suspend", "restart"
+}
+
+// Marker is an end-to-end liveness signal sent every 60 seconds through the
+// same gRPC stream that carries events. The server records when it arrives.
+// Missing for 3 minutes on a host that has not announced a shutdown means
+// the bus is wedged.
+message Marker {
+  google.protobuf.Timestamp timestamp = 1;
 }
 
 message ServerMessage {

@@ -74,8 +74,11 @@ type StatusSink interface {
 
 // hostState tracks per-host liveness metadata protected by IngestionServer's mutex.
 type hostState struct {
-	lastHeartbeat time.Time
-	agentVersion  string
+	lastHeartbeat  time.Time
+	agentVersion   string
+	shutdownReason string
+	shutdownAt     time.Time
+	lastMarker     time.Time
 }
 
 // broadcastDropLogEvery bounds how often a full broadcast channel is logged.
@@ -267,6 +270,12 @@ func (s *IngestionServer) StreamEvents(stream hookmonv1.AgentService_StreamEvent
 
 		case msg.GetHeartbeat() != nil:
 			s.handleHeartbeat(stream.Context(), id, msg.GetHeartbeat())
+
+		case msg.GetShutdown() != nil:
+			s.handleShutdown(stream.Context(), id, msg.GetShutdown())
+
+		case msg.GetMarker() != nil:
+			s.handleMarker(id)
 
 		default:
 			s.logger.Warn("received empty agent message", zap.String("peer", peerAddr))
@@ -473,12 +482,17 @@ func (s *IngestionServer) handleHeartbeat(ctx context.Context, id *streamIdentit
 
 	now := s.now().UTC()
 
-	// Update in-memory tracker.
+	// Update in-memory tracker. A heartbeat clears any shutdown announcement.
 	s.hostMu.Lock()
-	s.hostTracker[hostID] = &hostState{
+	prev := s.hostTracker[hostID]
+	st := &hostState{
 		lastHeartbeat: now,
 		agentVersion:  hb.AgentVersion,
 	}
+	if prev != nil {
+		st.lastMarker = prev.lastMarker
+	}
+	s.hostTracker[hostID] = st
 	s.hostMu.Unlock()
 
 	// Persist heartbeat to the store.
@@ -561,6 +575,64 @@ func (s *IngestionServer) hostRecovered(ctx context.Context, id *streamIdentity,
 		s.statusSink.Dispatch(evt)
 	}
 	s.Publish(evt)
+}
+
+func (s *IngestionServer) handleShutdown(_ context.Context, id *streamIdentity, sd *hookmonv1.ShutdownNotice) {
+	hostID := id.hostID
+	if hostID == "" {
+		return
+	}
+	now := s.now().UTC()
+	s.hostMu.Lock()
+	st, ok := s.hostTracker[hostID]
+	if !ok {
+		st = &hostState{}
+		s.hostTracker[hostID] = st
+	}
+	st.shutdownReason = sd.GetReason()
+	st.shutdownAt = now
+	s.hostMu.Unlock()
+
+	s.logger.Info("host announced shutdown",
+		zap.String("host_id", hostID),
+		zap.String("reason", sd.GetReason()),
+	)
+}
+
+func (s *IngestionServer) handleMarker(id *streamIdentity) {
+	hostID := id.hostID
+	if hostID == "" {
+		return
+	}
+	now := s.now().UTC()
+	s.hostMu.Lock()
+	st, ok := s.hostTracker[hostID]
+	if !ok {
+		st = &hostState{}
+		s.hostTracker[hostID] = st
+	}
+	st.lastMarker = now
+	s.hostMu.Unlock()
+}
+
+// HostShutdownAnnounced returns true if the host announced a clean shutdown
+// and has not heartbeated since.
+func (s *IngestionServer) HostShutdownAnnounced(hostID string) bool {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	st := s.hostTracker[hostID]
+	return st != nil && st.shutdownReason != ""
+}
+
+// LastMarker returns the time of the last end-to-end marker from a host, or zero.
+func (s *IngestionServer) LastMarker(hostID string) time.Time {
+	s.hostMu.RLock()
+	defer s.hostMu.RUnlock()
+	st := s.hostTracker[hostID]
+	if st == nil {
+		return time.Time{}
+	}
+	return st.lastMarker
 }
 
 // protoToSensors converts a heartbeat's sensor snapshot. Nil entries are

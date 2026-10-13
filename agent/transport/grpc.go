@@ -35,10 +35,20 @@ var (
 	errQueueFull    = errors.New("send queue full")
 )
 
-// outbound is one queued message. A nil evt is a heartbeat, which the sender
-// builds at send time so its counters are current.
+type outboundKind int
+
+const (
+	outboundEvent    outboundKind = iota
+	outboundHeartbeat
+	outboundShutdown
+	outboundMarker
+)
+
+// outbound is one queued message.
 type outbound struct {
-	evt *event.HookEvent
+	kind     outboundKind
+	evt      *event.HookEvent
+	shutdown string // reason, for outboundShutdown
 }
 
 // GRPCTransport streams events to the hookmon-server over mTLS gRPC.
@@ -277,7 +287,8 @@ func (t *GRPCTransport) sendLoop(ctx context.Context, s *session) error {
 }
 
 func (t *GRPCTransport) send(stream hookmonv1.AgentService_StreamEventsClient, m outbound) error {
-	if m.evt == nil {
+	switch m.kind {
+	case outboundHeartbeat:
 		hb := &hookmonv1.Heartbeat{
 			HostId:        t.cfg.HostID,
 			Timestamp:     timestamppb.Now(),
@@ -292,22 +303,35 @@ func (t *GRPCTransport) send(stream hookmonv1.AgentService_StreamEventsClient, m
 		return stream.Send(&hookmonv1.AgentMessage{
 			Payload: &hookmonv1.AgentMessage_Heartbeat{Heartbeat: hb},
 		})
-	}
 
-	// Track the event before sending it so its ack cannot arrive first. If
-	// Send fails, it stays in inflight and serve writes it to the fallback log.
-	t.inflightMu.Lock()
-	t.inflight[m.evt.ID] = m.evt
-	t.inflightMu.Unlock()
+	case outboundShutdown:
+		return stream.Send(&hookmonv1.AgentMessage{
+			Payload: &hookmonv1.AgentMessage_Shutdown{
+				Shutdown: &hookmonv1.ShutdownNotice{Reason: m.shutdown},
+			},
+		})
 
-	msg := &hookmonv1.AgentMessage{
-		Payload: &hookmonv1.AgentMessage_Event{Event: eventToProto(m.evt)},
+	case outboundMarker:
+		return stream.Send(&hookmonv1.AgentMessage{
+			Payload: &hookmonv1.AgentMessage_Marker{
+				Marker: &hookmonv1.Marker{Timestamp: timestamppb.Now()},
+			},
+		})
+
+	default: // outboundEvent
+		t.inflightMu.Lock()
+		t.inflight[m.evt.ID] = m.evt
+		t.inflightMu.Unlock()
+
+		msg := &hookmonv1.AgentMessage{
+			Payload: &hookmonv1.AgentMessage_Event{Event: eventToProto(m.evt)},
+		}
+		if err := stream.Send(msg); err != nil {
+			return err
+		}
+		t.eventsSent++
+		return nil
 	}
-	if err := stream.Send(msg); err != nil {
-		return err
-	}
-	t.eventsSent++
-	return nil
 }
 
 // recvLoop drains server messages so the server's ack sends never stall on
@@ -373,7 +397,7 @@ func (t *GRPCTransport) enqueue(m outbound) error {
 // SendEvent queues an event for the server, or writes it to the fallback log
 // if the stream is down or the queue is full.
 func (t *GRPCTransport) SendEvent(evt *event.HookEvent) error {
-	err := t.enqueue(outbound{evt: evt})
+	err := t.enqueue(outbound{kind: outboundEvent, evt: evt})
 	if err == nil {
 		return nil
 	}
@@ -386,7 +410,17 @@ func (t *GRPCTransport) SendEvent(evt *event.HookEvent) error {
 // SendHeartbeat queues a heartbeat for the server. It returns an error if the
 // stream is down or the queue is full.
 func (t *GRPCTransport) SendHeartbeat() error {
-	return t.enqueue(outbound{})
+	return t.enqueue(outbound{kind: outboundHeartbeat})
+}
+
+// SendShutdown sends a clean shutdown notice to the server.
+func (t *GRPCTransport) SendShutdown(reason string) error {
+	return t.enqueue(outbound{kind: outboundShutdown, shutdown: reason})
+}
+
+// SendMarker sends an end-to-end liveness marker to the server.
+func (t *GRPCTransport) SendMarker() error {
+	return t.enqueue(outbound{kind: outboundMarker})
 }
 
 // flushInflight writes events the server never acked to the fallback log,
@@ -415,7 +449,7 @@ func (t *GRPCTransport) drainQueue() {
 	for {
 		select {
 		case m := <-t.queue:
-			if m.evt != nil {
+			if m.kind == outboundEvent && m.evt != nil {
 				t.writeFallback(m.evt)
 			}
 		default:

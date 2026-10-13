@@ -4,81 +4,44 @@ evaluation_interval: 1m
 tests:
   - interval: 1m
     input_series:
-      # Collector healthy throughout, so HookMonCollectorSilent stays quiet.
+      # Collector healthy throughout.
       - series: 'push_time_seconds{job="hookmon-collector"}'
-        values: '0+60x1600'
-      # h1: quiet host, no events ever -> fires
-      - series: 'up{job="hookmon-bus",instance="h1"}'
-        values: '1x1600'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h1",sensor="bpf_syscall"}'
-        values: '1x1600'
-      # h2: one event from a new comm at 20h (new series at 1) -> no fire
-      - series: 'up{job="hookmon-bus",instance="h2"}'
-        values: '1x1600'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h2",sensor="bpf_syscall"}'
-        values: '1x1600'
-      - series: 'hookmon_events_total{job="hookmon-bus",instance="h2",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
-        values: '_x1200 1x400'
-      # h3: one event at 2h, none since -> fires once it leaves the window
-      - series: 'up{job="hookmon-bus",instance="h3"}'
-        values: '1x1600'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h3",sensor="bpf_syscall"}'
-        values: '1x1600'
-      - series: 'hookmon_events_total{job="hookmon-bus",instance="h3",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
-        values: '_x120 1x1480'
-      # h4: only 12h of history -> no fire
-      - series: 'up{job="hookmon-bus",instance="h4"}'
-        values: '_x870 1x730'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h4",sensor="bpf_syscall"}'
-        values: '_x870 1x730'
-      # h5: scrape gap at 20h, counter unchanged -> fires
-      - series: 'up{job="hookmon-bus",instance="h5"}'
-        values: '1x1199 0x10 1x390'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h5",sensor="bpf_syscall"}'
-        values: '1x1199 _x10 1x390'
-      - series: 'hookmon_events_total{job="hookmon-bus",instance="h5",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
-        values: '5x1199 _x10 5x390'
-      # h6: bus restart at 20h (counter reset), one event after -> no fire
-      - series: 'up{job="hookmon-bus",instance="h6"}'
-        values: '1x1199 0x5 1x395'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h6",sensor="bpf_syscall"}'
-        values: '1x1199 _x5 1x395'
-      - series: 'hookmon_events_total{job="hookmon-bus",instance="h6",event_type="BPF_LOAD",severity="WARN",comm="foo"}'
-        values: '1x1199 _x60 1x340'
-      # h7: one sensor dead, no events -> no fire (HookMonSensorDead covers it)
-      - series: 'up{job="hookmon-bus",instance="h7"}'
-        values: '1x1600'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h7",sensor="bpf_syscall"}'
-        values: '1x1600'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h7",sensor="ptrace_monitor"}'
-        values: '0x1600'
-      # h8: only the periodic BPF inventory, no detections -> fires
-      - series: 'up{job="hookmon-bus",instance="h8"}'
-        values: '1x1600'
-      - series: 'hookmon_sensor_alive{job="hookmon-bus",instance="h8",sensor="bpf_syscall"}'
-        values: '1x1600'
-      - series: 'hookmon_events_total{job="hookmon-bus",instance="h8",event_type="BPF_INVENTORY",severity="INFO",comm=""}'
-        values: '0+1x1600'
+        values: '0+60x200'
+      # h1: healthy host, reachable and all sensors alive.
+      - series: 'hookmon_fleet_host_reachable{host="h1"}'
+        values: '1x200'
+      - series: 'hookmon_fleet_sensor_alive{host="h1",sensor="bpf_syscall"}'
+        values: '1x200'
+      # h2: host goes unreachable at 5m.
+      - series: 'hookmon_fleet_host_reachable{host="h2"}'
+        values: '1x5 0x195'
+      - series: 'hookmon_fleet_sensor_alive{host="h2",sensor="bpf_syscall"}'
+        values: '1x5 0x195'
+      # h3: host reachable but sensor dead at 5m.
+      - series: 'hookmon_fleet_host_reachable{host="h3"}'
+        values: '1x200'
+      - series: 'hookmon_fleet_sensor_alive{host="h3",sensor="bpf_syscall"}'
+        values: '1x5 0x195'
     alert_rule_test:
-      - eval_time: 23h50m
-        alertname: HookMonNoEvents24h
+      # At 3m: nothing should fire yet (for durations not met).
+      - eval_time: 3m
+        alertname: HookMonHostUnreachable
         exp_alerts: []
-      - eval_time: 26h30m
-        alertname: HookMonNoEvents24h
+      # At 7m: h2 unreachable for 2m -> fires.
+      - eval_time: 7m
+        alertname: HookMonHostUnreachable
         exp_alerts:
-          - exp_labels: {severity: warning, instance: h1}
+          - exp_labels: {severity: critical, host: h2}
             exp_annotations:
-              summary: "No HookMon events from h1 in 24 hours"
-              description: "Every sensor on h1 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
-          - exp_labels: {severity: warning, instance: h3}
+              summary: "HookMon sensor bus unreachable on h2"
+              description: "The HookMon sensor bus on h2 has not responded to polling for 2 minutes. This may indicate the sensor bus was killed or the host is down. Investigate immediately.\n"
+      # At 6m: h3 sensor dead for 1m and host reachable -> fires.
+      - eval_time: 6m
+        alertname: HookMonSensorDead
+        exp_alerts:
+          - exp_labels: {severity: high, host: h3, sensor: bpf_syscall}
             exp_annotations:
-              summary: "No HookMon events from h3 in 24 hours"
-              description: "Every sensor on h3 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
-          - exp_labels: {severity: warning, instance: h5}
-            exp_annotations:
-              summary: "No HookMon events from h5 in 24 hours"
-              description: "Every sensor on h5 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
-          - exp_labels: {severity: warning, instance: h8}
-            exp_annotations:
-              summary: "No HookMon events from h8 in 24 hours"
-              description: "Every sensor on h8 reports alive, but the bus has recorded no events for 24 hours. Events may be suppressed between the sensors and the bus. A quiet host (a dormant standby, for example) can also cause this. Check the host's role before escalating.\n"
+              summary: "HookMon sensor bpf_syscall dead on h3"
+              description: "Sensor bpf_syscall on h3 has stopped sending heartbeats while the host is reachable. This sensor is no longer detecting its class of injection events.\n"
+      # h2's sensor is also dead, but SensorDead should NOT fire because h2 is unreachable.
+      # (The rule excludes hosts where hookmon_fleet_host_reachable != 1.)

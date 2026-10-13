@@ -31,10 +31,11 @@ func DefaultWatchdogConfig() WatchdogConfig {
 // Watchdog monitors host heartbeats and generates AGENT_OFFLINE alerts
 // when hosts go unresponsive.
 type Watchdog struct {
-	cfg    WatchdogConfig
-	store  WatchdogStore
-	alerts AlertSink
-	logger *zap.Logger
+	cfg      WatchdogConfig
+	store    WatchdogStore
+	alerts   AlertSink
+	shutdown ShutdownChecker
+	logger   *zap.Logger
 }
 
 // WatchdogStore is the storage interface the watchdog requires.
@@ -51,6 +52,11 @@ type AlertSink interface {
 	Dispatch(evt *event.HookEvent)
 }
 
+// ShutdownChecker knows whether a host announced a clean shutdown.
+type ShutdownChecker interface {
+	HostShutdownAnnounced(hostID string) bool
+}
+
 // NewWatchdog creates a new heartbeat watchdog.
 func NewWatchdog(cfg WatchdogConfig, store WatchdogStore, alerts AlertSink, logger *zap.Logger) *Watchdog {
 	return &Watchdog{
@@ -59,6 +65,12 @@ func NewWatchdog(cfg WatchdogConfig, store WatchdogStore, alerts AlertSink, logg
 		alerts: alerts,
 		logger: logger,
 	}
+}
+
+// SetShutdownChecker gives the watchdog access to shutdown announcements so
+// it can suppress AGENT_OFFLINE for hosts that stopped cleanly.
+func (w *Watchdog) SetShutdownChecker(sc ShutdownChecker) {
+	w.shutdown = sc
 }
 
 // Run starts the watchdog loop. Blocks until the context is cancelled.
@@ -93,6 +105,12 @@ func (w *Watchdog) check(ctx context.Context) {
 	for _, host := range staleHosts {
 		if host.Status == event.HostUnresponsive || host.Status == event.HostOffline {
 			continue // Already marked
+		}
+
+		if w.shutdown != nil && w.shutdown.HostShutdownAnnounced(host.ID) {
+			w.logger.Debug("host announced shutdown, skipping AGENT_OFFLINE",
+				zap.String("host_id", host.ID))
+			continue
 		}
 
 		// Mark the host unresponsive only if no heartbeat arrived since the

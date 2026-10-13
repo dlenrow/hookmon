@@ -394,6 +394,25 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
       </div>
 
       <div className="page-body">
+        {!loading && (() => {
+          const hostList = Object.values(hosts);
+          const total = hostList.length;
+          const online = hostList.filter(h => h.status === 'ONLINE').length;
+          const offline = total - online;
+          return (
+            <div className="card" style={{ marginBottom: '16px' }}>
+              <div className="card-body" style={{ fontSize: '13px', color: offline > 0 ? 'var(--severity-alert)' : 'var(--text-muted)' }} data-testid="fleet-health">
+                {total === 0
+                  ? 'No hosts enrolled.'
+                  : offline === 0
+                    ? `${total} host${total === 1 ? '' : 's'}, all sensors healthy.`
+                    : `${total} host${total === 1 ? '' : 's'}. ${offline} offline or unresponsive.`}
+                {pending.length > 0 && ` ${pending.length} new hook${pending.length === 1 ? '' : 's'} to review.`}
+              </div>
+            </div>
+          );
+        })()}
+
         <div className="card" style={{ marginBottom: '16px' }}>
           <div className="card-body" style={{ fontSize: '13px' }} data-testid="quiet-status">
             {active.length === 0 ? (
