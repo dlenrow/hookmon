@@ -14,7 +14,7 @@ import { EVENT_TYPE_CLASS } from '../components/EventCard';
 import { formatTimestamp, formatRelativeTime, bpfProgTypeName, truncateHash } from '../utils';
 
 /** Hooks first seen within this gap of each other form one batch, such as one software update. */
-const BATCH_GAP_MS = 15 * 60 * 1000;
+const BATCH_GAP_MS = 60 * 60 * 1000;
 /** A row's "same time" filter covers this long on each side of its first sighting. */
 const SAME_TIME_MS = 10 * 60 * 1000;
 /** The confirmation lists this many of the selected hooks by name. */
@@ -85,19 +85,46 @@ interface Batch {
   /** Earliest and latest first sighting in the batch, in ms. */
   start: number;
   end: number;
+  /** Union of all hosts in the batch. */
+  hosts: Set<string>;
 }
 
-/** Splits rows sorted newest first into runs whose first sightings are close together. */
+function hostsOf(e: AllowlistEntry): Set<string> {
+  return new Set(e.learned?.hosts || []);
+}
+
+function hostsOverlap(a: Set<string>, b: Set<string>): boolean {
+  if (a.size === 0 || b.size === 0) return true;
+  for (const h of a) if (b.has(h)) return true;
+  return false;
+}
+
+/**
+ * Splits rows sorted newest first into batches whose first sightings are
+ * close together AND whose host sets overlap, so entries from the same
+ * software update cluster together but unrelated events on disjoint hosts
+ * do not.
+ */
 function batches(rows: AllowlistEntry[]): Batch[] {
   const out: Batch[] = [];
   for (const row of rows) {
     const t = firstSeenMs(row);
-    const last = out[out.length - 1];
-    if (last && last.start - t <= BATCH_GAP_MS) {
-      last.rows.push(row);
-      last.start = t;
-    } else {
-      out.push({ rows: [row], start: t, end: t });
+    const rHosts = hostsOf(row);
+    let placed = false;
+    for (let i = out.length - 1; i >= 0; i--) {
+      const b = out[i];
+      if (t > b.end + BATCH_GAP_MS) break;
+      if (b.start - t <= BATCH_GAP_MS && hostsOverlap(rHosts, b.hosts)) {
+        b.rows.push(row);
+        b.start = Math.min(b.start, t);
+        b.end = Math.max(b.end, t);
+        for (const h of rHosts) b.hosts.add(h);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      out.push({ rows: [row], start: t, end: t, hosts: rHosts });
     }
   }
   return out;
@@ -569,7 +596,6 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
                       {groups.map((g) => {
                         const ids = g.rows.map((r) => r.id);
                         const allIn = ids.every((id) => selected.has(id));
-                        const batchHosts = new Set(g.rows.flatMap((r) => r.learned?.hosts || []));
                         return [
                           g.rows.length > 1 && (
                             <tr key={`batch-${ids[0]}`} className="batch-row" data-testid="batch-row">
@@ -585,7 +611,7 @@ export function NewHooks({ onChanged, arrivals = 0 }: NewHooksProps) {
                               <td colSpan={7}>
                                 {g.rows.length} new hooks first seen {formatTimestamp(new Date(g.start).toISOString())}
                                 {g.end !== g.start && ` to ${formatTimestamp(new Date(g.end).toISOString())}`}, on{' '}
-                                {batchHosts.size} host{batchHosts.size === 1 ? '' : 's'}
+                                {g.hosts.size} host{g.hosts.size === 1 ? '' : 's'}
                               </td>
                             </tr>
                           ),
